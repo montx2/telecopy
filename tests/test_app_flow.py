@@ -232,6 +232,26 @@ def test_fluxo_copiar_canal() -> None:
     check(any(s["kind"] == "file" for s in client.sent), "arquivo enviado")
 
 
+def test_fluxo_copiar_canal_protegido() -> None:
+    origem = channel(-101, "Matemática Online 2026")
+    origem.noforwards = True
+    destino = channel(-201, "Canal Destino")
+    mensagens = [
+        text_message(1, "aula 01"),
+        document_message(2, "lista_exercicios.pdf"),
+    ]
+    app, client = build_app(mensagens, [origem, destino])
+    app.config.delay = 0.1
+    app.config.workers = 1
+    app.config.forward_mode = True
+
+    feed("/", "Matemática", "1", "1", "/", "Destino", "1", "0", "n", "s")
+
+    asyncio.run(_guard(app._menu_copy()))
+    check(len(client.sent) == 2, f"canal protegido copiado pelo menu ({len(client.sent)})")
+    check(not client.forwarded, "usa reenvio em vez de forward em canal protegido")
+
+
 def test_fluxo_cria_destino_e_reproduz_forum() -> None:
     origem = teardown_channel(channel(-100, "Fórum Origem", forum=True, broadcast=False))
     mensagens = [

@@ -844,12 +844,6 @@ class App:
             return
         self._show_entity(source, t("entity.source"))
 
-        if getattr(source, "noforwards", False):
-            ui.warn(t("copy.source_protected"))
-            ui.pause()
-            self._pop()
-            return
-
         ui.menu([
             ("1", t("copy.dest.existing"), t("copy.dest.existing.desc")),
             ("2", t("copy.dest.create"), t("copy.dest.create.desc")),
@@ -938,6 +932,9 @@ class App:
 
         filter_code = await self._pick_filter() or "all"
         config = self._copy_options()
+        if getattr(source, "noforwards", False) and config.forward_mode:
+            config.forward_mode = False
+            ui.info(t("copy.source_protected"))
         if topic_map or clone_plan is not None:
             # Repetições entre tópicos e respostas são conteúdo legítimo.
             # Uma assinatura alteraria o texto original; hashes globais podem

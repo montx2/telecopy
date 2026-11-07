@@ -521,10 +521,9 @@ class Copier:
         if source_topic:
             topic_roots.add(int(source_topic))
 
-        if getattr(source, "noforwards", False):
-            blocked = TransferStats(errors=1, first_error=t("copy.source_protected"))
-            print(f"\n  {C.RED}✗{C.RST}  {blocked.first_error}", flush=True)
-            return blocked.as_result()
+        if getattr(source, "noforwards", False) and forward:
+            forward = False
+            print(f"\n  {C.CYAN}·{C.RST}  {t('copy.source_protected')}", flush=True)
 
         destination_error = await self._destination_error(dest)
         if destination_error:
@@ -812,14 +811,56 @@ class Copier:
 
     # ── Encaminhamento (rápido) ─────────────────────────────────────────────
 
+    async def _copy_single_item(
+        self,
+        index: int,
+        item: QueueItem,
+        source: Any,
+        dest: Any,
+        source_id: int,
+        dest_id: int,
+        item_topic: Optional[int],
+        reply_to: Optional[int],
+        stats: TransferStats,
+        progress: ProgressDisplay,
+    ) -> None:
+        messages = item if isinstance(item, list) else [item]
+        if self._is_duplicate(messages, dest_id):
+            stats.duplicates += len(messages)
+            stats.skipped += len(messages)
+            for msg in messages:
+                self.repo.mark_processed(source_id, msg.id, None, dest_id)
+                self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED)
+            return
+        payload = await self._prepare(index, item, progress, source=source)
+        try:
+            payload.update({
+                "dest": dest,
+                "dest_topic": item_topic,
+                "reply_to": reply_to,
+            })
+            for retry in range(3):
+                try:
+                    self._check_limit()
+                    await self._send(payload, source_id, dest_id, stats, progress)
+                    return
+                except FloodWaitError as exc:
+                    if retry < 2:
+                        await self._handle_flood(exc)
+                        continue
+                    raise
+        finally:
+            self._cleanup(payload.get("plan", []))
+
     async def _forward_loop(self, items, source, dest, source_id, dest_id,
                             dest_topic, topic_map, stats: TransferStats,
                             progress: ProgressDisplay) -> None:
         last_error_key = None
         consecutive_errors = 0
         first_failure_shown = False
+        force_copy_fallback = bool(getattr(source, "noforwards", False))
 
-        for item in items:
+        for index, item in enumerate(items):
             if self._stop:
                 break
             messages = item if isinstance(item, list) else [item]
@@ -835,6 +876,8 @@ class Copier:
 
             error: Optional[Exception] = None
             item_topic = None
+            copied_via_fallback = False
+            errors_before_item = stats.errors
             for retry in range(3):
                 try:
                     # A lista de IDs preserva o agrupamento reconhecido pelo
@@ -842,7 +885,14 @@ class Copier:
                     # sem `drop_author`, o rótulo de encaminhamento é mantido.
                     item_topic = self._destination_topic(item, dest_topic, topic_map)
                     reply_to = self._reply_target(messages[0], source_id, dest_id, topic_map)
-                    sent_ids = await self._forward_item(source, dest, ids, item_topic, reply_to)
+                    if force_copy_fallback or any(getattr(m, "noforwards", False) for m in messages):
+                        copied_via_fallback = True
+                        await self._copy_single_item(
+                            index, item, source, dest, source_id, dest_id,
+                            item_topic, reply_to, stats, progress,
+                        )
+                    else:
+                        sent_ids = await self._forward_item(source, dest, ids, item_topic, reply_to)
                     break
                 except FloodWaitError as exc:
                     if retry < 2:
@@ -850,17 +900,35 @@ class Copier:
                         continue
                     error = exc
                 except Exception as exc:
+                    if type(exc).__name__ == "ChatForwardsRestrictedError":
+                        force_copy_fallback = True
+                        copied_via_fallback = True
+                        try:
+                            await self._copy_single_item(
+                                index, item, source, dest, source_id, dest_id,
+                                item_topic, reply_to, stats, progress,
+                            )
+                            error = None
+                        except Exception as copy_exc:
+                            error = copy_exc
+                        break
                     error = exc
                 break
 
             should_stop = False
             if error is None:
-                for offset, msg in enumerate(messages):
-                    dest_msg_id = sent_ids[offset] if offset < len(sent_ids) else None
-                    self._mark_done(msg, source_id, dest_id, stats,
-                                    dest_msg_id=dest_msg_id, dest_topic=item_topic)
-                if isinstance(item, list):
-                    stats.albums += 1
+                if not copied_via_fallback:
+                    for offset, msg in enumerate(messages):
+                        dest_msg_id = sent_ids[offset] if offset < len(sent_ids) else None
+                        self._mark_done(msg, source_id, dest_id, stats,
+                                        dest_msg_id=dest_msg_id, dest_topic=item_topic)
+                    if isinstance(item, list):
+                        stats.albums += 1
+                elif stats.errors > errors_before_item and not first_failure_shown:
+                    print(f"\n  {C.RED}✗{C.RST}  "
+                          f"{t('copy.first_failure', reason=stats.first_error)}",
+                          flush=True)
+                    first_failure_shown = True
                 last_error_key = None
                 consecutive_errors = 0
             else:
@@ -920,7 +988,6 @@ class Copier:
             return True
         return type(exc).__name__ in {
             "ChatAdminRequiredError",
-            "ChatForwardsRestrictedError",
             "ChatForbiddenError",
             "ChatSendMediaForbiddenError",
             "ChatSendPlainForbiddenError",
@@ -967,7 +1034,7 @@ class Copier:
                             self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED)
                         payload = {"skip": True}
                     else:
-                        payload = await self._prepare(index, item, progress)
+                        payload = await self._prepare(index, item, progress, source=source)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1118,7 +1185,8 @@ class Copier:
     # ── Preparação (download) ───────────────────────────────────────────────
 
     async def _prepare(self, index: int, item: QueueItem,
-                       progress: ProgressDisplay) -> Dict[str, Any]:
+                       progress: ProgressDisplay,
+                       source: Any = None) -> Dict[str, Any]:
         messages = item if isinstance(item, list) else [item]
         plan: List[Dict[str, Any]] = []
 
@@ -1175,6 +1243,14 @@ class Copier:
                     if attempt == 2:
                         downloaded = None
                     else:
+                        if source is not None and hasattr(self.client, "get_messages"):
+                            try:
+                                refreshed = await self.client.get_messages(source, ids=msg.id)
+                                if refreshed is not None and getattr(refreshed, "media", None) is not None:
+                                    msg = refreshed
+                                    entry["msg"] = refreshed
+                            except Exception:
+                                pass
                         await asyncio.sleep(1.5)
             progress.remove_transfer(task_id)
 
@@ -1586,7 +1662,7 @@ class Copier:
                 target_topic = dest_topic if dest_topic is not None else route.get("dest_topic")
                 roots = {self._source_topic_id(message, set()) or 1}
                 reply_to = self._reply_target(message, source_id, dest_id, {root: root for root in roots})
-                payload = await self._prepare(0, message, quiet)
+                payload = await self._prepare(0, message, quiet, source=source)
                 payload.update({"dest": dest, "dest_topic": target_topic, "reply_to": reply_to})
                 errors_before = stats.errors
                 try:
@@ -1638,7 +1714,7 @@ class Copier:
                     return
 
                 silent = ProgressDisplay(0, "", False)
-                payload = await self._prepare(0, msg, silent)
+                payload = await self._prepare(0, msg, silent, source=source)
                 payload.update({
                     "dest": dest, "dest_topic": dest_topic,
                     "reply_to": self._reply_target(msg, source_id, dest_id,
