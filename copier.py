@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions
 from telethon.errors import (
     ChatAdminRequiredError,
     ChannelPrivateError,
@@ -174,6 +174,7 @@ class TransferStats:
     bytes_uploaded: int = 0
     albums: int = 0
     planned: int = 0
+    first_error: Optional[str] = None
 
     def elapsed(self) -> float:
         return max(0.001, time.time() - self.start)
@@ -189,6 +190,7 @@ class TransferStats:
             "duplicates": self.duplicates,
             "albums": self.albums,
             "bytes": self.bytes_uploaded,
+            "first_error": self.first_error,
             "elapsed": Fmt.duration(self.elapsed()),
             "speed": f"{self.per_minute():.0f} {t('result.per_min')}",
         }
@@ -340,6 +342,33 @@ class Copier:
 
     # ── API principal ────────────────────────────────────────────────────────
 
+    async def _destination_error(self, dest) -> Optional[str]:
+        """Checa permissões de postagem antes de indexar todo o histórico."""
+        if not hasattr(self.client, "get_permissions"):
+            return None
+        try:
+            me = await self.client.get_me(input_peer=True)
+            permissions = await self.client.get_permissions(dest, me)
+        except Exception as exc:
+            if type(exc).__name__ in {
+                "ChatAdminRequiredError",
+                "ChannelPrivateError",
+                "UserBannedInChannelError",
+                "UserNotParticipantError",
+            }:
+                return self._explain(exc)
+            logger.warning(f"Não foi possível validar permissão do destino: {exc}")
+            return None
+
+        if permissions is None:
+            return None
+        if getattr(dest, "broadcast", False):
+            if not getattr(permissions, "post_messages", False):
+                return t("err.need_admin")
+        elif getattr(permissions, "is_banned", False) or getattr(permissions, "has_left", False):
+            return t("err.send_forbidden")
+        return None
+
     async def run(
         self,
         source,
@@ -348,6 +377,7 @@ class Copier:
         resume: Optional[bool] = None,
         source_topic: Optional[int] = None,
         dest_topic: Optional[int] = None,
+        topic_map: Optional[Dict[int, int]] = None,
         forward: Optional[bool] = None,
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -356,6 +386,18 @@ class Copier:
         resume = self.cfg.resume if resume is None else resume
         forward = self.cfg.forward_mode if forward is None else forward
         sess = session_id or f"{source_id}:{dest_id}:{int(time.time())}"
+
+        if getattr(source, "noforwards", False):
+            blocked = TransferStats(errors=1, first_error=t("copy.source_protected"))
+            print(f"\n  {C.RED}✗{C.RST}  {blocked.first_error}", flush=True)
+            return blocked.as_result()
+
+        destination_error = await self._destination_error(dest)
+        if destination_error:
+            blocked = TransferStats(errors=1, first_error=destination_error)
+            print(f"\n  {C.RED}✗{C.RST}  "
+                  f"{t('copy.first_failure', reason=destination_error)}", flush=True)
+            return blocked.as_result()
 
         self.dedup.warm_up(dest_id, limit=200_000)
 
@@ -406,10 +448,10 @@ class Copier:
                              self.rich_ok) as progress:
             if forward:
                 await self._forward_loop(items, source, dest, source_id, dest_id,
-                                         dest_topic, stats, progress)
+                                         dest_topic, topic_map, stats, progress)
             else:
                 await self._copy_loop(items, source, dest, source_id, dest_id,
-                                      dest_topic, stats, progress)
+                                      dest_topic, topic_map, stats, progress)
 
         self.repo.update_stats(
             sess, success=stats.done, errors=stats.errors,
@@ -468,38 +510,171 @@ class Copier:
             items.append(group if len(group) > 1 else group[0])
         return items
 
+    @staticmethod
+    def _source_topic_id(msg) -> Optional[int]:
+        """Extrai o tópico do cabeçalho de resposta de uma mensagem de fórum."""
+        reply = getattr(msg, "reply_to", None)
+        top_id = getattr(reply, "reply_to_top_id", None)
+        if top_id:
+            return int(top_id)
+        # Mensagens antigas/primeiras de um tópico podem apontar direto para
+        # a mensagem-raiz sem preencher reply_to_top_id.
+        reply_id = getattr(reply, "reply_to_msg_id", None)
+        if reply_id:
+            return int(reply_id)
+        reply_id = getattr(msg, "reply_to_msg_id", None)
+        return int(reply_id) if reply_id else None
+
+    @classmethod
+    def _destination_topic(cls, item, fallback: Optional[int],
+                           topic_map: Optional[Dict[int, int]]) -> Optional[int]:
+        if not topic_map:
+            return fallback
+        messages = item if isinstance(item, list) else [item]
+        for msg in messages:
+            source_topic = cls._source_topic_id(msg)
+            if source_topic in topic_map:
+                return topic_map[source_topic]
+        return topic_map.get(1, fallback)
+
+    async def _forward_item(self, source, dest, ids: List[int],
+                            dest_topic: Optional[int]) -> None:
+        """Encaminha para o tópico mapeado sem remover a atribuição original."""
+        if not dest_topic:
+            await self.client.forward_messages(dest, ids, from_peer=source)
+            return
+
+        # Telethon.forward_messages não expõe o campo top_msg_id da API. A
+        # chamada MTProto abaixo é necessária para encaminhar dentro de fórum.
+        from_peer = await self.client.get_input_entity(source)
+        to_peer = await self.client.get_input_entity(dest)
+        await self.client(functions.messages.ForwardMessagesRequest(
+            from_peer=from_peer,
+            id=ids,
+            to_peer=to_peer,
+            top_msg_id=int(dest_topic),
+        ))
+
     # ── Encaminhamento (rápido) ─────────────────────────────────────────────
 
     async def _forward_loop(self, items, source, dest, source_id, dest_id,
-                            dest_topic, stats: TransferStats,
+                            dest_topic, topic_map, stats: TransferStats,
                             progress: ProgressDisplay) -> None:
+        last_error_key = None
+        consecutive_errors = 0
+        first_failure_shown = False
+
         for item in items:
             if self._stop:
                 break
             messages = item if isinstance(item, list) else [item]
             ids = [m.id for m in messages]
+
             try:
                 self._check_limit()
-                await self.client.forward_messages(
-                    dest, ids, from_peer=source,
-                    as_album=isinstance(item, list), drop_author=True,
-                )
+            except RuntimeError as exc:
+                stats.first_error = str(exc)
+                print(f"\n  {C.YELLOW}!{C.RST}  {exc}", flush=True)
+                break
+
+            error: Optional[Exception] = None
+            for retry in range(3):
+                try:
+                    # A lista de IDs preserva o agrupamento reconhecido pelo
+                    # Telegram. `as_album` não tem mais efeito no Telethon;
+                    # sem `drop_author`, o rótulo de encaminhamento é mantido.
+                    item_topic = self._destination_topic(item, dest_topic, topic_map)
+                    await self._forward_item(source, dest, ids, item_topic)
+                    break
+                except FloodWaitError as exc:
+                    if retry < 2:
+                        await self._handle_flood(exc)
+                        continue
+                    error = exc
+                except Exception as exc:
+                    error = exc
+                break
+
+            should_stop = False
+            if error is None:
                 for msg in messages:
                     self._mark_done(msg, source_id, dest_id, stats)
                 if isinstance(item, list):
                     stats.albums += 1
-            except FloodWaitError as exc:
-                await self._handle_flood(exc)
-            except RPCError as exc:
-                self._mark_failed(messages, source_id, dest_id, stats, exc)
-            progress.update(stats.done + stats.skipped + stats.errors,
-                            f"{stats.done} {t('copy.sent')} · {stats.per_minute():.0f}/min")
+                last_error_key = None
+                consecutive_errors = 0
+            else:
+                self._mark_failed(messages, source_id, dest_id, stats, error)
+                reason = self._explain(error)
+                if not first_failure_shown:
+                    print(f"\n  {C.RED}✗{C.RST}  "
+                          f"{t('copy.first_failure', reason=reason)}", flush=True)
+                    first_failure_shown = True
+
+                error_key = (type(error).__name__, reason)
+                if error_key == last_error_key:
+                    consecutive_errors += 1
+                else:
+                    last_error_key = error_key
+                    consecutive_errors = 1
+
+                if isinstance(error, FloodWaitError):
+                    print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
+                    should_stop = True
+                elif self._is_fatal_send_error(error):
+                    print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
+                    should_stop = True
+                elif consecutive_errors >= 3:
+                    print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
+                    should_stop = True
+
+            progress.update(
+                stats.done + stats.skipped + stats.errors,
+                self._progress_status(stats),
+            )
+            if should_stop:
+                break
             await asyncio.sleep(self.delay)
+
+    def _progress_status(self, stats: TransferStats) -> str:
+        parts = [f"{stats.done} {t('copy.sent')}"]
+        if stats.errors:
+            parts.append(f"{stats.errors} {t('copy.errors')}")
+        if stats.skipped:
+            parts.append(f"{stats.skipped} {t('copy.skipped')}")
+        if stats.duplicates:
+            parts.append(f"{stats.duplicates} {t('copy.duplicates')}")
+        if not stats.errors:
+            parts.append(f"{stats.per_minute():.0f}/min")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _is_fatal_send_error(exc: Exception) -> bool:
+        """Falhas estruturais que não vão se resolver tentando outra mensagem."""
+        if isinstance(exc, FloodWaitError):
+            return True
+        if isinstance(exc, RuntimeError) and str(exc) == t(
+            "copy.limit_reached", limit=DAILY_LIMIT
+        ):
+            return True
+        return type(exc).__name__ in {
+            "ChatAdminRequiredError",
+            "ChatForwardsRestrictedError",
+            "ChatForbiddenError",
+            "ChatSendMediaForbiddenError",
+            "ChatSendPlainForbiddenError",
+            "ChatWriteForbiddenError",
+            "ChannelInvalidError",
+            "ChannelPrivateError",
+            "PeerIdInvalidError",
+            "UserBannedInChannelError",
+            "UserNotParticipantError",
+        }
 
     # ── Cópia (download + envio ordenado) ───────────────────────────────────
 
     async def _copy_loop(self, items, source, dest, source_id, dest_id,
-                         dest_topic, stats: TransferStats,
+                         dest_topic, topic_map, stats: TransferStats,
                          progress: ProgressDisplay) -> None:
         in_queue: asyncio.Queue = asyncio.Queue()
         ready: Dict[int, Optional[Dict[str, Any]]] = {}
@@ -545,6 +720,9 @@ class Copier:
                         cond.notify_all()
 
         async def sender() -> None:
+            last_error_key = None
+            consecutive_errors = 0
+            first_failure_shown = False
             for index in range(total):
                 if self._stop:
                     break
@@ -561,36 +739,85 @@ class Copier:
                     item = items[index]
                     messages = item if isinstance(item, list) else [item]
                     stats.errors += len(messages)
+                    if stats.first_error is None:
+                        stats.first_error = t("copy.prepare_failure")
                     for msg in messages:
                         self.repo.update_status(source_id, dest_id, msg.id, Status.ERROR)
                         self.repo.add_failure(source_id, dest_id, msg.id, "preparação falhou")
+                    if not first_failure_shown:
+                        print(f"\n  {C.RED}✗{C.RST}  "
+                              f"{t('copy.first_failure', reason=stats.first_error)}",
+                              flush=True)
+                        first_failure_shown = True
                     progress.update(stats.done + stats.skipped + stats.errors,
-                                    f"{stats.done} {t('copy.sent')}")
+                                    self._progress_status(stats))
                     continue
                 if payload.get("skip"):
                     progress.update(stats.done + stats.skipped + stats.errors,
-                                    f"{stats.done} {t('copy.sent')} · "
-                                    f"{stats.duplicates} {t('copy.duplicates')}")
+                                    self._progress_status(stats))
                     continue
 
-                payload.update({"dest": dest, "dest_topic": dest_topic})
+                payload.update({
+                    "dest": dest,
+                    "dest_topic": self._destination_topic(items[index], dest_topic, topic_map),
+                })
+                errors_before_send = stats.errors
+                error: Optional[Exception] = None
                 try:
-                    self._check_limit()
-                    await self._send(payload, source_id, dest_id, stats, progress)
-                except FloodWaitError as exc:
-                    await self._handle_flood(exc)
-                    messages = payload["messages"]
-                    self._mark_failed(messages, source_id, dest_id, stats, exc)
-                except RPCError as exc:
-                    self._mark_failed(payload["messages"], source_id, dest_id, stats, exc)
-                except Exception as exc:
-                    logger.exception("Erro no envio")
-                    self._mark_failed(payload["messages"], source_id, dest_id, stats, exc)
+                    for retry in range(3):
+                        try:
+                            self._check_limit()
+                            await self._send(payload, source_id, dest_id, stats, progress)
+                            break
+                        except FloodWaitError as exc:
+                            if retry < 2:
+                                await self._handle_flood(exc)
+                                continue
+                            error = exc
+                        except Exception as exc:
+                            error = exc
+                        break
+
+                    if error is not None:
+                        logger.error(f"Erro no envio do item {index}: {error}")
+                        self._mark_failed(payload["messages"], source_id, dest_id, stats, error)
+                        reason = self._explain(error)
+                        if not first_failure_shown:
+                            print(f"\n  {C.RED}✗{C.RST}  "
+                                  f"{t('copy.first_failure', reason=reason)}", flush=True)
+                            first_failure_shown = True
+
+                        error_key = (type(error).__name__, reason)
+                        if error_key == last_error_key:
+                            consecutive_errors += 1
+                        else:
+                            last_error_key = error_key
+                            consecutive_errors = 1
+
+                        if isinstance(error, FloodWaitError):
+                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
+                            self._stop = True
+                        elif self._is_fatal_send_error(error):
+                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
+                            self._stop = True
+                        elif consecutive_errors >= 3:
+                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
+                            self._stop = True
+                    else:
+                        last_error_key = None
+                        consecutive_errors = 0
+                        if stats.errors > errors_before_send and not first_failure_shown:
+                            print(f"\n  {C.RED}✗{C.RST}  "
+                                  f"{t('copy.first_failure', reason=stats.first_error)}",
+                                  flush=True)
+                            first_failure_shown = True
                 finally:
                     self._cleanup(payload.get("plan", []))
 
                 progress.update(stats.done + stats.skipped + stats.errors,
-                                f"{stats.done} {t('copy.sent')} · {stats.per_minute():.0f}/min")
+                                self._progress_status(stats))
+                if self._stop:
+                    break
                 await asyncio.sleep(self.delay)
 
         downloaders = [asyncio.create_task(downloader()) for _ in range(self.cfg.workers)]
@@ -700,6 +927,8 @@ class Copier:
             await self._send_text(entry["msg"], dest, dest_topic)
 
         if failed_entries:
+            if stats.first_error is None:
+                stats.first_error = t("copy.prepare_failure")
             for entry in failed_entries:
                 msg = entry["msg"]
                 stats.errors += 1
@@ -899,6 +1128,8 @@ class Copier:
     def _mark_failed(self, messages, source_id: int, dest_id: int,
                      stats: TransferStats, exc: Exception) -> None:
         reason = self._explain(exc)
+        if stats.first_error is None:
+            stats.first_error = reason
         logger.error(f"Falha ao copiar {len(messages)} msg(s): {exc}")
         for msg in messages:
             stats.errors += 1
@@ -919,10 +1150,24 @@ class Copier:
 
     @staticmethod
     def _explain(exc: Exception) -> str:
+        name = type(exc).__name__
+        if isinstance(exc, FloodWaitError):
+            return t("progress.flood", sec=int(getattr(exc, "seconds", 0) or 0))
         if isinstance(exc, ChatAdminRequiredError):
             return t("err.need_admin")
         if isinstance(exc, ChannelPrivateError):
             return t("err.channel_private")
+        if name == "ChatForwardsRestrictedError":
+            return t("err.forward_restricted")
+        if name in {
+            "ChatForbiddenError",
+            "ChatSendMediaForbiddenError",
+            "ChatSendPlainForbiddenError",
+            "ChatWriteForbiddenError",
+            "UserBannedInChannelError",
+            "UserNotParticipantError",
+        }:
+            return t("err.send_forbidden")
         return str(exc)[:250] or t("err.generic")
 
     @staticmethod

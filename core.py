@@ -59,6 +59,16 @@ from utils import Fmt, Stats, daily_limit, logger
 PAGE_SIZE = 9
 
 
+def normalize_phone(raw: str) -> Optional[str]:
+    """Normaliza telefone internacional sem adivinhar nem remover o DDI."""
+    if not isinstance(raw, str):
+        return None
+    value = re.sub(r"[\s().-]", "", raw.strip())
+    if not re.fullmatch(r"\+[1-9][0-9]{7,14}", value):
+        return None
+    return value
+
+
 # ==============================================================================
 # Seletor de canais
 # ==============================================================================
@@ -198,19 +208,35 @@ class ChannelPicker:
 
 
 class CredentialManager:
-    """Acesso ao cofre cifrado de credenciais."""
+    """Acesso ao cofre cifrado de credenciais, com leitura após gravação."""
 
-    def __init__(self) -> None:
-        self._vault = Vault(VAULT_FILE)
+    def __init__(self, path: Path | str | None = None) -> None:
+        self._vault = Vault(path or VAULT_FILE)
+
+    @property
+    def path(self) -> Path:
+        return self._vault.path
 
     def load(self) -> Optional[Dict[str, Any]]:
-        return self._vault.load()
+        data = self._vault.load()
+        if not isinstance(data, dict):
+            return None
+        try:
+            api_id = int(data.get("api_id", 0))
+            api_hash = str(data.get("api_hash", "")).strip()
+        except (TypeError, ValueError):
+            return None
+        if api_id <= 0 or not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+            return None
+        return {**data, "api_id": api_id, "api_hash": api_hash}
 
     def save(self, data: Dict[str, Any]) -> None:
         self._vault.save(data)
+        if self._vault.load() != data:
+            raise RuntimeError("as credenciais gravadas não passaram na verificação de leitura")
 
     def update(self, **kwargs: Any) -> Dict[str, Any]:
-        data = self.load() or {}
+        data = self._vault.load() or {}
         data.update(kwargs)
         self.save(data)
         return data
@@ -380,14 +406,30 @@ class App:
             api_hash = str(creds["api_hash"])
         else:
             if creds is None and self.creds.exists():
-                ui.warn(t("init.recovered"))
+                ui.warn(t("auth.credentials_recovered", path=self.creds.path))
                 ui.pause()
             pair = self._ask_credentials()
             if not pair:
                 return False
             api_id, api_hash = pair
-            self.creds.save({"api_id": api_id, "api_hash": api_hash, "lang": get_lang()})
-            ui.ok(t("auth.creds_saved"))
+            try:
+                self.creds.save({
+                    "api_id": api_id,
+                    "api_hash": api_hash,
+                    "lang": get_lang(),
+                })
+                ui.ok(t("auth.creds_saved"))
+                ui.info(t("auth.credentials_location", path=self.creds.path))
+            except Exception as exc:
+                # A falha de disco não impede o usuário de tentar conectar
+                # nesta execução, mas deixa claro que o próximo início pedirá
+                # as credenciais de novo.
+                logger.error(f"Falha ao salvar o cofre de credenciais: {exc}")
+                ui.warn(t(
+                    "auth.credentials_save_fail",
+                    path=self.creds.path,
+                    reason=str(exc) or type(exc).__name__,
+                ))
 
         if not await self._network_ok():
             ui.blank()
@@ -464,40 +506,94 @@ class App:
 
         return api_id, api_hash
 
+    @staticmethod
+    def _code_delivery_hint(sent_code: Any) -> str:
+        """Traduz o método de entrega escolhido pelo Telegram para uma dica."""
+        code_type = getattr(sent_code, "type", None)
+        kind = type(code_type).__name__
+        if kind == "SentCodeTypeApp":
+            return t("auth.code_delivery_app")
+        if kind in {"SentCodeTypeSms", "SentCodeTypeFirebaseSms", "SentCodeTypeFragmentSms"}:
+            return t("auth.code_delivery_sms")
+        if kind in {"SentCodeTypeCall", "SentCodeTypeFlashCall", "SentCodeTypeMissedCall"}:
+            return t("auth.code_delivery_call")
+        if "Email" in kind:
+            return t("auth.code_delivery_email")
+        return t("auth.code_delivery_other")
+
+    def _report_code_request_error(self, exc: Exception) -> None:
+        """Mostra falhas comuns sem exigir que o usuário decifre erro RPC."""
+        name = type(exc).__name__
+        logger.error(f"Falha ao solicitar código do Telegram ({name}): {exc}")
+        if isinstance(exc, FloodWaitError):
+            ui.warn(t("auth.flood", sec=int(exc.seconds)))
+            ui.info(t("auth.code_flood"))
+        elif isinstance(exc, PhoneNumberInvalidError):
+            ui.err(t("auth.phone_invalid"))
+        elif isinstance(exc, asyncio.TimeoutError):
+            ui.err(t("auth.code_send_timeout"))
+        elif name in {"ApiIdInvalidError", "ApiIdPublishedFloodError"}:
+            ui.err(t("auth.code_api_invalid"))
+        elif name in {"PhoneNumberBannedError", "UserDeactivatedBanError"}:
+            ui.err(t("auth.code_phone_banned"))
+        elif name in {"PhoneNumberFloodError", "PhoneCodeFloodError"}:
+            ui.warn(t("auth.code_flood"))
+        else:
+            detail = str(exc).strip() or name
+            ui.err(f"{t('auth.code_send_fail')}: {detail}")
+
+    async def _finish_sign_in(self) -> bool:
+        self.me = await self.client.get_me()
+        label = getattr(self.me, "first_name", None) or getattr(self.me, "username", "")
+        ui.ok(f"{t('auth.signed_in')} {C.WHITE}{label}{C.RST}")
+        await asyncio.sleep(0.6)
+        return True
+
     async def _sign_in(self) -> bool:
         ui.clear()
         ui.header(t("auth.sign_in.title"), t("auth.sign_in.subtitle"))
 
-        phone = ""
+        phone = None
         for _ in range(3):
-            phone = ui.ask(t("auth.phone")).replace(" ", "").replace("-", "")
-            if phone.startswith("+") and len(phone) >= 8:
+            phone = normalize_phone(ui.ask(t("auth.phone")))
+            if phone:
                 break
             ui.err(t("auth.phone_invalid"))
         else:
             return False
 
+        ui.info(t("auth.sending_code"))
         try:
-            await self.client.send_code_request(phone)
-        except FloodWaitError as exc:
-            ui.warn(t("auth.flood", sec=exc.seconds))
-            await asyncio.sleep(int(exc.seconds) + 2)
-            try:
-                await self.client.send_code_request(phone)
-            except Exception as exc2:
-                ui.err(f"{t('auth.code_send_fail')}: {exc2}")
-                return False
-        except PhoneNumberInvalidError:
-            ui.err(t("auth.phone_invalid"))
-            return False
+            sent_code = await asyncio.wait_for(
+                self.client.send_code_request(phone), timeout=45
+            )
         except Exception as exc:
-            ui.err(f"{t('auth.code_send_fail')}: {exc}")
+            # Telethon pode concluir o login automaticamente em um fluxo raro.
+            completed_inline = (
+                isinstance(exc, RuntimeError)
+                and "logged in right after" in str(exc).lower()
+            )
+            if completed_inline:
+                try:
+                    if await self.client.is_user_authorized():
+                        return await self._finish_sign_in()
+                except Exception:
+                    pass
+            self._report_code_request_error(exc)
             return False
+
+        ui.ok(t("auth.request_accepted"))
+        ui.info(self._code_delivery_hint(sent_code))
+        ui.info(t("auth.code_hint"))
+
+        # Alguns fluxos do Telegram podem concluir a autorização sem pedir
+        # um código digitado, então confirme antes de mostrar o prompt.
+        if await self.client.is_user_authorized():
+            return await self._finish_sign_in()
 
         for attempt in range(1, 4):
             ui.blank()
-            ui.info(t("auth.code_hint"))
-            code = ui.ask(t("auth.code", n=attempt))
+            code = re.sub(r"\s+", "", ui.ask(t("auth.code", n=attempt)))
             try:
                 await self.client.sign_in(phone, code)
                 break
@@ -509,6 +605,7 @@ class App:
                     await self.client.sign_in(password=password)
                     break
                 except Exception as exc:
+                    logger.error(f"Falha na senha 2FA ({type(exc).__name__}): {exc}")
                     ui.err(f"{t('auth.2fa_fail')}: {exc}")
                     return False
             except PhoneCodeInvalidError:
@@ -516,21 +613,28 @@ class App:
             except PhoneCodeExpiredError:
                 ui.warn(t("auth.code_expired"))
                 try:
-                    await self.client.send_code_request(phone)
-                except Exception:
-                    pass
+                    # O Telethon reconhece o hash da solicitação anterior e
+                    # pede um novo código sem criar outra autenticação.
+                    sent_code = await asyncio.wait_for(
+                        self.client.send_code_request(phone), timeout=45
+                    )
+                    ui.ok(t("auth.request_accepted"))
+                    ui.info(self._code_delivery_hint(sent_code))
+                except Exception as exc:
+                    self._report_code_request_error(exc)
+                    return False
+            except FloodWaitError as exc:
+                self._report_code_request_error(exc)
+                return False
             except Exception as exc:
-                ui.err(str(exc))
+                logger.error(f"Falha ao validar o código ({type(exc).__name__}): {exc}")
+                ui.err(str(exc) or type(exc).__name__)
                 return False
         else:
             ui.err(t("auth.too_many"))
             return False
 
-        self.me = await self.client.get_me()
-        label = getattr(self.me, "first_name", None) or getattr(self.me, "username", "")
-        ui.ok(f"{t('auth.signed_in')} {C.WHITE}{label}{C.RST}")
-        await asyncio.sleep(0.6)
-        return True
+        return await self._finish_sign_in()
 
     async def _check_updates(self) -> None:
         """Aviso opcional de versão nova (silencioso se sem internet)."""
@@ -691,9 +795,12 @@ class App:
         ui.header(t("filter.title"))
         self._trail_line()
         items = [("0", t("filter.all"), t("filter.all.desc"))]
-        items += [(str(i + 1), name, desc)
-                  for i, (code, name, desc) in enumerate(list_filters())
-                  if code != "all"]
+        next_number = 1
+        for code, name, desc in list_filters():
+            if code == "all":
+                continue
+            items.append((str(next_number), name, desc))
+            next_number += 1
         ui.menu(items)
         ui.info(t("filter.back_hint"))
         ui.blank()
@@ -735,50 +842,154 @@ class App:
         if source is None:
             self._pop()
             return
-        source_topic = await self._resolve_topic(source)
         self._show_entity(source, t("entity.source"))
 
-        dest = None
-        for _ in range(3):
-            candidate = await self.picker.pick(t("entity.dest"), highlight_id=source.id)
-            if candidate is None:
-                self._pop()
-                return
-            if candidate.id == source.id:
-                ui.err(t("entity.same"))
-                ui.pause()
-                ui.clear()
-                ui.header(t("menu.copy"))
-                self._trail_line()
-                self._show_entity(source, t("entity.source"))
-                continue
-            dest = candidate
-            break
-        if dest is None:
+        if getattr(source, "noforwards", False):
+            ui.warn(t("copy.source_protected"))
+            ui.pause()
             self._pop()
             return
 
-        dest_topic = await self._resolve_topic(dest)
-        self._show_entity(dest, t("entity.dest"))
+        ui.menu([
+            ("1", t("copy.dest.existing"), t("copy.dest.existing.desc")),
+            ("2", t("copy.dest.create"), t("copy.dest.create.desc")),
+            ("0", t("menu.back"), ""),
+        ])
+        destination_mode = (ui.ask(t("copy.dest.mode"), required=False) or "1").strip()
+        if destination_mode not in {"1", "2"}:
+            self._pop()
+            return
+
+        source_topic: Optional[int] = None
+        dest_topic: Optional[int] = None
+        topic_map: Optional[Dict[int, int]] = None
+        dest = None
+        cloner = None
+        clone_plan = None
+
+        if destination_mode == "1":
+            source_topic = await self._resolve_topic(source)
+            for _ in range(3):
+                candidate = await self.picker.pick(t("entity.dest"), highlight_id=source.id)
+                if candidate is None:
+                    self._pop()
+                    return
+                if candidate.id == source.id:
+                    ui.err(t("entity.same"))
+                    ui.pause()
+                    ui.clear()
+                    ui.header(t("menu.copy"))
+                    self._trail_line()
+                    self._show_entity(source, t("entity.source"))
+                    continue
+                dest = candidate
+                break
+            if dest is None:
+                self._pop()
+                return
+            dest_topic = await self._resolve_topic(dest)
+            if (getattr(source, "forum", False)
+                    and getattr(dest, "forum", False)
+                    and source_topic is None and dest_topic is None):
+                from channel_clone import ChannelCloneError, ChannelCloner
+
+                cloner = ChannelCloner(self.client)
+                try:
+                    topic_map = await cloner.map_existing_topics(source, dest)
+                    dest_topic = topic_map.get(1)
+                    ui.info(t("copy.clone.map_topics"))
+                except ChannelCloneError as exc:
+                    ui.err(t("copy.clone.failed", reason=str(exc)))
+                    ui.pause()
+                    self._pop()
+                    return
+            self._show_entity(dest, t("entity.dest"))
+        else:
+            from channel_clone import ChannelCloneError, ChannelCloner
+
+            cloner = ChannelCloner(self.client)
+            default_title = cloner.default_title(source)
+            while True:
+                entered_title = ui.ask(
+                    t("copy.clone.title_prompt", title=default_title), required=False
+                )
+                clone_title = entered_title or default_title
+                title_units = len(clone_title.encode("utf-16-le")) // 2
+                if 1 <= title_units <= 128:
+                    break
+                ui.warn(t("copy.clone.title_invalid"))
+            try:
+                clone_plan = await cloner.prepare(source, clone_title)
+            except ChannelCloneError as exc:
+                logger.exception(f"Falha ao preparar a estrutura do destino: {exc}")
+                ui.err(t("copy.clone.failed", reason=str(exc)))
+                ui.pause()
+                self._pop()
+                return
+            for warning in clone_plan.warnings:
+                ui.warn(t("copy.clone.about_warning", reason=warning))
 
         filter_code = await self._pick_filter() or "all"
         config = self._copy_options()
+        if topic_map:
+            # Ao mapear um fórum inteiro, repetições entre tópicos são conteúdo
+            # legítimo e precisam ser preservadas.
+            config.use_dedup = False
 
-        rows = [
-            (t("entity.source"), getattr(source, "title", str(source.id))),
-            (t("entity.dest"), getattr(dest, "title", str(dest.id))),
+        if clone_plan is not None:
+            kind = (t("copy.clone.kind.forum") if clone_plan.forum
+                    else t("copy.clone.kind.channel") if clone_plan.broadcast
+                    else t("copy.clone.kind.group"))
+            rows = [
+                (t("entity.source"), getattr(source, "title", str(source.id))),
+                (t("entity.dest"), clone_plan.title),
+                (t("entity.type"), kind),
+                (t("copy.clone.new"), t("copy.clone.private_note")),
+            ]
+            if clone_plan.forum:
+                topic_count = len({topic.id for topic in clone_plan.topics} | {1})
+                rows.append((t("copy.clone.topics"), str(topic_count)))
+        else:
+            rows = [
+                (t("entity.source"), getattr(source, "title", str(source.id))),
+                (t("entity.dest"), getattr(dest, "title", str(dest.id))),
+            ]
+        rows.extend([
             (t("filter.default"), filter_name(filter_code)),
             (t("copy.mode"),
              t("copy.mode.forward") if config.forward_mode else t("copy.mode.copy")),
             (t("settings.delay"), f"{config.delay:.1f}s"),
             (t("settings.workers"), str(config.workers)),
             (t("settings.resume"), t("settings.on") if config.resume else t("settings.off")),
-        ]
+        ])
         ui.box(t("copy.summary"), rows, color=C.CYAN)
 
         if not ui.confirm(t("copy.confirm")):
             self._pop()
             return
+
+        if clone_plan is not None:
+            ui.info(t("copy.clone.creating"))
+            try:
+                dest, topic_map = await cloner.create(clone_plan)
+            except ChannelCloneError as exc:
+                logger.exception(f"Falha ao criar a estrutura do destino: {exc}")
+                ui.err(t("copy.clone.failed", reason=str(exc)))
+                if exc.destination is not None:
+                    ui.warn(t("copy.clone.partial", id=getattr(exc.destination, "id", "?")))
+                ui.pause()
+                self._pop()
+                return
+            self.picker._loaded = False
+            ui.ok(t("copy.clone.created", title=clone_plan.title,
+                    id=getattr(dest, "id", "?")))
+            self._show_entity(dest, t("entity.dest"))
+            if topic_map:
+                dest_topic = topic_map.get(1)
+
+            # Um destino recém-criado não contém nada a deduplicar. Desativar
+            # hashes globais também preserva repetições legítimas entre tópicos.
+            config.use_dedup = False
 
         from copier import Copier
 
@@ -791,6 +1002,7 @@ class App:
                 filter_code=filter_code,
                 source_topic=source_topic,
                 dest_topic=dest_topic,
+                topic_map=topic_map,
             )
         except KeyboardInterrupt:
             ui.warn(t("copy.interrupted"))
@@ -798,6 +1010,18 @@ class App:
             logger.exception("Falha na cópia")
             ui.err(f"{t('err.generic')}: {exc}")
             ui.pause()
+        finally:
+            if clone_plan is not None and dest is not None and topic_map:
+                try:
+                    setting_warnings = await cloner.apply_topic_settings(
+                        clone_plan, dest, topic_map
+                    )
+                    for topic_name, reason in setting_warnings:
+                        ui.warn(t("copy.clone.setting_failed",
+                                  topic=topic_name, reason=reason))
+                except Exception as exc:
+                    logger.exception(f"Falha ao restaurar opções dos tópicos: {exc}")
+                    ui.warn(t("copy.clone.setting_failed", topic="—", reason=str(exc)))
 
         self._record_result(result, time.time() - started)
         self._print_result(result)
@@ -1501,6 +1725,8 @@ class App:
         if result.get("speed"):
             rows.append((t("result.speed"), str(result["speed"])))
         ui.box(t("result.title"), rows,
-               color=C.GREEN if not result.get("errors") else C.AMBER)
+               color=C.GREEN if not result.get("errors") and not result.get("first_error") else C.AMBER)
+        if result.get("first_error"):
+            ui.err(f"{t('result.reason')}: {result['first_error']}")
         if pause:
             ui.pause()

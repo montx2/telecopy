@@ -118,15 +118,18 @@ seu computador.
 
 ### Passo 3 — Fazer login (uma única vez)
 
-1. Digite o telefone **com DDI e sem espaços**: `+5511999999999`.
-2. O Telegram envia um código **dentro do próprio app** (chat “Telegram”).
+1. Digite o telefone com DDI (pode usar espaços, hífen e parênteses): `+55 11 99999-9999`.
+2. O TELECOPY informa o método escolhido pelo Telegram. O código pode chegar no chat oficial **“Telegram” em outro aparelho já conectado**, por SMS ou por outro método — ele não aparece nesta janela.
 3. Digite o código. Se você usa verificação em duas etapas, informe a senha.
 
-A sessão fica salva em `data/session.session`. Nas próximas vezes o programa
-abre direto no menu.
+A sessão fica salva no diretório de dados do TELECOPY e, nas próximas vezes,
+o programa deve abrir direto no menu sem pedir o código novamente.
+**Não compartilhe seu API Hash, código de login nem senha 2FA.**
 
 > **Requisitos para copiar:** ser **membro** do canal de origem e
-> **administrador** do canal de destino (com permissão de postar).
+> **administrador** do destino existente (com permissão de postar). Se o destino
+> for criado automaticamente, a conta que executa o TELECOPY vira sua
+> administradora; a origem continua exigindo acesso de membro.
 
 ---
 
@@ -134,12 +137,27 @@ abre direto no menu.
 
 ### `[1] Copiar canal` — clonar o histórico
 
-Copia todas as mensagens existentes da origem para o destino.
+Copia as mensagens existentes da origem para o destino. Você pode escolher um
+destino que já existe ou pedir ao TELECOPY para criar um novo automaticamente.
 
 - **Reenviar** (padrão): baixa e publica novamente. O destino **não** mostra
   “Encaminhado de…”. Ideal para backups e para reconstruir um canal.
 - **Encaminhar**: usa o encaminhamento nativo. É de 5 a 20 vezes mais rápido,
   mas o destino mostra o canal de origem.
+- **Criar destino automaticamente**: cria um canal/grupo privado do tipo da
+  origem, copia título e descrição quando disponíveis e, se a origem for um
+  fórum, recria os tópicos (nomes, ícones e opções de fixado/fechado/oculto) e
+  envia cada mensagem ao tópico correspondente. O título começa igual ao da
+  origem e pode ser alterado antes da criação.
+
+O Telegram não permite clonar a identidade do canal: o novo destino não recebe
+o username público, foto, membros nem permissões da origem; datas originais,
+reações e algumas mensagens de serviço também não podem ser reproduzidas como
+no original. O destino automático fica privado e a conta que o criou já é
+administradora. Confira o resumo antes de confirmar. Se uma cópia de fórum for
+interrompida, escolha o destino já criado, pressione ENTER para copiar todos os
+tópicos na origem e no destino; o TELECOPY associa os tópicos pelo nome/ícone e
+usa os checkpoints para retomar sem duplicar o que já foi enviado.
 
 Antes de iniciar você escolhe delay, número de workers, filtro e se quer
 retomar cópias anteriores. Um resumo aparece antes da confirmação.
@@ -247,7 +265,15 @@ canal A e para o canal B, mas nunca duas vezes para o canal A.
 
 ## 8. Onde ficam seus dados
 
-Tudo fica em `data/`, ao lado do programa:
+Os dados ficam na pasta `data/`:
+
+- Rodando `python main.py`: `data/` ao lado do projeto.
+- Executável no Windows: `%LOCALAPPDATA%\TELECOPY\data` (estável mesmo se o
+  `.exe` for movido). macOS e Linux usam a pasta de dados do usuário.
+- Se uma versão portátil antiga já tinha dados ao lado do executável, eles são
+  migrados para o local estável na primeira execução.
+
+A pasta contém:
 
 ```
 data/
@@ -268,7 +294,7 @@ data/
 
 **Portabilidade:** copiar a pasta `data/` para outro computador mantém o login
 e as credenciais funcionando (a chave do cofre viaja junto). Se o cofre não
-puder ser lido, o programa avisa e pede as credenciais novamente — nada quebra.
+puder ser lido, o programa mostra o caminho e pede as credenciais novamente.
 
 > Backup recomendado: copie `data/` para um pendrive ou nuvem de tempos em
 > tempos. **Não** compartilhe `session.session` nem `vault/`: quem tiver esses
@@ -282,7 +308,10 @@ puder ser lido, o programa avisa e pede as credenciais novamente — nada quebra
 |---|---|
 | `pip não é reconhecido` | Reinstale o Python marcando “Add to PATH”, ou use `python -m pip install -r requirements.txt` |
 | “Dependências ausentes” | Rode o comando de `pip install` que o programa mostra |
-| “Não foi possível conectar ao Telegram” | Verifique internet/firewall/proxy; em redes corporativas pode ser necessário liberar a porta 443. Use `--debug` para ver detalhes em `data/logs/` |
+| “Não foi possível conectar ao Telegram” | Verifique internet/firewall/proxy; em redes corporativas pode ser necessário liberar a porta 443. Use `--debug` para ver detalhes na pasta de dados indicada pelo programa |
+| O código de login não chegou | Confira o método indicado pelo TELECOPY: o código pode aparecer no chat oficial “Telegram” em outro aparelho conectado, por SMS ou outro método. Não solicite códigos em sequência; o Telegram pode aplicar limite temporário |
+| A cópia mostra `0 enviadas` | Veja a primeira falha exibida. Para canais, a conta precisa de permissão para publicar no destino; se o Telegram marcou a origem como protegida, a cópia é bloqueada. Falhas repetidas agora interrompem a execução cedo |
+| API ID/Hash é pedido em toda inicialização | Veja o caminho mostrado após “Credenciais salvas e verificadas”. Execute `python main.py --check` e confirme que a pasta de dados está gravável; executáveis usam o diretório estável do usuário |
 | “Canal não encontrado” | Confirme que você é **membro** (origem) e **admin** (destino) e que o link/ID está correto. Use Ferramentas → 1 para testar |
 | “Você precisa ser ADMINISTRADOR no destino” | No Telegram: canal → Administradores → adicionar você com permissão *Postar mensagens* |
 | Telegram pede espera (FloodWait) | O programa aguarda sozinho e aumenta o intervalo. Se acontecer muito, aumente o delay para 2–3 s |
@@ -305,11 +334,10 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -v
 ```
 
-Saída esperada: **36 testes aprovados**, cobrindo formatadores, cofre
-criptográfico, banco, dedup, filtros, traduções, motor de cópia
-(ordem, álbuns, filtros, dedup, retomada, erros, FloodWait, encaminhamento,
-limite diário, limpeza de temporários), fila de repetição, preferências e
-todos os menus.
+A suíte cobre formatadores, cofre criptográfico, banco, dedup, filtros,
+traduções, motor de cópia (ordem, álbuns, retomada, erros, FloodWait e
+encaminhamento), roteamento de tópicos de fórum, criação automática de um
+fórum clonado, fila de repetição, preferências e menus.
 
 Também é possível rodar sem pytest:
 
@@ -348,6 +376,7 @@ O instalador sai em `dist\Telecopy_Setup_v4.0.0.exe`. Ele instala em
 ```
 main.py            entrada, argumentos, instância única, checagem de ambiente
 core.py            App (login + menus), ChannelPicker, CredentialManager
+channel_clone.py   criação de destino e clonagem da estrutura de fóruns/tópicos
 copier.py          motor: coleta → agrupa álbuns → download paralelo → envio ordenado
 database.py        repositório SQLite (WAL): checkpoints, dedup, sessões, falhas
 dedup.py           LRU + Bloom Filter + hash de conteúdo

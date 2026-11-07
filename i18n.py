@@ -50,8 +50,8 @@ _s("onboard.step2.body",
    "On the next screen enter the API ID and API Hash. They are stored locally with AES-256-GCM and never leave your computer.")
 _s("onboard.step3.title", "Faça login uma única vez", "Sign in once")
 _s("onboard.step3.body",
-   "Informe seu telefone com DDI (+55 para Brasil). O Telegram envia um código no app — digite aqui. Se houver senha de dois fatores, ela será pedida em seguida. Depois disso a sessão fica salva.",
-   "Enter your phone with country code (+1 for USA). Telegram sends a code in the app — type it here. If 2-step verification is on, you'll be asked for the password. The session is saved afterwards.")
+   "Informe seu telefone com DDI (+55 para Brasil). O Telegram informa onde enviou o código: pode ser no chat oficial em outro aparelho conectado, por SMS ou outro método. Se houver senha de dois fatores, ela será pedida em seguida. Depois disso a sessão fica salva.",
+   "Enter your phone with country code (+1 for USA). Telegram tells you where it sent the code: it may be the official chat on another signed-in device, SMS, or another method. If 2-step verification is on, you'll be asked for the password. The session is saved afterwards.")
 _s("onboard.tip", "Dica: para copiar você precisa apenas SER MEMBRO da origem e ADMINISTRADOR no destino.",
    "Tip: to copy you only need to be a MEMBER of the source and an ADMIN of the destination.")
 _s("onboard.continue", "Pressione ENTER para configurar agora", "Press ENTER to set up now")
@@ -80,16 +80,38 @@ _s("auth.signed_in", "Conectado como", "Signed in as")
 _s("auth.session_invalid", "Sessão inválida ou expirada — será necessário entrar novamente.",
    "Session invalid or expired — you'll need to sign in again.")
 _s("auth.sign_in.title", "VERIFICAÇÃO DE CONTA", "ACCOUNT VERIFICATION")
-_s("auth.sign_in.subtitle", "O código chega no próprio app do Telegram.",
-   "The code arrives inside the Telegram app.")
+_s("auth.sign_in.subtitle", "O método de entrega do código depende do Telegram.",
+   "Telegram chooses how the login code is delivered.")
 _s("auth.phone", "Telefone com DDI (ex.: +5511999999999)", "Phone with country code (e.g. +15550000000)")
-_s("auth.phone_invalid", "Informe o telefone com o código do país (ex.: +5511999999999).",
-   "Enter the phone with country code (e.g. +15550000000).")
+_s("auth.phone_invalid", "Informe um número internacional válido, começando por + e com 8 a 15 dígitos (ex.: +5511999999999).",
+   "Enter a valid international number, starting with + and containing 8 to 15 digits (e.g. +15550000000).")
+_s("auth.sending_code", "Solicitando código ao Telegram…", "Requesting a code from Telegram…")
+_s("auth.request_accepted", "Solicitação aceita pelo Telegram. Veja abaixo onde procurar o código.",
+   "Telegram accepted the request. See below where to look for the code.")
+_s("auth.code_delivery_app", "Confira o chat oficial 'Telegram' em outro aparelho/sessão onde sua conta já está conectada. Não é SMS e o código não aparece nesta janela.",
+   "Check the official 'Telegram' chat on another device/session where your account is already signed in. This is not SMS, and the code will not appear in this window.")
+_s("auth.code_delivery_sms", "Confira as mensagens SMS do número da conta, inclusive spam/bloqueadas.",
+   "Check SMS messages for the account number, including spam/blocked messages.")
+_s("auth.code_delivery_call", "O Telegram indicou uma ligação telefônica. Atenda o número associado à conta.",
+   "Telegram indicated a phone call. Answer the call to the account number.")
+_s("auth.code_delivery_email", "Confira o e-mail associado à conta e a pasta de spam.",
+   "Check the email associated with the account and its spam folder.")
+_s("auth.code_delivery_other", "Confira as notificações e todos os aparelhos em que a conta já está conectada; o Telegram pode usar outro método de entrega.",
+   "Check notifications and every device where the account is signed in; Telegram may use another delivery method.")
+_s("auth.code_hint", "Se nada chegar, não solicite códigos repetidamente: confira a conta/número e aguarde possíveis limites temporários do Telegram.",
+   "If nothing arrives, do not repeatedly request codes: verify the account/number and wait in case Telegram applied a temporary limit.")
 _s("auth.code_send_fail", "Não foi possível enviar o código", "Could not send the code")
-_s("auth.code_hint", "Abra o Telegram → chat 'Telegram' e copie o código.", "Open Telegram → 'Telegram' chat and copy the code.")
+_s("auth.code_send_timeout", "O Telegram demorou para responder. Verifique a conexão e tente novamente mais tarde.",
+   "Telegram did not respond in time. Check the connection and try again later.")
+_s("auth.code_api_invalid", "O Telegram rejeitou o API ID/Hash. Confira os dois valores em my.telegram.org/apps.",
+   "Telegram rejected the API ID/Hash. Check both values at my.telegram.org/apps.")
+_s("auth.code_phone_banned", "O Telegram não permite login com esse número. Verifique o status da conta pelo app oficial ou fale com o suporte do Telegram.",
+   "Telegram does not allow login with this number. Check the account in the official app or contact Telegram support.")
+_s("auth.code_flood", "O Telegram limitou temporariamente as tentativas. Não peça outro código até o tempo indicado passar.",
+   "Telegram temporarily limited login attempts. Do not request another code until the indicated time has passed.")
 _s("auth.code", "Código (tentativa {n}/3)", "Code (attempt {n}/3)")
 _s("auth.code_wrong", "Código incorreto. Tente novamente.", "Wrong code. Try again.")
-_s("auth.code_expired", "Código expirado — enviando um novo…", "Code expired — sending a new one…")
+_s("auth.code_expired", "Código expirado — solicitando um novo método/código…", "Code expired — requesting a new code…")
 _s("auth.2fa_hint", "Sua conta tem verificação em duas etapas (2FA).", "Your account has two-step verification (2FA).")
 _s("auth.2fa", "Senha da verificação em duas etapas", "Two-step verification password")
 _s("auth.2fa_fail", "Senha 2FA incorreta", "Wrong 2FA password")
@@ -97,6 +119,12 @@ _s("auth.too_many", "Muitas tentativas. Encerrando por segurança.", "Too many a
 _s("auth.fail", "Falha na autenticação.", "Authentication failed.")
 _s("auth.flood", "O Telegram pediu uma pausa de {sec}s antes de tentar novamente.",
    "Telegram asked to wait {sec}s before trying again.")
+_s("auth.credentials_recovered", "O cofre existe, mas não pôde ser lido. Informe as credenciais novamente; elas serão salvas em: {path}",
+   "The credentials vault exists but could not be read. Enter credentials again; they will be saved to: {path}")
+_s("auth.credentials_location", "Credenciais salvas e verificadas em: {path}",
+   "Credentials saved and verified at: {path}")
+_s("auth.credentials_save_fail", "Não foi possível confirmar a gravação das credenciais em {path}: {reason}",
+   "Could not verify saved credentials at {path}: {reason}")
 
 # ── Menu ──────────────────────────────────────────────────────────────────────
 _s("menu.copy", "Copiar canal", "Copy channel")
@@ -165,6 +193,38 @@ _s("entity.same", "Origem e destino são o mesmo canal. Escolha outro destino.",
 
 # ── Cópia ─────────────────────────────────────────────────────────────────────
 _s("copy.title", "COPIAR CANAL", "COPY CHANNEL")
+_s("copy.dest.mode", "Como deseja preparar o destino?", "How do you want to set up the destination?")
+_s("copy.dest.existing", "Usar um destino existente", "Use an existing destination")
+_s("copy.dest.existing.desc", "Selecionar um canal ou grupo que já existe", "Pick a channel or group that already exists")
+_s("copy.dest.create", "Criar destino automaticamente", "Create the destination automatically")
+_s("copy.dest.create.desc", "Criar um canal/grupo privado com a mesma estrutura da origem", "Create a private channel/group with the source structure")
+_s("copy.clone.title_prompt", "Título do novo destino (ENTER = {title})", "New destination title (ENTER = {title})")
+_s("copy.clone.title_invalid", "O título precisa ter de 1 a 128 caracteres.", "The title must contain 1 to 128 characters.")
+_s("copy.clone.title_empty", "O título do novo destino não pode ficar vazio.", "The new destination title cannot be empty.")
+_s("copy.clone.title_length", "O título tem {count} caracteres; o limite do Telegram é {max}.", "The title has {count} characters; Telegram's limit is {max}.")
+_s("copy.clone.topic_read_failed", "Não foi possível ler a estrutura do fórum de origem: {reason}", "Could not read the source forum structure: {reason}")
+_s("copy.clone.topic_count_mismatch", "O Telegram informou {count} tópicos, mas só foram lidos {found}.", "Telegram reported {count} topics, but only {found} were read.")
+_s("copy.clone.topic_pagination_stuck", "A paginação dos tópicos não avançou.", "Topic pagination did not advance.")
+_s("copy.clone.topic_page_limit", "A lista de tópicos excedeu o limite de páginas.", "The topic list exceeded the page limit.")
+_s("copy.clone.created_data_missing", "O Telegram criou o destino, mas não retornou os dados do canal.", "Telegram created the destination but did not return its channel data.")
+_s("copy.clone.topic_id_missing", "O Telegram não retornou o ID do tópico {topic}.", "Telegram did not return the ID for topic {topic}.")
+_s("copy.clone.forums_required", "A origem e o destino precisam ser fóruns.", "The source and destination must both be forums.")
+_s("copy.clone.topic_missing_destination", "O destino não contém o tópico {topic}.", "The destination does not contain the topic {topic}.")
+_s("copy.clone.topic_ambiguous", "Há mais de um tópico chamado {topic} no destino; não é seguro escolher automaticamente.", "The destination has multiple topics named {topic}; choosing automatically would be unsafe.")
+_s("copy.clone.map_topics", "Tópicos de origem e destino associados por nome/ícone.", "Source and destination topics matched by name/icon.")
+_s("copy.clone.new", "Será criado automaticamente", "Will be created automatically")
+_s("copy.clone.kind.channel", "Canal de transmissão", "Broadcast channel")
+_s("copy.clone.kind.group", "Grupo", "Group")
+_s("copy.clone.kind.forum", "Fórum com tópicos", "Forum with topics")
+_s("copy.clone.topics", "Tópicos que serão recriados", "Topics to recreate")
+_s("copy.clone.private_note", "O novo destino será privado. O Telegram não permite duplicar username, membros ou permissões.", "The new destination will be private. Telegram does not allow cloning usernames, members or permissions.")
+_s("copy.clone.about_warning", "A descrição da origem não pôde ser copiada: {reason}", "The source description could not be copied: {reason}")
+_s("copy.clone.creating", "Criando o novo destino e os tópicos no Telegram…", "Creating the new destination and its Telegram topics…")
+_s("copy.clone.flood_wait", "O Telegram pediu uma pausa de {seconds}s; aguardando antes de continuar…", "Telegram requested a {seconds}s pause; waiting before continuing…")
+_s("copy.clone.created", "Destino criado: {title} (ID {id})", "Destination created: {title} (ID {id})")
+_s("copy.clone.failed", "Não foi possível criar o destino: {reason}", "Could not create the destination: {reason}")
+_s("copy.clone.partial", "O Telegram já criou o destino (ID {id}), mas a estrutura ficou incompleta. Ele continua na sua conta; confira antes de tentar novamente.", "Telegram created the destination (ID {id}), but its structure is incomplete. It remains in your account; inspect it before retrying.")
+_s("copy.clone.setting_failed", "Não foi possível restaurar as opções do tópico {topic}: {reason}", "Could not restore settings for topic {topic}: {reason}")
 _s("copy.source_not_found", "Origem não encontrada", "Source not found")
 _s("copy.dest_not_found", "Destino não encontrado", "Destination not found")
 _s("copy.summary", "RESUMO DA CÓPIA", "COPY SUMMARY")
@@ -192,6 +252,17 @@ _s("copy.mode.copy", "Reenviar (cópia limpa, sem 'encaminhado de')", "Re-send (
 _s("copy.mode.forward", "Encaminhar (mais rápido, mantém 'encaminhado de')", "Forward (faster, keeps 'forwarded from')")
 _s("copy.mode.hint", "Reenviar consome mais tempo e banda, mas remove a origem.",
    "Re-sending takes more time and bandwidth but removes the origin label.")
+_s("copy.first_failure", "Primeira falha no envio: {reason}", "First send failure: {reason}")
+_s("copy.prepare_failure", "Falha ao preparar uma mensagem para envio. Confira os logs para mais detalhes.",
+   "A message could not be prepared for sending. Check the logs for details.")
+_s("copy.stop_repeated", "Cópia pausada para não continuar acumulando falhas. Corrija o motivo e tente novamente.",
+   "Copy paused to avoid accumulating more failures. Fix the cause and try again.")
+_s("copy.stop_fatal", "Cópia interrompida: essa falha bloqueia o envio. Confira a origem, o destino e suas permissões antes de tentar novamente.",
+   "Copy stopped: this error blocks sending. Check the source, destination and your permissions before trying again.")
+_s("copy.stop_flood", "Cópia pausada após um limite temporário do Telegram. Aguarde o tempo indicado antes de tentar novamente.",
+   "Copy paused after a temporary Telegram limit. Wait the indicated time before trying again.")
+_s("copy.source_protected", "O Telegram marcou o conteúdo deste canal como protegido. O TELECOPY não vai copiar nem tentar contornar essa restrição. Peça autorização ao responsável pelo canal.",
+   "Telegram marked this channel's content as protected. TELECOPY will not copy it or try to bypass that restriction. Ask the channel owner for permission.")
 _s("copy.limit_reached", "Limite diário de {limit} mensagens atingido. Aguarde amanhã ou ajuste em Configurações.",
    "Daily limit of {limit} messages reached. Wait until tomorrow or change it in Settings.")
 _s("copy.limit_warn", "Atenção: {count}/{limit} mensagens hoje.", "Warning: {count}/{limit} messages today.")
@@ -230,6 +301,7 @@ _s("result.albums", "Álbuns", "Albums")
 _s("result.time", "Tempo total", "Total time")
 _s("result.speed", "Velocidade", "Speed")
 _s("result.bytes", "Transferido", "Transferred")
+_s("result.reason", "Detalhe do erro", "Error details")
 _s("result.per_min", "msg/min", "msg/min")
 
 # ── Ferramentas ───────────────────────────────────────────────────────────────
@@ -457,8 +529,12 @@ _s("err.channel_private", "Este canal é privado e você não é membro.", "This
 _s("err.no_permission", "Sem permissão para enviar neste destino. Você precisa ser administrador.",
    "No permission to send to this destination. You must be an admin.")
 _s("err.generic", "Erro inesperado", "Unexpected error")
-_s("err.need_admin", "Você precisa ser ADMINISTRADOR no canal de destino.",
-   "You must be an ADMIN in the destination channel.")
+_s("err.need_admin", "Você precisa ser administrador no destino e ter permissão para publicar mensagens.",
+   "You must be an admin in the destination with permission to post messages.")
+_s("err.forward_restricted", "O canal de origem protege o conteúdo e o Telegram bloqueou o encaminhamento. Peça autorização ao responsável pelo canal.",
+   "The source channel protects its content and Telegram blocked forwarding. Ask the channel owner for permission.")
+_s("err.send_forbidden", "Sua conta não tem permissão para publicar no destino. Confira se é administrador e se pode postar mensagens.",
+   "Your account cannot post to the destination. Check that it is an admin and can post messages.")
 _s("err.db_busy", "O banco de dados está ocupado. Feche outras instâncias do TELECOPY.",
    "The database is busy. Close other TELECOPY instances.")
 

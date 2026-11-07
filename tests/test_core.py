@@ -131,7 +131,8 @@ def test_filtros() -> None:
     check(filter_apply("text", texto), "filtro texto")
     check(not filter_apply("text", foto), "filtro texto ignora mídia")
     check(not filter_apply("photos", None), "filtro tolera objeto inválido")
-    check(resolve_filter("2") == "photos", "resolve número do menu")
+    check(resolve_filter("0") == "all", "resolve todas no número 0")
+    check(resolve_filter("1") == "photos", "resolve primeiro filtro do menu")
     check(resolve_filter("all") == "all", "resolve código")
     check(resolve_filter("lixo") is None, "resolve inválido")
 
@@ -285,12 +286,12 @@ def _fresh_db(name: str) -> Path:
 
 
 async def _run_copy(messages, *, fail_ids=None, prev_repo=None, config=None,
-                    filter_code="all", resume=True, forward=False):
+                    filter_code="all", resume=True, forward=False, client=None):
     from database import Repository
 
     db_path = Path(prev_repo.path) if prev_repo else _fresh_db("copy")
     repo = prev_repo or Repository(db_path)
-    client = FakeClient(messages, fail_ids=fail_ids)
+    client = client or FakeClient(messages, fail_ids=fail_ids)
     source = channel(-1001, "Origem")
     dest = channel(-2002, "Destino")
     client.register_entity(source)
@@ -416,6 +417,151 @@ def test_copy_forward() -> None:
     check(resultado["done"] == 4, "modo encaminhar copia tudo")
     check(len(client.forwarded) == 4, "forward_messages utilizado")
     check(client.sent == [], "modo encaminhar não baixa nem reenvia")
+    check(all("as_album" not in call["kwargs"] for call in client.forwarded),
+          "não passa mais o argumento de álbum obsoleto do Telethon")
+    repo.close()
+
+
+def test_copy_forward_album() -> None:
+    mensagens = album_messages(300, 3) + [text_message(400, "depois")]
+    resultado, client, repo = asyncio.run(_run_copy(mensagens, forward=True))
+    check(resultado["done"] == 4, "encaminha todas as mensagens do álbum")
+    check(resultado["albums"] == 1, "contabiliza o álbum encaminhado")
+    check(len(client.forwarded) == 2 and len(client.forwarded[0]["ids"]) == 3,
+          "encaminha as três mídias do álbum juntas")
+    check("as_album" not in client.forwarded[0]["kwargs"],
+          "album forward não usa parâmetro removido")
+    repo.close()
+
+
+def test_copy_forum_preserva_topico_de_cada_mensagem() -> None:
+    mensagens = [
+        text_message(1, "pergunta", reply_to_msg_id=11),
+        text_message(2, "novidade", reply_to_msg_id=22),
+        text_message(3, "geral"),
+    ]
+    source = channel(-1101, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2202, "Fórum destino", forum=True, broadcast=False)
+    client = FakeClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forum_topics"))
+    copier = Copier(
+        client,
+        repo=repo,
+        config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+        rich_ok=False,
+    )
+    result = asyncio.run(copier.run(
+        source, dest, topic_map={1: 901, 11: 911, 22: 922},
+    ))
+    routes = {item["text"]: item["reply_to"] for item in client.sent}
+    check(result["done"] == 3, "copia todas as mensagens do fórum")
+    check(routes == {"pergunta": 911, "novidade": 922, "geral": 901},
+          f"cada mensagem vai para o tópico correspondente ({routes})")
+    repo.close()
+
+
+def test_forward_em_forum_usa_o_topico_destino() -> None:
+    mensagens = [text_message(1, "aviso", reply_to_msg_id=11)]
+    source = channel(-1103, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2204, "Fórum destino", forum=True, broadcast=False)
+
+    class TopicForwardClient(FakeClient):
+        def __init__(self, items):
+            super().__init__(items)
+            self.topic_forwards = []
+
+        async def get_input_entity(self, entity):
+            return entity
+
+        async def __call__(self, request):
+            if type(request).__name__ == "ForwardMessagesRequest":
+                self.topic_forwards.append(request)
+                return None
+            raise AssertionError(f"request inesperado: {type(request).__name__}")
+
+    client = TopicForwardClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forward_forum"))
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1), rich_ok=False)
+    result = asyncio.run(copier.run(
+        source, dest, forward=True, topic_map={1: 901, 11: 911},
+    ))
+    check(result["done"] == 1, "encaminha mensagem do fórum")
+    check(len(client.topic_forwards) == 1
+          and client.topic_forwards[0].top_msg_id == 911,
+          "encaminha usando o ID do tópico de destino")
+    check(not client.forwarded, "encaminhamento ao tópico usa o request MTProto direto")
+    repo.close()
+
+
+def test_copy_forward_para_em_erro_de_permissao() -> None:
+    from telethon.errors import ChatAdminRequiredError
+
+    mensagens = [text_message(i, f"m{i}") for i in range(1, 8)]
+    client = FakeClient(mensagens)
+    erro = ChatAdminRequiredError(request=None)
+
+    async def falha_envio(entity, messages, from_peer=None, **kwargs):
+        raise erro
+
+    client.forward_messages = falha_envio
+    resultado, client, repo = asyncio.run(
+        _run_copy(mensagens, forward=True, client=client)
+    )
+    check(resultado["done"] == 0 and resultado["errors"] == 1,
+          "permissão ausente é exibida após a primeira falha")
+    check("administrador" in resultado["first_error"].lower(),
+          "mostra como corrigir a permissão de destino")
+    repo.close()
+
+
+def test_copy_valida_permissao_do_destino_antes_da_coleta() -> None:
+    mensagens = [text_message(i, f"m{i}") for i in range(1, 4)]
+    source, dest = channel(-1001, "Origem"), channel(-2002, "Destino")
+    client = FakeClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+
+    async def get_me(input_peer=False):
+        return object()
+
+    async def get_permissions(entity, user):
+        return type("Permissions", (), {"post_messages": False})()
+
+    client.get_me = get_me
+    client.get_permissions = get_permissions
+    repo = Repository(Path(_TMP) / "preflight_permissions.db")
+    copier = Copier(
+        client, repo=repo,
+        config=RunConfig(workers=1, delay=0.1, forward_mode=True),
+        rich_ok=False,
+    )
+    result = asyncio.run(copier.run(source, dest, forward=True))
+    check(result["done"] == 0 and result["errors"] == 1,
+          "destino sem permissão bloqueia antes da coleta")
+    check("administrador" in result["first_error"].lower(),
+          "pré-checagem orienta a permissão necessária")
+    check(not client.forwarded, "pré-checagem não tenta enviar mensagens")
+    repo.close()
+
+
+def test_copy_para_em_canal_protegido() -> None:
+    mensagens = [text_message(1, "não deve copiar")]
+    source, dest = channel(-1001, "Origem protegida"), channel(-2002, "Destino")
+    source.noforwards = True
+    client = FakeClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(Path(_TMP) / "protected_source.db")
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1), rich_ok=False)
+    result = asyncio.run(copier.run(source, dest))
+    check(result["done"] == 0 and result["errors"] == 1,
+          "canal protegido não é copiado")
+    check("protegido" in result["first_error"].lower(),
+          "explica a proteção do canal")
     repo.close()
 
 

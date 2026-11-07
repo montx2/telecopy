@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
@@ -143,6 +143,13 @@ def main() -> int:
         print(f"\n  TELECOPY v{app_meta.__version__} — verificação de ambiente\n")
         print(f"  Python        : {sys.version.split()[0]}")
         print(f"  Diretório     : {DATA_DIR}")
+        try:
+            probe = DATA_DIR / ".telecopy-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            print("  Armazenamento : gravável ✓")
+        except OSError as exc:
+            print(f"  Armazenamento : sem permissão de gravação — {exc}")
         print(f"  Banco         : {db.path} ({db.size_bytes()} bytes)")
         health = db.health()
         print(f"  Integridade   : {health['integrity']}")
