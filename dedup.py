@@ -184,7 +184,7 @@ class DedupEngine:
         file_size: int = 0,
         source_id: int = 0,
     ) -> None:
-        if not content_hash:
+        if not self.enabled or not content_hash:
             return
         key = f"{content_hash}:{dest_id}"
         self._lru.put(key, sent_msg_id)

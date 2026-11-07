@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     content_hash  TEXT,
     bytes_done    INTEGER NOT NULL DEFAULT 0,
     media_type    TEXT    NOT NULL DEFAULT '',
+    dest_msg_id   INTEGER,
+    dest_topic    INTEGER,
     UNIQUE (source_id, dest_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_cp_pair   ON checkpoints (source_id, dest_id);
@@ -188,6 +190,12 @@ class Repository:
     def _init_schema(self) -> None:
         with self._db() as conn:
             conn.executescript(_SCHEMA)
+            # Bancos da v4.0 não tinham o vínculo origem→destino necessário
+            # para reconstruir respostas e retomar retries no tópico certo.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")}
+            for column in ("dest_msg_id", "dest_topic"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {column} INTEGER")
 
     def close(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -240,6 +248,8 @@ class Repository:
         content_hash: Optional[str] = None,
         bytes_done: int = 0,
         media_type: str = "",
+        dest_msg_id: Optional[int] = None,
+        dest_topic: Optional[int] = None,
     ) -> None:
         status_value = status.value if isinstance(status, Status) else str(status)
         now = time.time()
@@ -248,17 +258,19 @@ class Repository:
                 """
                 INSERT INTO checkpoints
                     (source_id, dest_id, msg_id, status, content_hash,
-                     bytes_done, media_type, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     bytes_done, media_type, timestamp, dest_msg_id, dest_topic)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (source_id, dest_id, msg_id) DO UPDATE SET
                     status       = excluded.status,
                     content_hash = COALESCE(excluded.content_hash, checkpoints.content_hash),
                     bytes_done   = excluded.bytes_done,
                     media_type   = excluded.media_type,
-                    timestamp    = excluded.timestamp
+                    timestamp    = excluded.timestamp,
+                    dest_msg_id  = COALESCE(excluded.dest_msg_id, checkpoints.dest_msg_id),
+                    dest_topic   = COALESCE(excluded.dest_topic, checkpoints.dest_topic)
                 """,
                 (source_id, dest_id, msg_id, status_value, content_hash,
-                 bytes_done, media_type, now),
+                 bytes_done, media_type, now, dest_msg_id, dest_topic),
             )
 
     def update_status(
@@ -291,9 +303,12 @@ class Repository:
         content_hash: Optional[str] = None,
         bytes_done: int = 0,
         media_type: str = "",
+        dest_msg_id: Optional[int] = None,
+        dest_topic: Optional[int] = None,
     ) -> None:
         self.upsert_checkpoint(
-            source_id, dest_id, msg_id, Status.DONE, content_hash, bytes_done, media_type
+            source_id, dest_id, msg_id, Status.DONE, content_hash, bytes_done, media_type,
+            dest_msg_id=dest_msg_id, dest_topic=dest_topic,
         )
         with self._db() as conn:
             conn.execute(
@@ -318,6 +333,27 @@ class Repository:
                     (source_id, dest_id),
                 )
             }
+
+    def completed_ids(self, source_id: int, dest_id: int) -> Set[int]:
+        """IDs concluídos ou explicitamente ignorados por deduplicação."""
+        with self._db() as conn:
+            return {
+                int(row[0]) for row in conn.execute(
+                    "SELECT msg_id FROM checkpoints "
+                    "WHERE source_id=? AND dest_id=? AND status IN ('done', 'skipped')",
+                    (source_id, dest_id),
+                )
+            }
+
+    def checkpoint_route(self, source_id: int, dest_id: int, msg_id: int) -> Dict[str, Any]:
+        """Vínculo persistido para replies/retries; vazio em bancos antigos."""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT status, dest_msg_id, dest_topic FROM checkpoints "
+                "WHERE source_id=? AND dest_id=? AND msg_id=?",
+                (source_id, dest_id, msg_id),
+            ).fetchone()
+        return dict(row) if row else {}
 
     def last_processed_id(self, source_id: int, dest_id: int) -> int:
         with self._db() as conn:
@@ -620,6 +656,9 @@ class Repository:
         with self._db() as conn:
             for table in ("checkpoints", "dedup", "processed", "failures"):
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608
+            # Mapas de tópicos são estado de cópia; sem isso, "recomeçar do
+            # zero" ainda reutilizaria associações antigas.
+            conn.execute("DELETE FROM kv WHERE key LIKE 'forum_topic_map:%'")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 

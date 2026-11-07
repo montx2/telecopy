@@ -98,16 +98,17 @@ class CloneFlowClient(FlowClient):
         }
 
     @staticmethod
-    def _topic(topic_id, title, *, icon_color=None, pinned=False):
+    def _topic(topic_id, title, *, icon_color=None, icon_emoji_id=None,
+               pinned=False, closed=False, hidden=False):
         return SimpleNamespace(
             id=topic_id,
             title=title,
             icon_color=icon_color or 0,
-            icon_emoji_id=None,
+            icon_emoji_id=icon_emoji_id,
             title_missing=False,
-            closed=False,
+            closed=closed,
             pinned=pinned,
-            hidden=False,
+            hidden=hidden,
             top_message=topic_id,
             date=None,
         )
@@ -121,6 +122,11 @@ class CloneFlowClient(FlowClient):
             peer_id = int(getattr(request.peer, "id", 0) or 0)
             topics = self.topic_catalog.get(peer_id, [])
             return SimpleNamespace(count=len(topics), topics=list(topics))
+        if name == "GetForumTopicsByIDRequest":
+            peer_id = int(getattr(request.peer, "id", 0) or 0)
+            topics = [t for t in self.topic_catalog.get(peer_id, [])
+                      if t.id in set(request.topics)]
+            return SimpleNamespace(count=len(topics), topics=topics)
         if name == "CreateChannelRequest":
             self.created = teardown_channel(channel(
                 -500, request.title,
@@ -132,21 +138,39 @@ class CloneFlowClient(FlowClient):
                 self.topic_catalog[self.created.id] = [self._topic(1, "General")]
             return SimpleNamespace(chats=[self.created], updates=[])
         if name == "CreateForumTopicRequest":
+            peer_id = int(getattr(request.peer, "id", 0) or 0)
             self._next_topic_id += 1
             topic = self._topic(
                 self._next_topic_id,
                 request.title,
                 icon_color=getattr(request, "icon_color", None),
+                icon_emoji_id=getattr(request, "icon_emoji_id", None),
             )
-            self.topic_catalog[self.created.id].append(topic)
+            self.topic_catalog.setdefault(peer_id, []).append(topic)
             return SimpleNamespace(updates=[SimpleNamespace(topic_id=topic.id)])
-        if name in {
-            "EditForumTopicRequest",
-            "UpdatePinnedForumTopicRequest",
-            "ReorderPinnedForumTopicsRequest",
-        }:
+        if name == "EditForumTopicRequest":
+            peer_id = int(getattr(request.peer, "id", 0) or 0)
+            for topic in self.topic_catalog.get(peer_id, []):
+                if topic.id == request.topic_id:
+                    if getattr(request, "title", None) is not None:
+                        topic.title = request.title
+                    if getattr(request, "icon_emoji_id", None) is not None:
+                        topic.icon_emoji_id = request.icon_emoji_id or None
+                    if getattr(request, "closed", None) is not None:
+                        topic.closed = request.closed
+                    if getattr(request, "hidden", None) is not None:
+                        topic.hidden = request.hidden
             return SimpleNamespace()
-        raise AssertionError(f"Request Telegram inesperado: {name}")
+        if name == "UpdatePinnedForumTopicRequest":
+            peer_id = int(getattr(request.peer, "id", 0) or 0)
+            for topic in self.topic_catalog.get(peer_id, []):
+                if topic.id == request.topic_id:
+                    topic.pinned = request.pinned
+            return SimpleNamespace()
+        if name == "ReorderPinnedForumTopicsRequest":
+            return SimpleNamespace()
+        # Demandas de envio/upload do motor de cópia usam o fake base.
+        return await super().__call__(request)
 
 
 def feed(*answers: str) -> None:
@@ -430,6 +454,111 @@ async def _guard(coro):
         return result
     except EOFError:
         return None
+
+
+def test_fluxo_destino_existente_cria_topicos_ausentes() -> None:
+    origem = teardown_channel(channel(-160, "Fórum Origem", forum=True, broadcast=False))
+    destino = teardown_channel(channel(-260, "Fórum Destino", forum=True, broadcast=False))
+    mensagens = [
+        text_message(1, "aviso repetido", reply_to_msg_id=11),
+        text_message(2, "aviso repetido", reply_to_msg_id=22),
+    ]
+    app = core.App()
+    client = CloneFlowClient(mensagens, origem)
+    client.entities.append(destino)
+    client.register_entity(destino)
+    client.topic_catalog[destino.id] = [client._topic(1, "General")]
+    app.client = client
+    app.picker = core.ChannelPicker(client)
+    app.dedup = core.DedupEngine(app_repo(app))
+    app.config.delay = 0.1
+    app.config.workers = 1
+    app.config.signature = "@nao_deve_aparecer"
+    app.config.use_dedup = True
+
+    # origem → destino existente → ENTER todos tópicos origem → destino → ENTER
+    # todos tópicos destino → filtro todos → não alterar opções → confirmar → pause
+    feed("/", "Fórum Origem", "1", "1", "", "/", "Fórum Destino", "1", "", "0", "n", "s", "")
+    asyncio.run(_guard(app._menu_copy()))
+
+    titles = [topic.title for topic in client.topic_catalog[destino.id]]
+    check(titles == ["General", "Perguntas", "Novidades"],
+          f"destino existente ganha os tópicos ausentes ({titles})")
+    routes = [(item["text"], item["reply_to"]) for item in client.sent]
+    check(routes == [("aviso repetido", 101), ("aviso repetido", 102)],
+          f"mensagens repetidas vão aos tópicos novos ({routes})")
+    check(all("@nao_deve_aparecer" not in (item.get("text") or "") for item in client.sent),
+          "assinatura desativada na cópia fiel de fórum")
+
+
+def test_paginacao_de_topicos_nao_para_em_pagina_curta() -> None:
+    from channel_clone import ChannelCloner
+
+    class PagedClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, request):
+            if type(request).__name__ == "GetForumTopicsByIDRequest":
+                return SimpleNamespace(topics=[])
+            self.calls += 1
+            if self.calls == 1:
+                topics = [
+                    SimpleNamespace(id=1, title="General", icon_color=0, icon_emoji_id=None,
+                                    title_missing=False, closed=False, pinned=False, hidden=False,
+                                    top_message=1, date=None),
+                    SimpleNamespace(id=11, title="A", icon_color=0, icon_emoji_id=None,
+                                    title_missing=False, closed=False, pinned=False, hidden=False,
+                                    top_message=11, date=None),
+                ]
+            elif self.calls == 2:
+                topics = [
+                    SimpleNamespace(id=22, title="B", icon_color=0, icon_emoji_id=None,
+                                    title_missing=False, closed=False, pinned=False, hidden=False,
+                                    top_message=22, date=None),
+                ]
+            else:
+                topics = []
+            return SimpleNamespace(count=3, topics=topics)
+
+    topics = asyncio.run(ChannelCloner(PagedClient())._list_forum_topics(object()))
+    check([topic.id for topic in topics] == [1, 11, 22],
+          "página curta não encerra a leitura antes do fim")
+
+
+def test_mapa_persistido_nao_usa_topico_de_origem_apagado() -> None:
+    from channel_clone import ChannelCloner
+
+    origem = teardown_channel(channel(-170, "Fórum Origem", forum=True, broadcast=False))
+    destino = teardown_channel(channel(-270, "Fórum Destino", forum=True, broadcast=False))
+    client = CloneFlowClient([], origem)
+    client.topic_catalog[destino.id] = [
+        client._topic(1, "General"),
+        client._topic(201, "Perguntas", icon_color=0x6C8EBF),
+        client._topic(202, "Novidades"),
+    ]
+    repo = Repository(Path(_TMP) / "stale_map.db")
+    repo.reset_all()
+    repo.set_kv("forum_topic_map:-170:-270", '{"999": 201}')
+    cloner = ChannelCloner(client, repo=repo)
+    plan, mapping, missing = asyncio.run(cloner.plan_existing(origem, destino))
+    check(mapping == {1: 1, 11: 201, 22: 202},
+          f"mapa antigo não sequestra tópico do destino ({mapping})")
+    check(missing == (), "nenhum tópico ausente quando os títulos batem")
+    ensured = asyncio.run(cloner.ensure_topics(plan, destino, {1: 1, 999: 201, 11: 201, 22: 202}))
+    check(999 not in ensured, "ensure_topics remove associações obsoletas")
+    repo.close()
+
+
+def test_topico_comum_chamado_general_nao_vira_general() -> None:
+    from channel_clone import ChannelCloner, ForumTopicSpec
+
+    named = ForumTopicSpec(id=50, title="General")
+    check(ChannelCloner._general_topic([named]) is None,
+          "tópico comum chamado General não é o General nativo")
+    real = ForumTopicSpec(id=1, title="Geral")
+    check(ChannelCloner._general_topic([named, real]) is real,
+          "General nativo é identificado pelo ID 1")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
