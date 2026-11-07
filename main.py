@@ -128,7 +128,7 @@ def main() -> int:
     if not check_dependencies(verbose=args.check):
         return 1
 
-    from config import DATA_DIR, LOCK_FILE, SESSION_FILE
+    from config import DATA_DIR, LOCK_FILE, SESSION_FILE, ui
     from database import db
     from i18n import set_lang
     from prefs import prefs
