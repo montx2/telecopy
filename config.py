@@ -1,236 +1,350 @@
 """
-config.py — Configuration, constants, and terminal UI primitives.
-Com detecção automática de recursos do sistema (RAM, CPU, Disco).
+config.py — Configuração central, constantes e primitivas de interface.
+
+Todos os caminhos são resolvidos a partir da pasta do executável/script,
+garantindo que o programa funcione de qualquer diretório de trabalho
+(duplo clique no .exe, atalho do menu Iniciar, terminal, etc.).
 """
 
+from __future__ import annotations
+
 import os
+import re
 import sys
-import psutil
-from pathlib import Path
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
-# ── Directories ───────────────────────────────────────────────────────────────
+# ── Caminho base (compatível com script e executável Nuitka/PyInstaller) ──────
 
-DATA_DIR    = Path("data")
-TEMP_DIR    = DATA_DIR / "tmp"
-LOGS_DIR    = DATA_DIR / "logs"
-VAULT_DIR   = DATA_DIR / "vault"
-EXPORT_DIR  = DATA_DIR / "exports"
 
-CONFIG_FILE  = DATA_DIR / "config.json"
+def get_base_dir() -> Path:
+    """Diretório onde o programa está instalado."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = get_base_dir()
+
+# Dados ficam ao lado do executável — o usuário sempre encontra tudo.
+DATA_DIR = BASE_DIR / "data"
+TEMP_DIR = DATA_DIR / "tmp"
+LOGS_DIR = DATA_DIR / "logs"
+VAULT_DIR = DATA_DIR / "vault"
+EXPORT_DIR = DATA_DIR / "exports"
+BACKUP_DIR = DATA_DIR / "backups"
+
+CONFIG_FILE = DATA_DIR / "config.json"
+LOCK_FILE = DATA_DIR / "telecopy.lock"
 SESSION_FILE = DATA_DIR / "session"
-DB_FILE      = DATA_DIR / "telecopy.db"
-STATS_FILE   = DATA_DIR / "stats.json"
-QUEUE_FILE   = DATA_DIR / "queue.json"
-VAULT_FILE   = VAULT_DIR / "credentials.enc"
+DB_FILE = DATA_DIR / "telecopy.db"
+STATS_FILE = DATA_DIR / "stats.json"
+DAILY_FILE = DATA_DIR / "daily.json"
+QUEUE_FILE = DATA_DIR / "queue.json"
+VAULT_FILE = VAULT_DIR / "credentials.enc"
+LOG_FILE = LOGS_DIR / "telecopy.log"
 
-# ── Limits ────────────────────────────────────────────────────────────────────
+# ── Limites ───────────────────────────────────────────────────────────────────
 
-DAILY_LIMIT      = 1000
-DAILY_WARN       = 800
-MAX_RETRIES      = 3
+APP_NAME = "TELECOPY"
+APP_AUTHOR = "montx2"
 
-# ── System Detection & Auto-Configuration ─────────────────────────────────────
+DAILY_LIMIT = 1000
+DAILY_WARN = 800
+MAX_RETRIES = 3
 
-def _detect_system_resources():
-    """Detecta recursos do sistema e calcula configurações ótimas."""
+# Telegram rejeita legendas acima de 1024 caracteres e mensagens acima de 4096.
+CAPTION_LIMIT = 1024
+MESSAGE_LIMIT = 4096
+# Arquivos acima deste tamanho são enviados como documento.
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+PROGRESS_INTERVAL = 0.4
+
+# ── Deduplicação ──────────────────────────────────────────────────────────────
+
+BLOOM_CAPACITY = 1_000_000
+BLOOM_FP_RATE = 0.001
+LRU_SIZE = 50_000
+
+# ── Detectção de recursos do sistema ─────────────────────────────────────────
+
+
+@dataclass
+class SystemProfile:
+    """Perfil de hardware usado para calibrar a performance."""
+
+    ram_total_gb: float = 4.0
+    ram_available_gb: float = 2.0
+    ram_percent: float = 50.0
+    disk_free_gb: float = 10.0
+    disk_total_gb: float = 20.0
+    cpu_logical: int = 2
+    cpu_physical: int = 1
+    is_low_end: bool = False
+    is_high_end: bool = False
+
+    @property
+    def label(self) -> str:
+        if self.is_high_end:
+            return "Alto desempenho"
+        if self.is_low_end:
+            return "Básico"
+        return "Padrão"
+
+
+def detect_system() -> SystemProfile:
+    """Coleta RAM, disco e CPU sem nunca levantar exceção."""
     try:
-        # RAM
-        ram = psutil.virtual_memory()
-        ram_total = ram.total / (1024**3)  # GB
-        ram_available = ram.available / (1024**3)  # GB
-        
-        # CPU
-        cpus = psutil.cpu_count(logical=True) or 2
-        cpu_physical = psutil.cpu_count(logical=False) or 1
-        
-        # Disco
+        import psutil
+
+        mem = psutil.virtual_memory()
+        ram_total = mem.total / (1024**3)
+        ram_avail = mem.available / (1024**3)
+        ram_pct = float(mem.percent)
+
         try:
-            disk = psutil.disk_usage(DATA_DIR if DATA_DIR.exists() else os.getcwd())
-            disk_free = disk.free / (1024**3)  # GB
-        except:
-            disk_free = 10  # Fallback seguro
-        
-        # Cálculo inteligente de workers
-        # Fórmula: 1 worker por 2GB de RAM disponível, limitado pela CPU
-        workers_by_ram = int(ram_available / 2)
-        workers_by_cpu = min(cpus * 2, 8)  # Máx 2x cores lógicos, limitado em 8
-        
-        MAX_WORKERS_DL = min(workers_by_ram, workers_by_cpu, 16)
-        MAX_WORKERS_DL = max(1, MAX_WORKERS_DL)  # Mínimo 1
-        
-        return {
-            'ram_total': ram_total,
-            'ram_available': ram_available,
-            'cpu_count': cpus,
-            'cpu_physical': cpu_physical,
-            'disk_free': disk_free,
-            'max_workers_dl': MAX_WORKERS_DL,
-            'max_workers_up': max(1, MAX_WORKERS_DL // 2),
-            'chunk_size': min(512 * 1024, int(ram.available * 0.1)),  # 512KB ou 10% RAM
-            'buffer_ram': int(ram.available * 0.6),  # 60% da RAM disponível por padrão
-        }
+            disk = psutil.disk_usage(str(DATA_DIR if DATA_DIR.exists() else BASE_DIR))
+            disk_free = disk.free / (1024**3)
+            disk_total = disk.total / (1024**3)
+        except Exception:
+            disk_free, disk_total = 10.0, 20.0
+
+        cpu_log = psutil.cpu_count(logical=True) or 2
+        cpu_phys = psutil.cpu_count(logical=False) or 1
     except Exception:
-        # Fallback seguro se psutil falhar
-        return {
-            'ram_total': 4,
-            'ram_available': 2,
-            'cpu_count': 2,
-            'cpu_physical': 1,
-            'disk_free': 10,
-            'max_workers_dl': 4,
-            'max_workers_up': 2,
-            'chunk_size': 512 * 1024,
-            'buffer_ram': 1 * 1024 * 1024 * 1024,  # 1GB
-        }
+        ram_total, ram_avail, ram_pct = 4.0, 2.0, 50.0
+        disk_free, disk_total = 10.0, 20.0
+        cpu_log, cpu_phys = 2, 1
 
-# Detecta recursos ao importar o módulo
-_SYSTEM = _detect_system_resources()
+    return SystemProfile(
+        ram_total_gb=round(ram_total, 2),
+        ram_available_gb=round(ram_avail, 2),
+        ram_percent=ram_pct,
+        disk_free_gb=round(disk_free, 2),
+        disk_total_gb=round(disk_total, 2),
+        cpu_logical=cpu_log,
+        cpu_physical=cpu_phys,
+        is_low_end=(ram_total < 4 or cpu_log < 4 or disk_free < 10),
+        is_high_end=(ram_total >= 16 and cpu_log >= 8 and disk_free >= 50),
+    )
 
-# ── Performance (Auto-detectados ou Fallback) ─────────────────────────────────
 
-CHUNK_SIZE           = _SYSTEM['chunk_size']
-MAX_WORKERS_DL       = _SYSTEM['max_workers_dl']
-MAX_WORKERS_UP       = _SYSTEM['max_workers_up']
-BUFFER_RAM_MAX       = _SYSTEM['buffer_ram']     # 60% da RAM disponível
-PROGRESS_INTERVAL    = 0.4
+SYSTEM = detect_system()
 
-# ── Deduplication ─────────────────────────────────────────────────────────────
+# Valores de performance (recalculados em runtime por RunConfig)
+CHUNK_SIZE = 512 * 1024
+MAX_WORKERS_DL = max(1, min(SYSTEM.cpu_logical, 8))
+MAX_WORKERS_UP = max(1, MAX_WORKERS_DL // 2)
+BUFFER_RAM_MAX = int(SYSTEM.ram_available_gb * 0.6 * 1024**3)
 
-BLOOM_CAPACITY  = 1_000_000
-BLOOM_FP_RATE   = 0.001
-LRU_SIZE        = 50_000
+
+def recommended_workers(ram_available_gb: float | None = None,
+                        memory_profile: float = 0.6) -> int:
+    """
+    Número de workers seguro: 1 worker para cada 0.5 GB de RAM que sobra
+    depois de reservar o buffer de memória, limitado pela CPU.
+    """
+    ram = SYSTEM.ram_available_gb if ram_available_gb is None else ram_available_gb
+    free_after_buffer = max(0.25, ram * (1.0 - memory_profile))
+    by_ram = int(free_after_buffer / 0.5)
+    by_cpu = max(1, SYSTEM.cpu_logical)
+    return max(1, min(by_ram, by_cpu, 8))
+
+
+# ── Diretórios ────────────────────────────────────────────────────────────────
 
 
 def init_dirs() -> None:
-    """Create required directories with restricted permissions."""
-    for d in [DATA_DIR, TEMP_DIR, LOGS_DIR, VAULT_DIR, EXPORT_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
+    """Cria os diretórios de trabalho com permissões restritas."""
+    for d in (DATA_DIR, TEMP_DIR, LOGS_DIR, VAULT_DIR, EXPORT_DIR, BACKUP_DIR):
         try:
-            os.chmod(d, 0o700)
-        except Exception:
+            d.mkdir(parents=True, exist_ok=True)
+            if os.name != "nt":
+                os.chmod(d, 0o700)
+        except OSError:
             pass
 
 
 init_dirs()
 
 
-# ── ANSI colour palette ───────────────────────────────────────────────────────
+# ── Utilidades de texto / terminal ────────────────────────────────────────────
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def clean_len(text: str) -> int:
+    """Comprimento visível do texto (ignora códigos ANSI)."""
+    return len(_ANSI_RE.sub("", text))
+
+
+def display_width(text: str) -> int:
+    """Largura visual considerando caracteres de largura dupla."""
+    width = 0
+    for ch in _ANSI_RE.sub("", text):
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def term_columns(default: int = 88) -> int:
+    try:
+        return os.get_terminal_size().columns
+    except OSError:
+        return default
+
+
+def supports_color() -> bool:
+    """Detecta se o terminal aceita ANSI (Windows 10+ moderno / redirect)."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return os.environ.get("TERM", "") not in ("", "dumb")
+    # Windows: habilita VT mode explicitamente
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# ── Paleta de cores ───────────────────────────────────────────────────────────
+
 
 class C:
-    """Minimal, readable ANSI colour constants."""
+    """Constantes ANSI. Ficam vazias automaticamente se a cor não é suportada."""
 
-    RST   = "\033[0m"
-    BOLD  = "\033[1m"
-    DIM   = "\033[2m"
+    RST = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
 
-    # Primary
-    ORANGE  = "\033[38;5;208m"
-    AMBER   = "\033[38;5;214m"
-    GOLD    = "\033[38;5;220m"
+    ORANGE = "\033[38;5;208m"
+    AMBER = "\033[38;5;214m"
+    GOLD = "\033[38;5;220m"
+    PURPLE = "\033[38;5;99m"
+    VIOLET = "\033[38;5;141m"
+    INDIGO = "\033[38;5;61m"
 
-    PURPLE  = "\033[38;5;99m"
-    VIOLET  = "\033[38;5;141m"
-    INDIGO  = "\033[38;5;61m"
+    GREEN = "\033[38;5;82m"
+    YELLOW = "\033[38;5;226m"
+    RED = "\033[38;5;196m"
+    CYAN = "\033[38;5;87m"
+    BLUE = "\033[38;5;75m"
 
-    # Status
-    GREEN   = "\033[38;5;82m"
-    YELLOW  = "\033[38;5;226m"
-    RED     = "\033[38;5;196m"
-    CYAN    = "\033[38;5;87m"
-    BLUE    = "\033[38;5;75m"
-
-    # Neutrals
-    WHITE   = "\033[38;5;255m"
-    SILVER  = "\033[38;5;250m"
-    GRAY    = "\033[38;5;244m"
-    DARK    = "\033[38;5;238m"
+    WHITE = "\033[38;5;255m"
+    SILVER = "\033[38;5;250m"
+    GRAY = "\033[38;5;244m"
+    DARK = "\033[38;5;238m"
 
 
-# ── Terminal UI primitives ────────────────────────────────────────────────────
+_COLOR_NAMES = [
+    "RST", "BOLD", "DIM", "ORANGE", "AMBER", "GOLD", "PURPLE", "VIOLET",
+    "INDIGO", "GREEN", "YELLOW", "RED", "CYAN", "BLUE", "WHITE", "SILVER",
+    "GRAY", "DARK",
+]
+
+
+def _disable_colors() -> None:
+    for name in _COLOR_NAMES:
+        setattr(C, name, "")
+
+
+COLOR = supports_color()
+if not COLOR:
+    _disable_colors()
+
+
+# ── Interface de terminal ─────────────────────────────────────────────────────
+
 
 class UI:
     """
-    Clean terminal interface.
-
-    Line width is fixed at 76 characters to stay comfortable on
-    80-column terminals and most modern emulators.
+    Interface de terminal enxuta, com 76 colunas fixas de conteúdo.
+    Funciona igual em Windows, Linux e macOS, com ou sem cor.
     """
 
     W = 76
 
     def __init__(self) -> None:
-        self._rich_ok = False
-        self._console  = None
-
+        self._rich = None
         try:
             from rich.console import Console
-            self._console  = Console()
-            self._rich_ok  = True
-        except ImportError:
-            pass
 
-    # ── Low-level helpers ────────────────────────────────────────────────────
+            self._rich = Console(force_terminal=COLOR or None, highlight=False)
+        except Exception:
+            self._rich = None
+
+    # -- básicos ------------------------------------------------------------
 
     @staticmethod
     def clear() -> None:
-        os.system("cls" if os.name == "nt" else "clear")
+        if os.name == "nt":
+            os.system("cls")
+        else:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
 
-    def _w(self, text: str) -> None:
+    @staticmethod
+    def _w(text: str) -> None:
         sys.stdout.write(text)
+        sys.stdout.flush()
 
-    def _wln(self, text: str) -> None:
+    @staticmethod
+    def _wln(text: str) -> None:
         sys.stdout.write(text + "\n")
+        sys.stdout.flush()
 
-    def _clean_len(self, text: str) -> int:
-        """Length of text after stripping ANSI escape codes."""
-        import re
-        return len(re.sub(r"\033\[[0-9;]*m", "", text))
+    def pad(self, text: str, width: int | None = None, fill: str = " ") -> str:
+        w = (width or self.W) - 4
+        return text + fill * max(0, w - display_width(text))
 
-    def pad(self, text: str, width: int = None, fill: str = " ") -> str:
+    def center(self, text: str, width: int | None = None) -> str:
         w = width or self.W
-        n = self._clean_len(text)
-        return text + fill * max(0, w - n)
-
-    def center(self, text: str, width: int = None) -> str:
-        w = width or self.W
-        n = self._clean_len(text)
-        left = (w - n) // 2
-        right = w - n - left
-        return " " * left + text + " " * right
-
-    # ── Structural elements ───────────────────────────────────────────────────
-
-    def rule(self, char: str = "─", color: str = None) -> None:
-        col = color or C.INDIGO
-        self._wln(f"  {col}{char * self.W}{C.RST}")
+        n = display_width(text)
+        left = max(0, (w - n) // 2)
+        return " " * left + text
 
     def blank(self) -> None:
         print()
 
-    def divider(self) -> None:
-        self._wln(f"  {C.DARK}{'─' * self.W}{C.RST}")
+    # -- estrutura ----------------------------------------------------------
 
-    # ── Header / section title ────────────────────────────────────────────────
+    def rule(self, char: str = "─", color: str | None = None) -> None:
+        col = color or C.INDIGO
+        self._wln(f"  {col}{char * self.W}{C.RST}")
+
+    def divider(self) -> None:
+        self.rule("─", C.DARK)
 
     def header(self, title: str, subtitle: str = "") -> None:
         self.blank()
         self.rule("═", C.PURPLE)
         title_fmt = f"{C.BOLD}{C.ORANGE}{title}{C.RST}"
-        self._wln(f"  {C.PURPLE}║{C.RST}  {self.pad(title_fmt, self.W - 4)}{C.PURPLE}║{C.RST}")
+        self._wln(f"  {C.PURPLE}║{C.RST}  {self.pad(title_fmt, self.W)}{C.PURPLE}║{C.RST}")
         if subtitle:
             sub_fmt = f"{C.GRAY}{subtitle}{C.RST}"
-            self._wln(f"  {C.PURPLE}║{C.RST}  {self.pad(sub_fmt, self.W - 4)}{C.PURPLE}║{C.RST}")
+            self._wln(f"  {C.PURPLE}║{C.RST}  {self.pad(sub_fmt, self.W)}{C.PURPLE}║{C.RST}")
         self.rule("═", C.PURPLE)
         self.blank()
 
     def section(self, title: str) -> None:
         self.blank()
         self._wln(f"  {C.AMBER}{C.BOLD}{title}{C.RST}")
-        self._wln(f"  {C.DARK}{'─' * len(title)}{C.RST}")
+        self._wln(f"  {C.DARK}{'─' * display_width(title)}{C.RST}")
 
-    # ── Status messages ───────────────────────────────────────────────────────
+    # -- mensagens ----------------------------------------------------------
 
     def ok(self, msg: str) -> None:
         self._wln(f"  {C.GREEN}✓{C.RST}  {C.WHITE}{msg}{C.RST}")
@@ -247,114 +361,143 @@ class UI:
     def step(self, msg: str) -> None:
         self._wln(f"  {C.PURPLE}›{C.RST}  {msg}")
 
-    # ── Input helpers ─────────────────────────────────────────────────────────
+    def text(self, msg: str, color: str = "") -> None:
+        self._wln(f"  {color or C.SILVER}{msg}{C.RST}")
 
-    def ask(self, prompt: str, required: bool = True) -> str:
+    def bullet(self, msg: str) -> None:
+        self._wln(f"  {C.DARK}•{C.RST}  {C.SILVER}{msg}{C.RST}")
+
+    # -- entrada ------------------------------------------------------------
+
+    @staticmethod
+    def _tr(key: str, default: str) -> str:
         try:
             from i18n import t as _t
-            req_msg   = _t("prompt.required")
-        except ImportError:
-            req_msg   = "This field is required."
 
+            return _t(key)
+        except Exception:
+            return default
+
+    def ask(self, prompt: str, required: bool = True) -> str:
+        req_msg = self._tr("prompt.required", "Este campo é obrigatório.")
         while True:
             try:
                 self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST}: ")
                 value = input().strip()
             except (EOFError, KeyboardInterrupt):
+                print()
                 return ""
             if value or not required:
                 return value
             self.warn(req_msg)
 
-    def confirm(self, prompt: str) -> bool:
-        try:
-            from i18n import t as _t
-            yn        = _t("prompt.yes_no")
-            yes_chars = set(_t("prompt.yes_chars").split())
-        except ImportError:
-            yn        = "[y/N]"
-            yes_chars = {"y", "yes"}
+    def secret(self, prompt: str, required: bool = True) -> str:
+        """Leitura de senha sem eco (fallback: pergunta normal)."""
+        import getpass
 
+        while True:
+            try:
+                self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST}: ")
+                value = getpass.getpass("").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return ""
+            except Exception:
+                try:
+                    value = input().strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return ""
+            if value or not required:
+                return value
+            self.warn(self._tr("prompt.required", "Este campo é obrigatório."))
+
+    def confirm(self, prompt: str, default: bool = False) -> bool:
+        yn = self._tr("prompt.yes_no", "[s/N]" if default is False else "[S/n]")
+        yes_chars = set(self._tr("prompt.yes_chars", "s sim y yes").split())
+        no_chars = set(self._tr("prompt.no_chars", "n nao não no").split())
         self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST} {C.GRAY}{yn}{C.RST}: ")
         try:
-            ans = input().strip().lower()
+            raw = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+        if raw == "":
+            return default
+        if raw in yes_chars:
+            return True
+        if raw in no_chars:
             return False
-        return ans in yes_chars
+        return default
 
-    def pause(self, msg: str = None) -> None:
-        if msg is None:
-            try:
-                from i18n import t as _t
-                msg = _t("prompt.continue")
-            except ImportError:
-                msg = "Press ENTER to continue"
+    def pause(self, msg: str | None = None) -> None:
+        msg = msg or self._tr("prompt.continue", "Pressione ENTER para continuar")
         self._w(f"\n  {C.GRAY}{msg}{C.RST}  ")
         try:
             input()
         except (EOFError, KeyboardInterrupt):
-            pass
+            print()
 
-    # ── Menu rendering ────────────────────────────────────────────────────────
+    # -- menu ---------------------------------------------------------------
 
     def menu(self, items: list[tuple]) -> None:
-        """
-        Render a numbered menu.
-
-        items: list of (key, label, description?)
-        """
+        """items: lista de (tecla, título) ou (tecla, título, descrição)."""
         self.blank()
         for i, entry in enumerate(items):
-            key, label = entry[0], entry[1]
+            key, label = str(entry[0]), str(entry[1])
             desc = entry[2] if len(entry) > 2 else ""
-
             if key == "0":
                 color = C.GRAY
-            elif i % 2 == 0:
-                color = C.ORANGE
             else:
-                color = C.VIOLET
-
-            self._wln(
+                color = C.ORANGE if i % 2 == 0 else C.VIOLET
+            line = (
                 f"  {color}[{C.BOLD}{key}{C.RST}{color}]{C.RST}"
                 f"  {C.BOLD}{C.WHITE}{label}{C.RST}"
-                + (f"  {C.GRAY}— {desc}{C.RST}" if desc else "")
             )
+            if desc:
+                line += f"  {C.GRAY}— {desc}{C.RST}"
+            self._wln(line)
         self.blank()
 
-    # ── Key-value box ─────────────────────────────────────────────────────────
+    # -- caixas -------------------------------------------------------------
 
-    def box(self, title: str, rows: list[tuple], color: str = None) -> None:
-        """Render a bordered key-value box."""
+    def box(self, title: str, rows: list[tuple], color: str | None = None) -> None:
         col = color or C.PURPLE
-        inner = self.W - 4
+        inner = self.W
 
         self.blank()
-        self._wln(f"  {col}┌{'─' * (inner + 2)}┐{C.RST}")
+        self._wln(f"  {col}┌{'─' * inner}┐{C.RST}")
 
         title_fmt = f" {C.BOLD}{C.AMBER}{title}{C.RST} "
-        pad_total = inner + 2 - self._clean_len(title_fmt)
-        left_pad = pad_total // 2
-        right_pad = pad_total - left_pad
-        self._wln(f"  {col}│{' ' * left_pad}{title_fmt}{' ' * right_pad}{col}│{C.RST}")
-        self._wln(f"  {col}├{'─' * (inner + 2)}┤{C.RST}")
+        total_pad = inner - display_width(title_fmt)
+        left = max(0, total_pad // 2)
+        right = max(0, total_pad - left)
+        self._wln(f"  {col}│{' ' * left}{title_fmt}{' ' * right}│{C.RST}")
+        self._wln(f"  {col}├{'─' * inner}┤{C.RST}")
+
+        # largura da coluna de rótulos
+        label_w = max((display_width(str(k)) for k, _ in rows), default=0)
+        label_w = min(max(label_w, 12), 28)
 
         for label, value in rows:
-            lbl = f"{C.ORANGE}{label}{C.RST}"
+            lbl = f"{C.ORANGE}{str(label):<{label_w}}{C.RST}"
             val = f"{C.WHITE}{value}{C.RST}"
             content = f"  {lbl}  {C.DARK}│{C.RST}  {val}"
-            raw_len = self._clean_len(content)
-            padding = inner + 2 - raw_len
-            self._wln(f"  {col}│{content}{' ' * max(0, padding)}{col}│{C.RST}")
+            pad = inner - display_width(content)
+            if pad < 0:  # valor muito longo: trunca
+                crop = inner - display_width(content) + display_width(str(value)) - 3
+                val = f"{C.WHITE}{str(value)[:max(4, crop)]}…{C.RST}"
+                content = f"  {lbl}  {C.DARK}│{C.RST}  {val}"
+                pad = max(0, inner - display_width(content))
+            self._wln(f"  {col}│{content}{' ' * pad}│{C.RST}")
 
-        self._wln(f"  {col}└{'─' * (inner + 2)}┘{C.RST}")
+        self._wln(f"  {col}└{'─' * inner}┘{C.RST}")
         self.blank()
 
-    # ── Splash screen ─────────────────────────────────────────────────────────
+    # -- telas especiais ----------------------------------------------------
 
-    def splash(self, version: str) -> None:
+    def splash(self, version: str, tagline: str = "", tech: str = "") -> None:
         self.clear()
-
         logo = [
             " ████████╗███████╗██╗     ███████╗ ██████╗ ██████╗ ██████╗ ██╗   ██╗",
             "    ██╔══╝██╔════╝██║     ██╔════╝██╔════╝██╔═══██╗██╔══██╗╚██╗ ██╔╝",
@@ -363,102 +506,97 @@ class UI:
             "    ██║   ███████╗███████╗███████╗╚██████╗╚██████╔╝██║         ██║   ",
             "    ╚═╝   ╚══════╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝         ╚═╝   ",
         ]
-
         print()
         for i, line in enumerate(logo):
             color = C.ORANGE if i < 3 else C.PURPLE
             print(f"{C.BOLD}{color}{line}{C.RST}")
-
         print()
-        tagline = f"Telegram Channel Replicator  ·  v{version}"
-        print(f"  {C.GRAY}{self.center(tagline)}{C.RST}")
-        tech = "SQLite WAL  ·  AES-256-GCM  ·  Bloom Filter  ·  Async"
-        print(f"  {C.DARK}{self.center(tech)}{C.RST}")
+        print(f"  {C.GRAY}{tagline or f'Replicador de Canais Telegram  ·  v{version}'}{C.RST}")
+        if tech:
+            print(f"  {C.DARK}{tech}{C.RST}")
         print()
         self.rule("─", C.DARK)
         print()
 
-    # ── Rich progress bar (optional) ──────────────────────────────────────────
+    def table(self, headers: list[str], rows: list[list[str]],
+              widths: list[int] | None = None) -> None:
+        """Tabela simples e alinhada."""
+        widths = widths or [max(len(str(h)), *(len(str(r[i])) for r in rows)) if rows else len(str(h))
+                            for i, h in enumerate(headers)]
+        head = "  " + "".join(f"{C.DARK}{str(h):<{widths[i]}}{C.RST}" for i, h in enumerate(headers))
+        self._wln(head)
+        self._wln(f"  {C.DARK}{'─' * sum(widths)}{C.RST}")
+        for row in rows:
+            cells = []
+            for i, cell in enumerate(row):
+                text = str(cell)
+                if len(text) > widths[i]:
+                    text = text[: max(1, widths[i] - 1)] + "…"
+                cells.append(f"{text:<{widths[i]}}")
+            self._wln("  " + "".join(cells))
+        self._wln(f"  {C.DARK}{'─' * sum(widths)}{C.RST}")
 
-    def make_progress(self, total: int, description: str = "Processing"):
-        """
-        Return a Rich Progress context manager if Rich is available,
-        otherwise return None and the caller falls back to plain output.
-        """
-        if not self._rich_ok:
-            return None, None
-
-        from rich.progress import (
-            Progress, SpinnerColumn, BarColumn,
-            TextColumn, TimeRemainingColumn, MofNCompleteColumn,
-        )
-
-        prog = Progress(
-            SpinnerColumn(style="bold purple"),
-            TextColumn("[bold orange3]{task.description}"),
-            BarColumn(
-                complete_style="orange3",
-                finished_style="green",
-                pulse_style="purple",
-            ),
-            MofNCompleteColumn(),
-            TimeRemainingColumn(),
-            console=self._console,
-            refresh_per_second=8,
-        )
-        task = prog.add_task(description, total=total)
-        return prog, task
-
-    def loading_bar(self, label: str = "Loading", steps: int = 40) -> None:
-        """Animated loading bar — used only at startup."""
+    def loading_bar(self, label: str = "Carregando", steps: int = 30) -> None:
         import time
 
-        if self._rich_ok:
-            from rich.progress import Progress, BarColumn, TextColumn
-            with Progress(
-                TextColumn(f"  [dim]{label}[/dim]"),
-                BarColumn(complete_style="orange3", finished_style="green"),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                console=self._console,
-                transient=True,
-            ) as prog:
-                task = prog.add_task("", total=steps)
-                for _ in range(steps):
-                    prog.advance(task)
-                    time.sleep(0.03)
-        else:
-            self._w(f"  {C.GRAY}{label}  [{C.RST}")
-            for i in range(steps):
-                col = C.ORANGE if i < steps // 2 else C.PURPLE
-                self._w(f"{col}█{C.RST}")
-                sys.stdout.flush()
-                time.sleep(0.025)
-            self._wln(f"{C.GRAY}]{C.RST}  {C.GREEN}OK{C.RST}")
+        if not sys.stdout.isatty():  # ambiente não interativo: nada de animação
+            return
+        self._w(f"  {C.GRAY}{label}  {C.RST}[")
+        for i in range(steps):
+            col = C.ORANGE if i < steps // 2 else C.PURPLE
+            self._w(f"{col}█{C.RST}")
+            time.sleep(0.012)
+        self._wln(f"]  {C.GREEN}OK{C.RST}")
 
 
 # Singleton
 ui = UI()
 
 
-# ── Runtime configuration ─────────────────────────────────────────────────────
+# ── Configuração de execução ──────────────────────────────────────────────────
+
 
 @dataclass
 class RunConfig:
-    """Parameters passed to the copy engine at runtime."""
-    delay:              float = 0.9
-    workers_dl:         int   = field(default_factory=lambda: MAX_WORKERS_DL)
-    workers_up:         int   = field(default_factory=lambda: MAX_WORKERS_UP)
-    buffer_ram:         int   = field(default_factory=lambda: BUFFER_RAM_MAX)
-    chunk_size:         int   = CHUNK_SIZE
-    progress_interval:  float = PROGRESS_INTERVAL
-    use_dedup:          bool  = True
-    verify_integrity:   bool  = True
-    memory_profile:     float = 0.60  # Novo: percentual da RAM para buffer (0.0-1.0)
+    """Parâmetros que controlam o motor de cópia."""
+
+    delay: float = 0.9
+    workers: int = field(default_factory=lambda: recommended_workers())
+    memory_profile: float = 0.60
+    resume: bool = True
+    use_dedup: bool = True
+    forward_mode: bool = False   # True = encaminhar (rápido) | False = reenviar (cópia limpa)
+    skip_text: bool = False
+    signature: str = ""
+    retry_failed: bool = True
+    clean_failed_text: bool = True
 
     def __post_init__(self) -> None:
-        if self.delay < 0.1:
-            self.delay = 0.1
-        if self.memory_profile < 0.1:
-            self.memory_profile = 0.1
-        if self.memory_profile > 0.95:
-            self.memory_profile = 0.95
+        self.delay = max(0.1, float(self.delay))
+        self.memory_profile = max(0.10, min(0.95, float(self.memory_profile)))
+        self.workers = max(1, min(int(self.workers), 8))
+
+    def to_dict(self) -> dict:
+        return {
+            "delay": self.delay,
+            "workers": self.workers,
+            "memory_profile": self.memory_profile,
+            "resume": self.resume,
+            "use_dedup": self.use_dedup,
+            "forward_mode": self.forward_mode,
+            "skip_text": self.skip_text,
+            "signature": self.signature,
+            "retry_failed": self.retry_failed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunConfig":
+        cfg = cls()
+        for key, value in (data or {}).items():
+            if hasattr(cfg, key):
+                try:
+                    setattr(cfg, key, value)
+                except Exception:
+                    pass
+        cfg.__post_init__()
+        return cfg

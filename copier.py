@@ -1,66 +1,167 @@
 """
-copier.py — Core copy engine com buffer de ordem sequencial.
+copier.py — Motor de cópia de canais do Telegram.
 
-Melhorias:
-  • Download paralelo + Envio sequencial garantido (buffer ordenado)
-  • Suporte real a álbuns (grouped_id)
-  • FloodWait com back-off exponencial
-  • Métricas de velocidade (msgs/min)
+Fluxo
+    produtor    → enfileira as mensagens na ordem original
+    downloaders → baixam o conteúdo em paralelo (limitado por `workers`)
+    sender      → envia em ordem sequencial estrita, respeitando o delay
+    checkpoints → cada mensagem concluída é gravada no SQLite (retomada)
+
+Modos
+    • copy    — baixa e reenvia (cópia limpa, sem "encaminhado de")
+    • forward — encaminha direto no Telegram (muito mais rápido)
+
+Trata FloodWait, mensagens de serviço, álbuns, legendas longas, mídias
+expiradas e limpa todos os arquivos temporários ao final.
 """
+
+from __future__ import annotations
 
 import asyncio
 import os
-import sys
+import re
 import time
-import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError
-from telethon.tl.types import (
-    MessageMediaDocument,
-    MessageMediaPhoto,
-    DocumentAttributeFilename,
+from telethon.errors import (
+    ChatAdminRequiredError,
+    ChannelPrivateError,
+    FloodWaitError,
+    RPCError,
 )
 
-from config import MAX_WORKERS_DL, C, PROGRESS_INTERVAL, TEMP_DIR
-from database import Repository, Status, db
+from config import (
+    CAPTION_LIMIT,
+    C,
+    DAILY_LIMIT,
+    MESSAGE_LIMIT,
+    TEMP_DIR,
+    RunConfig,
+)
+from database import Repository, Status
 from dedup import DedupEngine, hash_message
-from utils import logger, Fmt
+from filters import apply as filter_apply
 from i18n import t
+from utils import Fmt, daily_limit, logger
 
 QueueItem = Union[Any, List[Any]]
 
+_SAFE_NAME = re.compile(r"[^\w\-. ]+", re.UNICODE)
 
-def _media_info(msg) -> Tuple[bool, str, int]:
-    """(tem_mídia, tipo, tamanho_bytes)"""
+SERVICE_ACTIONS = frozenset({
+    "MessageActionPinMessage", "MessageActionChatJoinedByLink",
+    "MessageActionChatAddUser", "MessageActionChatDeleteUser",
+    "MessageActionChatEditTitle", "MessageActionChatEditPhoto",
+    "MessageActionChannelCreate", "MessageActionHistoryClear",
+    "MessageActionEmpty", "MessageActionChatMigrateTo",
+    "MessageActionChannelMigrateFrom", "MessageActionSetMessagesTTL",
+    "MessageActionGroupCall", "MessageActionInviteToGroupCall",
+    "MessageActionContactSignUp", "MessageActionSecureValuesSent",
+})
+
+
+# ── Mídia ─────────────────────────────────────────────────────────────────────
+
+
+def is_service(msg) -> bool:
+    action = getattr(msg, "action", None)
+    return bool(action) and type(action).__name__ in SERVICE_ACTIONS
+
+
+def media_info(msg) -> Tuple[bool, str, int]:
+    """(tem_mídia_enviável, tipo, tamanho_em_bytes)."""
     media = getattr(msg, "media", None)
-    if not media:
+    if media is None:
         return False, "text", 0
-    if isinstance(media, MessageMediaPhoto):
-        sizes = getattr(media.photo, "sizes", [])
-        size = max((getattr(s, "size", 0) for s in sizes), default=0)
-        return True, "photo", size
-    if isinstance(media, MessageMediaDocument):
-        doc = media.document
-        mime = getattr(doc, "mime_type", "") or ""
-        size = getattr(doc, "size", 0) or 0
-        if "video" in mime: return True, "video", size
-        if "audio" in mime: return True, "audio", size
-        if "image" in mime: return True, "photo", size
+
+    name = type(media).__name__
+    if name == "MessageMediaPhoto":
+        photo = getattr(media, "photo", None)
+        sizes = [int(getattr(s, "size", 0) or 0) for s in (getattr(photo, "sizes", []) or [])]
+        return True, "photo", max(sizes) if sizes else 0
+
+    if name == "MessageMediaDocument":
+        doc = getattr(media, "document", None)
+        if doc is None:
+            return False, "text", 0
+        mime = (getattr(doc, "mime_type", "") or "").lower()
+        size = int(getattr(doc, "size", 0) or 0)
+        attrs = {type(a).__name__ for a in (getattr(doc, "attributes", []) or [])}
+        if "DocumentAttributeSticker" in attrs:
+            return True, "sticker", size
+        if mime.startswith("video/") or "DocumentAttributeVideo" in attrs:
+            return True, "video", size
+        if mime.startswith("audio/") or "DocumentAttributeAudio" in attrs:
+            return True, "audio", size
+        if mime.startswith("image/"):
+            return True, "photo", size
         return True, "document", size
-    return True, "other", 0
+
+    if name == "MessageMediaWebPage":
+        # link preview não é mídia transferível
+        return False, "text", 0
+    if name == "MessageMediaPoll":
+        return False, "poll", 0
+    if name in ("MessageMediaGeo", "MessageMediaGeoLive", "MessageMediaVenue",
+                "MessageMediaContact", "MessageMediaDice"):
+        return False, "other", 0
+    return False, "other", 0
 
 
-def _filename(msg, media_type: str) -> str:
-    if getattr(msg, "file", None) and getattr(msg.file, "name", None):
-        return msg.file.name
-    return {
-        "photo": "foto.jpg", "video": "video.mp4",
-        "audio": "audio.ogg", "document": "documento.bin",
-    }.get(media_type, "arquivo.bin")
+def media_filename(msg, media_type: str) -> str:
+    file_obj = getattr(msg, "file", None)
+    if file_obj is not None and getattr(file_obj, "name", None):
+        clean = _SAFE_NAME.sub("_", str(file_obj.name)).strip(" ._")
+        if clean:
+            return clean[:110]
+    ext = {"photo": "jpg", "video": "mp4", "audio": "mp3",
+           "sticker": "webp", "document": "bin"}.get(media_type, "bin")
+    return f"{media_type}_{getattr(msg, 'id', 0)}.{ext}"
+
+
+def _caption(msg) -> str:
+    return getattr(msg, "message", "") or ""
+
+
+def _entities(msg):
+    return getattr(msg, "entities", None)
+
+
+def add_signature(caption: str, signature: str) -> str:
+    if not signature:
+        return caption
+    sig = f"\n\n{signature}"
+    available = max(0, CAPTION_LIMIT - len(sig))
+    base = caption or ""
+    if len(base) > available:
+        base = base[: max(0, available - 1)] + "…"
+    return base + sig
+
+
+def split_text(text: str, limit: int = MESSAGE_LIMIT) -> List[str]:
+    """Divide textos longos em partes aceitas pelo Telegram."""
+    if len(text) <= limit:
+        return [text]
+    parts: List[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = remaining.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return parts
+
+
+# ── Estatísticas / progresso ──────────────────────────────────────────────────
 
 
 @dataclass
@@ -69,736 +170,761 @@ class TransferStats:
     done: int = 0
     errors: int = 0
     skipped: int = 0
-    deduped_id: int = 0
-    deduped_hash: int = 0
-    bytes_ul: int = 0
-    albums_sent: int = 0
-    _lock: object = field(default_factory=threading.Lock, repr=False)
+    duplicates: int = 0
+    bytes_uploaded: int = 0
+    albums: int = 0
+    planned: int = 0
 
     def elapsed(self) -> float:
-        return time.time() - self.start
+        return max(0.001, time.time() - self.start)
 
-    def msgs_per_min(self) -> float:
-        e = self.elapsed()
-        return (self.done + self.skipped) / e * 60 if e >= 1 else 0.0
+    def per_minute(self) -> float:
+        return (self.done + self.skipped) / self.elapsed() * 60
 
-    def inc(self, field_name: str, n: int = 1) -> None:
-        with self._lock:
-            setattr(self, field_name, getattr(self, field_name) + n)
+    def as_result(self) -> Dict[str, Any]:
+        return {
+            "done": self.done,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "duplicates": self.duplicates,
+            "albums": self.albums,
+            "bytes": self.bytes_uploaded,
+            "elapsed": Fmt.duration(self.elapsed()),
+            "speed": f"{self.per_minute():.0f} {t('result.per_min')}",
+        }
 
 
 class ProgressDisplay:
-    def __init__(self, total: int, source_name: str) -> None:
-        self.total = total
-        self._rich_ok = False
-        self._prog = None
-        self._main_task = None
-        self._console = None
-        self._last_plain = 0.0
+    """Barra Rich com fallback automático para texto simples."""
 
+    def __init__(self, total: int, title: str = "", rich_ok: bool = True) -> None:
+        self.total = max(0, total)
+        self.title = title
+        self._prog = None
+        self._task = None
+        self._last_plain = 0.0
         try:
-            from rich.progress import (
-                Progress, SpinnerColumn, BarColumn,
-                TextColumn, TimeRemainingColumn, MofNCompleteColumn,
-            )
+            if not rich_ok:
+                raise ImportError("rich desabilitado")
             from rich.console import Console
-            self._console = Console()
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+                TimeElapsedColumn,
+                TimeRemainingColumn,
+            )
+
             self._prog = Progress(
-                SpinnerColumn(style="bold purple"),
+                SpinnerColumn(style="purple"),
                 TextColumn("[bold orange3]{task.description}"),
                 BarColumn(complete_style="orange3", finished_style="green", pulse_style="purple"),
                 MofNCompleteColumn(),
+                TimeElapsedColumn(),
                 TimeRemainingColumn(),
-                console=self._console,
-                refresh_per_second=10,
+                console=Console(highlight=False),
+                refresh_per_second=8,
             )
-            self._main_task = self._prog.add_task(
-                f"[{Fmt.trunc(source_name, 30)}]", total=total
+            self._task = self._prog.add_task(
+                Fmt.trunc(title or "Copiando", 32), total=self.total or None
             )
-            self._rich_ok = True
-        except ImportError:
-            pass
+        except Exception:
+            self._prog = None
 
-    def __enter__(self):
-        if self._rich_ok:
-            self._prog.start()
+    def __enter__(self) -> "ProgressDisplay":
+        if self._prog:
+            try:
+                self._prog.start()
+            except Exception:
+                self._prog = None
         return self
 
-    def __exit__(self, *_):
-        if self._rich_ok and self._prog:
-            self._prog.stop()
-
-    def update(self, done: int, status: str = "") -> None:
-        if self._rich_ok and self._prog:
-            self._prog.update(
-                self._main_task, completed=done,
-                description=f"[{status[:50] or 'Copying...'}]",
-            )
-        else:
-            now = time.time()
-            if now - self._last_plain < 0.5:
-                return
-            self._last_plain = now
-            pct = int(done / max(1, self.total) * 100)
-            filled = pct // 5
-            bar = "█" * filled + "░" * (20 - filled)
-            print(f"\r  [{bar}] {pct:3d}%  {done}/{self.total}  {status[:30]}     ", end="", flush=True)
-
-    def add_transfer(self, description: str) -> Any:
-        if self._rich_ok and self._prog:
-            return self._prog.add_task(description, total=100)
-        return None
-
-    def update_transfer(self, tid: Any, cur: int, tot: int, description: str = None) -> None:
-        if self._rich_ok and self._prog and tid is not None:
-            kw: Dict[str, Any] = {"completed": cur}
-            if tot: kw["total"] = tot
-            if description: kw["description"] = description
-            self._prog.update(tid, **kw)
-
-    def remove_transfer(self, tid: Any) -> None:
-        if self._rich_ok and self._prog and tid is not None:
+    def __exit__(self, *exc) -> None:
+        if self._prog:
             try:
-                self._prog.remove_task(tid)
+                self._prog.stop()
             except Exception:
                 pass
 
+    def add_transfer(self, description: str):
+        if not self._prog:
+            return None
+        try:
+            return self._prog.add_task(description, total=100)
+        except Exception:
+            return None
+
+    def update_transfer(self, task_id, current: int, total: int,
+                        description: Optional[str] = None) -> None:
+        if not self._prog or task_id is None:
+            return
+        kwargs: Dict[str, Any] = {"completed": current}
+        if total:
+            kwargs["total"] = total
+        if description:
+            kwargs["description"] = description
+        try:
+            self._prog.update(task_id, **kwargs)
+        except Exception:
+            pass
+
+    def remove_transfer(self, task_id) -> None:
+        if not self._prog or task_id is None:
+            return
+        try:
+            self._prog.remove_task(task_id)
+        except Exception:
+            pass
+
+    def update(self, done: int, status: str = "") -> None:
+        if self._prog:
+            try:
+                self._prog.update(
+                    self._task,
+                    completed=done,
+                    description=f"[bold orange3]{Fmt.trunc(status or self.title or 'Copiando', 38)}",
+                )
+                return
+            except Exception:
+                pass
+        now = time.time()
+        if now - self._last_plain < 0.4:
+            return
+        self._last_plain = now
+        total = max(1, self.total)
+        pct = min(100, int(done / total * 100))
+        filled = int(pct / 4)
+        print(f"\r  [{'█' * filled}{'░' * (25 - filled)}] {pct:3d}%  {done}/{self.total}  "
+              f"{status[:24]}    ", end="", flush=True)
+
     def finish(self, stats: TransferStats) -> None:
-        if not self._rich_ok:
+        if not self._prog:
             print()
-        albums = f"  {C.CYAN}{stats.albums_sent} álbuns{C.RST}" if stats.albums_sent else ""
-        mpm = f"  {stats.msgs_per_min():.1f} msg/min" if stats.msgs_per_min() > 0 else ""
-        print(
-            f"\n  {C.GREEN}✓  Done{C.RST}  "
-            f"{C.WHITE}{stats.done:,} {t('copy.sent')}{C.RST}  "
-            f"{C.YELLOW}{stats.skipped:,} {t('copy.skipped')}{C.RST}  "
-            f"{C.RED}{stats.errors:,} {t('copy.errors')}{C.RST}"
-            f"{albums}  {C.GRAY}{Fmt.duration(stats.elapsed())}{mpm}{C.RST}\n"
-        )
+
+
+# ── Motor ─────────────────────────────────────────────────────────────────────
 
 
 class Copier:
+    """Copia o histórico (ou espelha em tempo real) de um canal para outro."""
+
     def __init__(
         self,
         client: TelegramClient,
         repo: Optional[Repository] = None,
-        delay: float = 0.5,
-        workers: int = None,
-        memory_profile: float = 0.60,  # ADICIONE ESTA LINHA
+        config: Optional[RunConfig] = None,
+        rich_ok: bool = True,
     ) -> None:
+        if repo is None:
+            from database import db as _db
+
+            repo = _db
         self.client = client
-        self.repo = repo or db
-        self.delay = max(0.1, delay)
-        self.workers = min(workers or MAX_WORKERS_DL, 10)
-        self._memory_profile = memory_profile  # ARMAZENA O VALOR (se precisar usar depois)
-        self._dedup = DedupEngine(self.repo)
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-        self._paused = False
+        self.repo = repo
+        self.cfg = config or RunConfig()
+        self.rich_ok = rich_ok
+        self.dedup = DedupEngine(repo, enabled=self.cfg.use_dedup)
         self._stop = False
         self._flood_penalty = 0.0
-        
-        # Controle de ordem sequencial (buffer)
-        self._send_sequence = 0
-        self._send_buffer = {}
-        self._send_lock = asyncio.Lock()
 
-    async def mirror(
-        self,
-        source,
-        dest,
-        filter_code: str = "all",
-        source_topic_id: Optional[int] = None,
-        dest_topic_id: Optional[int] = None,
-    ) -> None:
-        from filters import apply as fapply
+    # -- controle -----------------------------------------------------------
 
-        source_id = getattr(source, "id", 0)
-        dest_id = getattr(dest, "id", 0)
-        self._dedup.warm_up(dest_id)
-        stats = TransferStats()
+    @property
+    def delay(self) -> float:
+        return max(0.1, self.cfg.delay + self._flood_penalty)
 
-        print(f"\n  {C.GREEN}✓{C.RST}  {t('mirror.waiting')}")
-        print(f"  {C.GRAY}{t('mirror.stop')}{C.RST}\n")
+    def request_stop(self) -> None:
+        self._stop = True
 
-        @self.client.on(events.NewMessage(chats=source))
-        async def mirror_handler(event):
-            msg = event.message
-            if source_topic_id and getattr(msg, "reply_to_msg_id", None) != source_topic_id:
-                return
-            if not fapply(filter_code, msg):
-                return
-            try:
-                # Mirror não usa buffer (mensagens chegam em ordem natural)
-                has_media, media_type, _ = _media_info(msg)
-                if has_media:
-                    await self._send_media(msg, dest, source_id, dest_id, media_type, stats, dest_topic_id)
-                else:
-                    await self._send_text(msg, dest, source_id, dest_id, stats, dest_topic_id)
-                note = f" {C.CYAN}[álbum]{C.RST}" if getattr(msg, "grouped_id", None) else ""
-                print(f"  {C.GREEN}›{C.RST} {t('mirror.new_msg', id=msg.id)}{note}")
-            except Exception as e:
-                print(f"  {C.RED}✗{C.RST} Erro MSG {msg.id}: {e}")
-
-        try:
-            await self.client.run_until_disconnected()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.client.remove_event_handler(mirror_handler)
+    # ── API principal ────────────────────────────────────────────────────────
 
     async def run(
         self,
         source,
         dest,
         filter_code: str = "all",
+        resume: Optional[bool] = None,
+        source_topic: Optional[int] = None,
+        dest_topic: Optional[int] = None,
+        forward: Optional[bool] = None,
         session_id: Optional[str] = None,
-        resume: bool = True,
-        source_topic_id: Optional[int] = None,
-        dest_topic_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        source_id = getattr(source, "id", 0)
-        dest_id = getattr(dest, "id", 0)
-        sess_id = session_id or f"{source_id}:{dest_id}:{int(time.time())}"
+        source_id = int(getattr(source, "id", 0) or 0)
+        dest_id = int(getattr(dest, "id", 0) or 0)
+        resume = self.cfg.resume if resume is None else resume
+        forward = self.cfg.forward_mode if forward is None else forward
+        sess = session_id or f"{source_id}:{dest_id}:{int(time.time())}"
 
-        self._dedup.warm_up(dest_id)
-        processed_ids = self.repo.get_processed_ids(source_id) if resume else set()
+        self.dedup.warm_up(dest_id, limit=200_000)
 
-        print(f"\n  {C.CYAN}·{C.RST}  {t('copy.indexing')}", end="", flush=True)
-        raw_messages = await self._collect(source, filter_code, source_topic_id)
-        print(f"\r  {C.GREEN}✓{C.RST}  {C.WHITE}{len(raw_messages):,}{C.RST} {t('copy.found')}              ")
+        print(f"\n  {C.CYAN}·{C.RST}  {t('copy.indexing')}…", end="", flush=True)
+        messages = await self._collect(source, filter_code, source_topic)
+        print(f"\r  {C.GREEN}✓{C.RST}  {Fmt.number(len(messages))} {t('copy.found')}            ")
 
-        if not raw_messages:
+        if not messages:
             print(f"  {C.YELLOW}!{C.RST}  {t('copy.none')}")
-            return {"done": 0, "skipped": 0, "errors": 0}
+            return TransferStats().as_result()
 
-        items = self._group_messages(raw_messages)
+        items = self._group(messages)
 
-        if resume and processed_ids:
-            before = len(items)
-            items = self._filter_processed(items, processed_ids)
-            already = before - len(items)
-            if already > 0:
-                print(f"  {C.GRAY}·{C.RST}  {already} {t('copy.skipped')} (checkpoint)")
+        if resume:
+            done_ids = self.repo.done_ids(source_id, dest_id)
+            if done_ids:
+                before = sum(len(i) if isinstance(i, list) else 1 for i in items)
+                items = [
+                    item for item in items
+                    if not all(m.id in done_ids
+                               for m in (item if isinstance(item, list) else [item]))
+                ]
+                after = sum(len(i) if isinstance(i, list) else 1 for i in items)
+                if before - after:
+                    print(f"  {C.GRAY}·{C.RST}  {Fmt.number(before - after)} {t('copy.already')}")
 
-        if not items:
-            print(f"  {C.GREEN}✓{C.RST}  Tudo já processado!")
-            return {"done": 0, "skipped": len(raw_messages), "errors": 0}
+        planned = sum(len(i) if isinstance(i, list) else 1 for i in items)
+        if planned == 0:
+            print(f"  {C.GREEN}✓{C.RST}  {t('copy.all_done')}")
+            return TransferStats().as_result()
 
-        album_count = sum(1 for i in items if isinstance(i, list))
-        total_msgs = sum(len(i) if isinstance(i, list) else 1 for i in items)
-
-        if album_count:
-            print(f"  {C.CYAN}·{C.RST}  {album_count} álbuns detectados")
-
-        # Inicializa controle de sequência para buffer ordenado
-        self._send_sequence = 0
-        self._send_buffer = {}
-        sequence_counter = 0
+        albums = sum(1 for i in items if isinstance(i, list))
+        if albums:
+            print(f"  {C.CYAN}·{C.RST}  {albums} {t('copy.albums')}")
 
         self.repo.register_session(
-            sess_id, source_id, dest_id,
-            source_name=getattr(source, "title", ""),
-            dest_name=getattr(dest, "title", ""),
+            sess, source_id, dest_id,
+            getattr(source, "title", "") or "", getattr(dest, "title", "") or "",
         )
-        stats = TransferStats()
 
-        with ProgressDisplay(total_msgs, getattr(source, "title", "Channel")) as prog:
-            worker_tasks = [
-                asyncio.create_task(
-                    self._worker(dest, source_id, dest_id, sess_id, stats, prog, total_msgs, dest_topic_id)
-                )
-                for _ in range(self.workers)
-            ]
+        mode = t("copy.mode.forward") if forward else t("copy.mode.copy")
+        print(f"  {C.CYAN}·{C.RST}  {t('copy.mode')}: {mode}")
+        print(f"  {C.GRAY}·  {Fmt.number(planned)} msgs · {self.cfg.workers} workers · "
+              f"{self.cfg.delay:.1f}s{C.RST}\n")
 
-            # Envia tupla (índice_sequencial, item) para controle de ordem
-            for seq_idx, item in enumerate(items):
-                if self._stop:
-                    break
-                while self._paused and not self._stop:
-                    await asyncio.sleep(0.2)
-                await self._queue.put((seq_idx, item))
-                sequence_counter += 1
-
-            for _ in worker_tasks:
-                await self._queue.put(None)
-
-            await asyncio.gather(*worker_tasks, return_exceptions=True)
-            prog.finish(stats)
+        stats = TransferStats(planned=planned)
+        with ProgressDisplay(planned, getattr(source, "title", "") or "Copiando",
+                             self.rich_ok) as progress:
+            if forward:
+                await self._forward_loop(items, source, dest, source_id, dest_id,
+                                         dest_topic, stats, progress)
+            else:
+                await self._copy_loop(items, source, dest, source_id, dest_id,
+                                      dest_topic, stats, progress)
 
         self.repo.update_stats(
-            sess_id,
-            success=stats.done,
-            errors=stats.errors,
-            duplicates=stats.deduped_id + stats.deduped_hash,
-            bytes_total=stats.bytes_ul,
+            sess, success=stats.done, errors=stats.errors,
+            duplicates=stats.duplicates, bytes_total=stats.bytes_uploaded,
         )
+        self.repo.finish_session(sess)
+        return stats.as_result()
 
-        return {
-            "done": stats.done,
-            "skipped": stats.skipped,
-            "errors": stats.errors,
-            "albums": stats.albums_sent,
-            "elapsed": Fmt.duration(stats.elapsed()),
-            "speed": f"{stats.msgs_per_min():.1f} msg/min",
-        }
+    # ── Coleta / agrupamento ────────────────────────────────────────────────
 
-    async def _collect(self, source, filter_code: str, topic_id: Optional[int]) -> List[Any]:
-        from filters import apply as fapply
-        msgs = []
-        kw: Dict[str, Any] = {"reverse": True}
+    async def _collect(self, source, filter_code: str,
+                       topic_id: Optional[int]) -> List[Any]:
+        messages: List[Any] = []
+        kwargs: Dict[str, Any] = {"reverse": True}
         if topic_id:
-            kw["reply_to"] = topic_id
+            kwargs["reply_to"] = topic_id
         try:
-            async for msg in self.client.iter_messages(source, **kw):
-                if fapply(filter_code, msg):
-                    msgs.append(msg)
-                    if len(msgs) % 2000 == 0:
-                        print(f"\r  {C.CYAN}·{C.RST}  {len(msgs):,} indexadas…", end="", flush=True)
-        except Exception as exc:
-            logger.error(f"collect: {exc}")
-        return msgs
+            async for msg in self.client.iter_messages(source, **kwargs):
+                if self._stop:
+                    break
+                if is_service(msg):
+                    continue
+                if not filter_apply(filter_code, msg):
+                    continue
+                messages.append(msg)
+                if len(messages) % 500 == 0:
+                    print(f"\r  {C.CYAN}·{C.RST}  {Fmt.number(len(messages))} "
+                          f"{t('copy.indexed')}…", end="", flush=True)
+        except FloodWaitError as exc:
+            logger.warning(f"FloodWait na indexação: {exc.seconds}s")
+            await asyncio.sleep(int(exc.seconds) + 3)
+        except RPCError as exc:
+            logger.error(f"Falha ao ler a origem: {exc}")
+            raise RuntimeError(self._explain(exc)) from exc
+        return messages
 
-    def _group_messages(self, messages: List[Any]) -> List[QueueItem]:
-        result: List[QueueItem] = []
-        groups: Dict[int, List[Any]] = defaultdict(list)
-        seen: set = set()
-
+    @staticmethod
+    def _group(messages: Sequence[Any]) -> List[QueueItem]:
+        albums: Dict[int, List[Any]] = defaultdict(list)
         for msg in messages:
             gid = getattr(msg, "grouped_id", None)
             if gid:
-                groups[gid].append(msg)
-                if gid not in seen:
-                    seen.add(gid)
-                    result.append(gid)
-            else:
-                result.append(msg)
+                albums[gid].append(msg)
 
-        final: List[QueueItem] = []
-        resolved: set = set()
-        for item in result:
-            if isinstance(item, int) and item in groups:
-                if item not in resolved:
-                    resolved.add(item)
-                    grp = groups[item]
-                    final.append(grp if len(grp) > 1 else grp[0])
-            else:
-                final.append(item)
-        return final
-
-    def _filter_processed(self, items: List[QueueItem], processed_ids: set) -> List[QueueItem]:
-        out = []
-        for item in items:
-            if isinstance(item, list):
-                if all(msg.id in processed_ids for msg in item):
-                    continue
-            else:
-                if item.id in processed_ids:
-                    continue
-            out.append(item)
-        return out
-
-    async def _worker(self, dest, source_id, dest_id, sess_id, stats, prog, total, dest_topic_id):
-        """Worker com buffer de ordem sequencial (download paralelo + envio ordenado)."""
-        while not self._stop:
-            while self._paused and not self._stop:
-                await asyncio.sleep(0.2)
-                
-            try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=2.0)
-            except asyncio.TimeoutError:
+        items: List[QueueItem] = []
+        seen: set = set()
+        for msg in messages:
+            gid = getattr(msg, "grouped_id", None)
+            if not gid:
+                items.append(msg)
                 continue
-                
-            if data is None:
+            if gid in seen:
+                continue
+            seen.add(gid)
+            group = albums[gid]
+            items.append(group if len(group) > 1 else group[0])
+        return items
+
+    # ── Encaminhamento (rápido) ─────────────────────────────────────────────
+
+    async def _forward_loop(self, items, source, dest, source_id, dest_id,
+                            dest_topic, stats: TransferStats,
+                            progress: ProgressDisplay) -> None:
+        for item in items:
+            if self._stop:
                 break
-                
-            seq_idx, item = data
-            
+            messages = item if isinstance(item, list) else [item]
+            ids = [m.id for m in messages]
             try:
-                # 1. DOWNLOAD (paralelo)
+                self._check_limit()
+                await self.client.forward_messages(
+                    dest, ids, from_peer=source,
+                    as_album=isinstance(item, list), drop_author=True,
+                )
+                for msg in messages:
+                    self._mark_done(msg, source_id, dest_id, stats)
                 if isinstance(item, list):
-                    download_result = await self._download_album_data(
-                        item, source_id, dest_id, stats, dest_topic_id, prog
-                    )
-                else:
-                    download_result = await self._download_single_data(
-                        item, source_id, dest_id, stats, dest_topic_id, prog
-                    )
-                
-                if download_result is None:
-                    self._queue.task_done()
+                    stats.albums += 1
+            except FloodWaitError as exc:
+                await self._handle_flood(exc)
+            except RPCError as exc:
+                self._mark_failed(messages, source_id, dest_id, stats, exc)
+            progress.update(stats.done + stats.skipped + stats.errors,
+                            f"{stats.done} {t('copy.sent')} · {stats.per_minute():.0f}/min")
+            await asyncio.sleep(self.delay)
+
+    # ── Cópia (download + envio ordenado) ───────────────────────────────────
+
+    async def _copy_loop(self, items, source, dest, source_id, dest_id,
+                         dest_topic, stats: TransferStats,
+                         progress: ProgressDisplay) -> None:
+        in_queue: asyncio.Queue = asyncio.Queue()
+        ready: Dict[int, Optional[Dict[str, Any]]] = {}
+        cond = asyncio.Condition()
+        total = len(items)
+
+        for index, item in enumerate(items):
+            await in_queue.put((index, item))
+        for _ in range(self.cfg.workers):
+            await in_queue.put(None)
+
+        async def downloader() -> None:
+            while True:
+                job = await in_queue.get()
+                if job is None:
+                    in_queue.task_done()
+                    return
+                index, item = job
+                messages = item if isinstance(item, list) else [item]
+                payload: Optional[Dict[str, Any]] = None
+                try:
+                    if self._stop:
+                        payload = None
+                    elif self._is_duplicate(messages, dest_id):
+                        stats.duplicates += len(messages)
+                        stats.skipped += len(messages)
+                        for msg in messages:
+                            self.repo.mark_processed(source_id, msg.id, None, dest_id)
+                            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED)
+                        payload = {"skip": True}
+                    else:
+                        payload = await self._prepare(index, item, progress)
+                except Exception as exc:
+                    logger.exception(f"Falha ao preparar item {index}: {exc}")
+                    payload = None
+                finally:
+                    in_queue.task_done()
+                async with cond:
+                    ready[index] = payload
+                    cond.notify_all()
+
+        async def sender() -> None:
+            for index in range(total):
+                if self._stop:
+                    break
+                async with cond:
+                    while index not in ready:
+                        await cond.wait()
+                    payload = ready.pop(index)
+
+                if payload is None:
+                    item = items[index]
+                    messages = item if isinstance(item, list) else [item]
+                    stats.errors += len(messages)
+                    for msg in messages:
+                        self.repo.update_status(source_id, dest_id, msg.id, Status.ERROR)
+                        self.repo.add_failure(source_id, dest_id, msg.id, "preparação falhou")
+                    progress.update(stats.done + stats.skipped + stats.errors,
+                                    f"{stats.done} {t('copy.sent')}")
                     continue
-                
-                # 2. ENVIO SEQUENCIAL (com buffer)
-                async with self._send_lock:
-                    self._send_buffer[seq_idx] = {
-                        'item': item,
-                        'result': download_result,
-                        'dest': dest,
-                        'source_id': source_id,
-                        'dest_id': dest_id,
-                        'dest_topic_id': dest_topic_id,
-                        'stats': stats,
-                        'prog': prog
-                    }
-                    
-                    # Processa buffer em ordem
-                    while self._send_sequence in self._send_buffer:
-                        buffer_data = self._send_buffer.pop(self._send_sequence)
-                        
-                        if isinstance(buffer_data['item'], list):
-                            await self._send_buffered_album(buffer_data, sess_id)
-                        else:
-                            await self._send_buffered_single(buffer_data, sess_id)
-                        
-                        done_total = stats.done + stats.skipped + stats.errors
-                        prog.update(done_total, status=f"{stats.done} enviadas · {stats.msgs_per_min():.0f}/min")
-                        import sys
-                        sys.stdout.flush()
-                        
-                        self._send_sequence += 1
-                
-            except Exception as e:
-                logger.error(f"Erro no worker seq {seq_idx}: {e}")
-                stats.inc("errors")
-                
-            finally:
-                self._queue.task_done()
+                if payload.get("skip"):
+                    progress.update(stats.done + stats.skipped + stats.errors,
+                                    f"{stats.done} {t('copy.sent')} · "
+                                    f"{stats.duplicates} {t('copy.duplicates')}")
+                    continue
 
-    # ========== MÉTODOS DO BUFFER ==========
-    
-    async def _download_single_data(self, msg, source_id, dest_id, stats, dest_topic_id, prog):
-        """Baixa mensagem individual e retorna dados prontos (sem enviar)."""
-        has_media, media_type, _ = _media_info(msg)
-        
-        if not has_media:
-            return {
-                'type': 'text',
-                'msg': msg,
-                'text': getattr(msg, "text", None) or getattr(msg, "message", None) or ""
-            }
-        
-        fname = _filename(msg, media_type)
-        temp_path = str(TEMP_DIR / f"dl_{msg.id}_{int(time.time())}_{fname}")
-        
-        dl_tid = prog.add_transfer(f"[cyan]↓ {Fmt.trunc(fname, 25)}") if prog else None
-        
-        async def dl_cb(cur, tot):
-            if prog and dl_tid is not None and tot:
-                prog.update_transfer(dl_tid, cur, tot, description=f"[cyan]↓ {Fmt.trunc(fname, 20)}")
-        
-        try:
-            await self.client.download_media(msg, file=temp_path, progress_callback=dl_cb)
-            if prog: prog.remove_transfer(dl_tid)
-            
-            return {
-                'type': 'media',
-                'msg': msg,
-                'temp_path': temp_path,
-                'media_type': media_type,
-                'fname': fname
-            }
-        except Exception as e:
-            if prog: prog.remove_transfer(dl_tid)
-            logger.error(f"Erro download msg {msg.id}: {e}")
-            return None
-
-    async def _download_album_data(self, msgs, source_id, dest_id, stats, dest_topic_id, prog):
-        """Baixa álbum e retorna dados prontos (sem enviar)."""
-        lead = msgs[0]
-        content_hash = hash_message(lead)
-        
-        if self._dedup.check(content_hash, dest_id):
-            stats.inc("skipped", len(msgs))
-            stats.inc("deduped_hash", len(msgs))
-            return None
-        
-        temp_paths = []
-        captions = []
-        ent_list = []
-        force_docs = []
-        
-        try:
-            for msg in msgs:
-                _, mt, _ = _media_info(msg)
-                fname = _filename(msg, mt)
-                temp_path = str(TEMP_DIR / f"alb_{msg.id}_{int(time.time())}_{fname}")
-                
-                tid = prog.add_transfer(f"[cyan]↓ {Fmt.trunc(fname, 20)}") if prog else None
-                
-                async def dl_cb(cur, tot, _tid=tid, _fn=fname):
-                    if prog and _tid is not None and tot:
-                        prog.update_transfer(_tid, cur, tot, description=f"[cyan]↓ {_fn[:18]}")
-                
-                await self.client.download_media(msg, file=temp_path, progress_callback=dl_cb)
-                if prog and tid: prog.remove_transfer(tid)
-                
-                temp_paths.append(temp_path)
-                captions.append(getattr(msg, "text", None) or getattr(msg, "message", None) or "")
-                ent_list.append(getattr(msg, "entities", None))
-                force_docs.append(mt == "document")
-            
-            return {
-                'type': 'album',
-                'msgs': msgs,
-                'temp_paths': temp_paths,
-                'captions': captions,
-                'entities': ent_list,
-                'force_docs': force_docs,
-                'content_hash': content_hash
-            }
-            
-        except Exception as e:
-            for p in temp_paths:
+                payload.update({"dest": dest, "dest_topic": dest_topic})
                 try:
-                    if os.path.exists(p): os.unlink(p)
-                except: pass
-            logger.error(f"Erro download álbum: {e}")
-            return None
+                    self._check_limit()
+                    await self._send(payload, source_id, dest_id, stats, progress)
+                except FloodWaitError as exc:
+                    await self._handle_flood(exc)
+                    messages = payload["messages"]
+                    self._mark_failed(messages, source_id, dest_id, stats, exc)
+                except RPCError as exc:
+                    self._mark_failed(payload["messages"], source_id, dest_id, stats, exc)
+                except Exception as exc:
+                    logger.exception("Erro no envio")
+                    self._mark_failed(payload["messages"], source_id, dest_id, stats, exc)
+                finally:
+                    self._cleanup(payload.get("plan", []))
 
-    async def _send_buffered_single(self, buffer_data, sess_id):
-        """Envia mensagem única que está no buffer."""
-        data = buffer_data['result']
-        msg = data['msg']
-        dest = buffer_data['dest']
-        source_id = buffer_data['source_id']
-        dest_id = buffer_data['dest_id']
-        stats = buffer_data['stats']
-        prog = buffer_data['prog']
-        dest_topic_id = buffer_data['dest_topic_id']
-        
-        try:
-            if data['type'] == 'text':
-                await self._send_text_from_data(data, dest, source_id, dest_id, stats, dest_topic_id)
+                progress.update(stats.done + stats.skipped + stats.errors,
+                                f"{stats.done} {t('copy.sent')} · {stats.per_minute():.0f}/min")
+                await asyncio.sleep(self.delay)
+
+        downloaders = [asyncio.create_task(downloader()) for _ in range(self.cfg.workers)]
+        sender_task = asyncio.create_task(sender())
+        await sender_task
+        for task in downloaders:
+            task.cancel()
+        await asyncio.gather(*downloaders, return_exceptions=True)
+
+        # se paramos no meio, descarta o que ficou pronto
+        for payload in list(ready.values()):
+            if isinstance(payload, dict):
+                self._cleanup(payload.get("plan", []))
+        ready.clear()
+
+    def _is_duplicate(self, messages: List[Any], dest_id: int) -> bool:
+        """True quando o conteúdo (mídia/texto) já foi enviado para este destino."""
+        if not self.cfg.use_dedup:
+            return False
+        return any(self.dedup.check(hash_message(msg), dest_id) for msg in messages)
+
+    # ── Preparação (download) ───────────────────────────────────────────────
+
+    async def _prepare(self, index: int, item: QueueItem,
+                       progress: ProgressDisplay) -> Dict[str, Any]:
+        messages = item if isinstance(item, list) else [item]
+        plan: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            has_media, media_type, size = media_info(msg)
+            plan.append({
+                "msg": msg,
+                "media_type": media_type,
+                "size": size,
+                "path": None,
+                "downloadable": bool(has_media),
+            })
+
+        for entry in plan:
+            if not entry["downloadable"]:
+                continue
+            msg = entry["msg"]
+            fname = media_filename(msg, entry["media_type"])
+            temp_path = TEMP_DIR / f"m{msg.id}_{os.getpid()}_{int(time.time() * 1000)}_{fname}"
+            task_id = progress.add_transfer(f"[cyan]↓ {Fmt.trunc(fname, 20)}")
+            display = Fmt.trunc(fname, 16)
+            media_type = entry["media_type"]
+
+            def callback(current, total, _tid=task_id, _name=display, _type=media_type):
+                mb = 1048576.0
+                progress.update_transfer(
+                    _tid,
+                    int(current / total * 100) if total else 0,
+                    100,
+                    f"[cyan]↓ {_name} {current / mb:.1f}/{(total or 0) / mb:.1f} MB",
+                )
+
+            downloaded = None
+            for attempt in (1, 2):
+                try:
+                    downloaded = await self.client.download_media(
+                        msg, file=str(temp_path), progress_callback=callback
+                    )
+                    break
+                except FloodWaitError as exc:
+                    await self._handle_flood(exc)
+                except (RPCError, OSError) as exc:
+                    logger.warning(f"Download msg {msg.id} tentativa {attempt}: {exc}")
+                    if attempt == 2:
+                        downloaded = None
+                    else:
+                        await asyncio.sleep(1.5)
+            progress.remove_transfer(task_id)
+
+            if downloaded and os.path.exists(str(downloaded)):
+                entry["path"] = str(downloaded)
             else:
-                await self._send_media_from_data(data, dest, source_id, dest_id, stats, dest_topic_id, prog)
-                
-        except FloodWaitError as exc:
-            await self._handle_flood(exc, msg)
-        except Exception as exc:
-            stats.inc("errors")
-            logger.error(f"Erro envio seq: {exc}")
-            self.repo.update_status(source_id, dest_id, msg.id, Status.ERROR)
-        
-        await asyncio.sleep(self.delay + self._flood_penalty)
+                # download falhou/expirado: será registrado como erro e reenfileirado
+                logger.warning(f"Mídia indisponível (msg {msg.id})")
+                entry["downloadable"] = False
+                entry["failed"] = True
 
-    async def _send_buffered_album(self, buffer_data, sess_id):
-        """Envia álbum que está no buffer."""
-        data = buffer_data['result']
-        dest = buffer_data['dest']
-        stats = buffer_data['stats']
-        prog = buffer_data['prog']
-        dest_topic_id = buffer_data['dest_topic_id']
-        source_id = buffer_data['source_id']
-        dest_id = buffer_data['dest_id']
-        msgs = data['msgs']
-        
-        try:
-            ul_tid = prog.add_transfer(f"[blue]↑ álbum ({len(msgs)} itens)") if prog else None
-            
-            async def ul_cb(cur, tot, _tid=ul_tid):
-                if prog and _tid is not None and tot:
-                    prog.update_transfer(_tid, cur, tot, description=f"[blue]↑ álbum")
-            
-            sent = await self.client.send_file(
-                dest,
-                file=data['temp_paths'],
-                caption=data['captions'],
-                formatting_entities=data['entities'],
-                reply_to=dest_topic_id,
-                progress_callback=ul_cb,
-            )
-            
-            if prog and ul_tid: prog.remove_transfer(ul_tid)
-            
-            total_size = sum(os.path.getsize(p) for p in data['temp_paths'] if os.path.exists(p))
-            stats.inc("bytes_ul", total_size)
-            stats.inc("done", len(msgs))
-            stats.inc("albums_sent")
-            
-            sent_list = sent if isinstance(sent, list) else [sent]
-            for i, msg in enumerate(msgs):
-                sid = sent_list[i].id if i < len(sent_list) else (sent_list[0].id if sent_list else 0)
-                self._dedup.register(hash_message(msg), dest_id, sid, 0, source_id)
-                self.repo.mark_processed(source_id, msg.id, hash_message(msg))
-                self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.DONE)
-                
-        except Exception as exc:
-            stats.inc("errors", len(msgs))
-            logger.error(f"Erro envio álbum: {exc}")
-            for msg in msgs:
+        return {"index": index, "plan": plan, "messages": messages}
+
+    # ── Envio ───────────────────────────────────────────────────────────────
+
+    async def _send(self, payload: Dict[str, Any], source_id: int, dest_id: int,
+                    stats: TransferStats, progress: ProgressDisplay) -> None:
+        plan: List[Dict[str, Any]] = payload["plan"]
+        messages: List[Any] = payload["messages"]
+        dest = payload["dest"]
+        dest_topic = payload["dest_topic"]
+
+        media_entries = [e for e in plan if e["path"]]
+        failed_entries = [e for e in plan if e.get("failed")]
+        text_entries = [
+            e for e in plan
+            if not e["path"] and not e.get("failed") and not media_info(e["msg"])[0]
+        ]
+
+        if len(media_entries) > 1:
+            await self._send_album(media_entries, dest, dest_topic, progress, stats)
+        elif len(media_entries) == 1:
+            await self._send_media(media_entries[0], dest, dest_topic, progress, stats)
+
+        for entry in text_entries:
+            await self._send_text(entry["msg"], dest, dest_topic)
+
+        if failed_entries:
+            for entry in failed_entries:
+                msg = entry["msg"]
+                stats.errors += 1
                 self.repo.update_status(source_id, dest_id, msg.id, Status.ERROR)
+                self.repo.add_failure(source_id, dest_id, msg.id,
+                                      "download indisponível")
+
+        for entry in plan:
+            if entry.get("failed"):
+                continue
+            msg = entry["msg"]
+            content_hash = hash_message(msg)
+            size = entry["size"] if entry["path"] else 0
+            self.dedup.register(content_hash, dest_id, getattr(msg, "id", 0), size, source_id)
+            self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
+            self.repo.mark_done(source_id, dest_id, msg.id, content_hash, size,
+                                entry["media_type"])
+            self.repo.clear_failure(source_id, dest_id, msg.id)
+
+        stats.done += len(plan) - len(failed_entries)
+        if len(media_entries) > 1:
+            stats.albums += 1
+
+    async def _send_media(self, entry: Dict[str, Any], dest, dest_topic,
+                          progress: ProgressDisplay, stats: TransferStats) -> None:
+        msg = entry["msg"]
+        path = entry["path"]
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        caption = add_signature(_caption(msg), self.cfg.signature)
+        fname = os.path.basename(path)
+        task_id = progress.add_transfer(f"[blue]↑ {Fmt.trunc(fname, 20)}")
+
+        def callback(current, total, _tid=task_id, _name=Fmt.trunc(fname, 16)):
+            mb = 1048576.0
+            progress.update_transfer(
+                _tid,
+                int(current / total * 100) if total else 0,
+                100,
+                f"[blue]↑ {_name} {current / mb:.1f}/{(total or 0) / mb:.1f} MB",
+            )
+
+        kwargs: Dict[str, Any] = {"caption": caption or None, "reply_to": dest_topic,
+                                 "progress_callback": callback}
+        media_type = entry["media_type"]
+        if media_type in ("document", "sticker"):
+            kwargs["force_document"] = True
+        elif media_type == "photo" and size > 10 * 1024 * 1024:
+            kwargs["force_document"] = True
+
+        try:
+            await self.client.send_file(dest, file=path, **kwargs)
         finally:
-            for p in data['temp_paths']:
+            progress.remove_transfer(task_id)
+        stats.bytes_uploaded += size
+
+    async def _send_album(self, entries: List[Dict[str, Any]], dest, dest_topic,
+                          progress: ProgressDisplay, stats: TransferStats) -> None:
+        files = [e["path"] for e in entries]
+        captions = []
+        for i, entry in enumerate(entries):
+            base = _caption(entry["msg"])
+            captions.append(add_signature(base, self.cfg.signature) if i == 0 else base)
+
+        task_id = progress.add_transfer(f"[magenta]↑ álbum ({len(files)} itens)")
+
+        def callback(current, total, _tid=task_id):
+            progress.update_transfer(
+                _tid, int(current / total * 100) if total else 0, 100,
+                f"[magenta]↑ álbum ({len(files)} itens)",
+            )
+
+        try:
+            await self.client.send_file(dest, file=files, caption=captions,
+                                        reply_to=dest_topic, progress_callback=callback)
+        finally:
+            progress.remove_transfer(task_id)
+        stats.bytes_uploaded += sum(os.path.getsize(f) for f in files if os.path.exists(f))
+
+    async def _send_text(self, msg, dest, dest_topic) -> None:
+        text = add_signature(_caption(msg), self.cfg.signature).strip()
+        if not text:
+            return
+        chunks = split_text(text)
+        entities = _entities(msg)
+        for i, chunk in enumerate(chunks):
+            await self.client.send_message(
+                dest, chunk,
+                formatting_entities=entities if (i == 0 and len(chunks) == 1) else None,
+                reply_to=dest_topic,
+            )
+
+
+    # ── Reprocessar falhas ──────────────────────────────────────────────────
+
+    async def retry_messages(self, source, dest, msg_ids: List[int],
+                             dest_topic: Optional[int] = None) -> Dict[str, Any]:
+        """Reprocessa mensagens específicas que falharam antes."""
+        source_id = int(getattr(source, "id", 0) or 0)
+        dest_id = int(getattr(dest, "id", 0) or 0)
+        stats = TransferStats(planned=len(msg_ids))
+        self.dedup.warm_up(dest_id, limit=200_000)
+        quiet = ProgressDisplay(0, "", False)
+
+        for msg_id in msg_ids:
+            try:
+                message = await self.client.get_messages(source, ids=msg_id)
+                if message is None:
+                    self.repo.clear_failure(source_id, dest_id, msg_id)
+                    stats.skipped += 1
+                    continue
+                payload = await self._prepare(0, message, quiet)
+                payload.update({"dest": dest, "dest_topic": dest_topic})
                 try:
-                    if os.path.exists(p): os.unlink(p)
-                except: pass
-        
-        await asyncio.sleep(self.delay + self._flood_penalty)
+                    self._check_limit()
+                    await self._send(payload, source_id, dest_id, stats, quiet)
+                finally:
+                    self._cleanup(payload.get("plan", []))
+                self.repo.clear_failure(source_id, dest_id, msg_id)
+                await asyncio.sleep(self.delay)
+            except FloodWaitError as exc:
+                await self._handle_flood(exc)
+            except Exception as exc:
+                logger.error(f"Retry msg {msg_id}: {exc}")
+                self.repo.add_failure(source_id, dest_id, msg_id, self._explain(exc))
+                stats.errors += 1
+        return stats.as_result()
 
-    async def _send_text_from_data(self, data, dest, source_id, dest_id, stats, dest_topic_id):
-        """Envia texto a partir dos dados bufferizados."""
-        msg = data['msg']
-        text = data['text']
-        
-        if not text:
-            return
-            
-        content_hash = hash_message(msg)
-        if self._dedup.check(content_hash, dest_id):
-            stats.inc("skipped")
-            stats.inc("deduped_hash")
-            return
-        
-        entities = getattr(msg, "entities", None)
-        sent = await self.client.send_message(dest, text, reply_to=dest_topic_id, formatting_entities=entities)
-        
-        self._dedup.register(content_hash, dest_id, sent.id if sent else 0, len(text.encode()), source_id)
-        self.repo.mark_processed(source_id, msg.id, content_hash)
-        self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.DONE)
-        stats.inc("done")
+    # ── Espelho em tempo real ───────────────────────────────────────────────
 
-    async def _send_media_from_data(self, data, dest, source_id, dest_id, stats, dest_topic_id, prog):
-        """Envia mídia a partir dos dados bufferizados."""
-        msg = data['msg']
-        temp_path = data['temp_path']
-        media_type = data['media_type']
-        
-        content_hash = hash_message(msg)
-        if self._dedup.check(content_hash, dest_id):
-            stats.inc("skipped")
-            stats.inc("deduped_hash")
+    async def mirror(self, source, dest, filter_code: str = "all",
+                     source_topic: Optional[int] = None,
+                     dest_topic: Optional[int] = None) -> None:
+        source_id = int(getattr(source, "id", 0) or 0)
+        dest_id = int(getattr(dest, "id", 0) or 0)
+        self.dedup.warm_up(dest_id, limit=200_000)
+        stats = TransferStats()
+
+        print(f"\n  {C.GREEN}✓{C.RST}  {t('mirror.waiting')}")
+        print(f"  {C.GRAY}{t('mirror.stop')}{C.RST}\n")
+
+        @self.client.on(events.NewMessage(chats=[source]))
+        async def handler(event):  # noqa: ANN001
+            msg = event.message
             try:
-                os.unlink(temp_path)
-            except: pass
-            return
-        
-        caption = getattr(msg, "text", None) or getattr(msg, "message", None) or ""
-        entities = getattr(msg, "entities", None)
-        fname = data['fname']
-        
-        ul_tid = prog.add_transfer(f"[blue]↑ {Fmt.trunc(fname, 25)}") if prog else None
-        
-        async def ul_cb(cur, tot):
-            if prog and ul_tid is not None and tot:
-                prog.update_transfer(ul_tid, cur, tot, description=f"[blue]↑ {Fmt.trunc(fname, 20)}")
-        
-        try:
-            sent = await self.client.send_file(
-                dest,
-                file=temp_path,
-                caption=caption or None,
-                formatting_entities=entities,
-                force_document=(media_type == "document"),
-                reply_to=dest_topic_id,
-                progress_callback=ul_cb,
-            )
-            
-            if prog: prog.remove_transfer(ul_tid)
-            
-            file_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-            stats.inc("bytes_ul", file_size)
-            
-            self._dedup.register(content_hash, dest_id, sent.id if sent else 0, file_size, source_id)
-            self.repo.mark_processed(source_id, msg.id, content_hash)
-            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.DONE, 
-                                         content_hash=content_hash, bytes_done=file_size, media_type=media_type)
-            stats.inc("done")
-            
-        finally:
-            try:
-                if os.path.exists(temp_path): os.unlink(temp_path)
-            except: pass
+                if source_topic and getattr(msg, "reply_to_msg_id", None) != source_topic:
+                    return
+                if is_service(msg) or not filter_apply(filter_code, msg):
+                    return
 
-    # ========== MÉTODOS LEGADOS PARA MIRROR ==========
-    
-    async def _send_text(self, msg, dest, source_id, dest_id, stats, dest_topic_id=None):
-        """Envio direto para Mirror Mode (não usa buffer)."""
-        text = getattr(msg, "text", None) or getattr(msg, "message", None) or ""
-        if not text:
-            return
-        content_hash = hash_message(msg)
-        if self._dedup.check(content_hash, dest_id):
-            stats.inc("skipped"); stats.inc("deduped_hash"); return
+                content_hash = hash_message(msg)
+                if self.dedup.check(content_hash, dest_id):
+                    stats.skipped += 1
+                    return
 
-        entities = getattr(msg, "entities", None)
-        sent = await self.client.send_message(dest, text, reply_to=dest_topic_id, formatting_entities=entities)
+                _, media_type, _ = media_info(msg)
+                silent = ProgressDisplay(0, "", False)
+                if media_type in ("text", "poll", "other"):
+                    await self._send_text(msg, dest, dest_topic)
+                    self.dedup.register(content_hash, dest_id, 0, 0, source_id)
+                    self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
+                    stats.done += 1
+                else:
+                    payload = await self._prepare(0, msg, silent)
+                    payload.update({"dest": dest, "dest_topic": dest_topic})
+                    try:
+                        await self._send(payload, source_id, dest_id, stats, silent)
+                    finally:
+                        self._cleanup(payload.get("plan", []))
 
-        self._dedup.register(content_hash, dest_id, sent.id if sent else 0, len(text.encode()), source_id)
-        self.repo.mark_processed(source_id, msg.id, content_hash)
-        self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.DONE)
-        stats.inc("done")
-
-    async def _send_media(self, msg, dest, source_id, dest_id, media_type, stats, dest_topic_id=None, prog=None):
-        """Envio direto para Mirror Mode (não usa buffer)."""
-        content_hash = hash_message(msg)
-        if self._dedup.check(content_hash, dest_id):
-            stats.inc("skipped"); stats.inc("deduped_hash"); return
-
-        fname = _filename(msg, media_type)
-        disp = Fmt.trunc(fname, 25)
-        temp_path = str(TEMP_DIR / f"dl_{msg.id}_{int(time.time())}_{fname}")
-
-        dl_tid = prog.add_transfer(f"[cyan]↓ {disp}") if prog else None
-
-        async def dl_cb(cur, tot):
-            if prog and dl_tid is not None and tot:
-                prog.update_transfer(dl_tid, cur, tot,
-                    description=f"[cyan]↓ {disp} ({cur/1048576:.1f}/{tot/1048576:.1f}MB)")
+                print(f"  {C.GREEN}›{C.RST} {t('mirror.new_msg', id=msg.id)}  "
+                      f"{C.GRAY}({stats.done} {t('mirror.sent')}){C.RST}")
+            except FloodWaitError as exc:
+                await self._handle_flood(exc)
+            except Exception as exc:
+                stats.errors += 1
+                logger.error(f"Espelho msg {msg.id}: {exc}")
+                print(f"  {C.RED}✗{C.RST} ID {msg.id}: {self._explain(exc)}")
 
         try:
-            await self.client.download_media(msg, file=temp_path, progress_callback=dl_cb)
-            if prog: prog.remove_transfer(dl_tid)
-
-            file_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
-            caption = getattr(msg, "text", None) or getattr(msg, "message", None) or ""
-            entities = getattr(msg, "entities", None)
-
-            ul_tid = prog.add_transfer(f"[blue]↑ {disp}") if prog else None
-
-            async def ul_cb(cur, tot):
-                if prog and ul_tid is not None and tot:
-                    prog.update_transfer(ul_tid, cur, tot,
-                        description=f"[blue]↑ {disp} ({cur/1048576:.1f}/{tot/1048576:.1f}MB)")
-
-            sent = await self.client.send_file(
-                dest,
-                file=temp_path,
-                caption=caption or None,
-                formatting_entities=entities,
-                force_document=(media_type == "document"),
-                reply_to=dest_topic_id,
-                progress_callback=ul_cb,
-            )
-
-            if prog: prog.remove_transfer(ul_tid)
-
-            stats.inc("bytes_ul", file_size)
-            self._dedup.register(content_hash, dest_id, sent.id if sent else 0, file_size, source_id)
-            self.repo.mark_processed(source_id, msg.id, content_hash)
-            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.DONE,
-                content_hash=content_hash, bytes_done=file_size, media_type=media_type)
-            stats.inc("done")
-
-        except Exception as exc:
-            if prog:
-                for tid in [dl_tid]:
-                    try: prog.remove_transfer(tid)
-                    except Exception: pass
-            raise RuntimeError(f"Transfer failed: {exc}") from exc
+            await self.client.run_until_disconnected()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
         finally:
-            try:
-                if os.path.exists(temp_path): os.unlink(temp_path)
-            except OSError:
-                pass
+            self.client.remove_event_handler(handler)
+        print(f"\n  {C.GRAY}{t('mirror.stopped')} — {stats.done} {t('mirror.sent')}{C.RST}")
 
-    async def _handle_flood(self, exc: FloodWaitError, msg) -> None:
-        wait = exc.seconds + 5
-        self._flood_penalty = min(self._flood_penalty + 2.0, 30.0)
-        logger.warning(f"FloodWait {wait}s (penalty +{self._flood_penalty:.0f}s)")
-        print(
-            f"\n  {C.YELLOW}!{C.RST}  {t('progress.flood', sec=wait)}"
-            f"  (back-off +{self._flood_penalty:.0f}s)",
-            flush=True,
-        )
+    # ── Auxiliares ──────────────────────────────────────────────────────────
+
+    def _mark_done(self, msg, source_id: int, dest_id: int, stats: TransferStats) -> None:
+        content_hash = hash_message(msg)
+        self.repo.mark_done(source_id, dest_id, msg.id, content_hash)
+        self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
+        self.repo.clear_failure(source_id, dest_id, msg.id)
+        self.dedup.register(content_hash, dest_id, msg.id, 0, source_id)
+        stats.done += 1
+
+    def _mark_failed(self, messages, source_id: int, dest_id: int,
+                     stats: TransferStats, exc: Exception) -> None:
+        reason = self._explain(exc)
+        logger.error(f"Falha ao copiar {len(messages)} msg(s): {exc}")
+        for msg in messages:
+            stats.errors += 1
+            self.repo.update_status(source_id, dest_id, msg.id, Status.ERROR)
+            self.repo.add_failure(source_id, dest_id, msg.id, reason)
+
+    def _check_limit(self) -> None:
+        level, _, _ = daily_limit.status()
+        if level == "limit":
+            raise RuntimeError(t("copy.limit_reached", limit=DAILY_LIMIT))
+
+    async def _handle_flood(self, exc: FloodWaitError) -> None:
+        wait = int(getattr(exc, "seconds", 30) or 30) + 3
+        self._flood_penalty = min(self._flood_penalty + 1.5, 20.0)
+        logger.warning(f"FloodWait {wait}s (penalidade {self._flood_penalty:.1f}s)")
+        print(f"\n  {C.YELLOW}!{C.RST}  {t('progress.flood', sec=wait)}", flush=True)
         await asyncio.sleep(wait)
-        await self._queue.put(msg)
+
+    @staticmethod
+    def _explain(exc: Exception) -> str:
+        if isinstance(exc, ChatAdminRequiredError):
+            return t("err.need_admin")
+        if isinstance(exc, ChannelPrivateError):
+            return t("err.channel_private")
+        return str(exc)[:250] or t("err.generic")
+
+    @staticmethod
+    def _cleanup(plan: List[Dict[str, Any]]) -> None:
+        for entry in plan:
+            path = entry.get("path")
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                entry["path"] = None
