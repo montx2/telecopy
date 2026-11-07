@@ -1,0 +1,13 @@
+{
+  "total": 0,
+  "photos": 0,
+  "videos": 0,
+  "audio": 0,
+  "documents": 0,
+  "text": 0,
+  "bytes_sent": 0,
+  "bytes_recv": 0,
+  "elapsed": 0.0,
+  "sessions": 10,
+  "last_run": null
+}
