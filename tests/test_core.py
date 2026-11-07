@@ -275,11 +275,20 @@ def test_media_info() -> None:
 # ── Testes de integração do motor ───────────────────────────────────────────
 
 
+_RUN_COUNTER = {"n": 0}
+
+
+def _fresh_db(name: str) -> Path:
+    """Caminho de banco exclusivo por execução (evita vazamento entre testes)."""
+    _RUN_COUNTER["n"] += 1
+    return Path(_TMP) / f"{name}_{os.getpid()}_{_RUN_COUNTER['n']}.db"
+
+
 async def _run_copy(messages, *, fail_ids=None, prev_repo=None, config=None,
                     filter_code="all", resume=True, forward=False):
     from database import Repository
 
-    db_path = Path(prev_repo.path) if prev_repo else Path(_TMP) / f"copy_{os.getpid()}_{id(messages)}.db"
+    db_path = Path(prev_repo.path) if prev_repo else _fresh_db("copy")
     repo = prev_repo or Repository(db_path)
     client = FakeClient(messages, fail_ids=fail_ids)
     source = channel(-1001, "Origem")

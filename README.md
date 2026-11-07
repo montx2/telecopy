@@ -299,10 +299,11 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -v
 ```
 
-Saída esperada: **31 testes aprovados**, cobrindo formatadores, cofre
+Saída esperada: **36 testes aprovados**, cobrindo formatadores, cofre
 criptográfico, banco, dedup, filtros, traduções, motor de cópia
-(ordem, álbuns, filtros, dedup, retomada, erros, FloodWait, encaminhamento),
-fila de repetição e todos os menus.
+(ordem, álbuns, filtros, dedup, retomada, erros, FloodWait, encaminhamento,
+limite diário, limpeza de temporários), fila de repetição, preferências e
+todos os menus.
 
 Também é possível rodar sem pytest:
 

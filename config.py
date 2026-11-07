@@ -480,7 +480,10 @@ class UI:
         label_w = min(max(label_w, 12), 28)
 
         for label, value in rows:
-            lbl = f"{C.ORANGE}{str(label):<{label_w}}{C.RST}"
+            lbl_text = str(label)
+            if display_width(lbl_text) > label_w:
+                lbl_text = lbl_text[: max(1, label_w - 1)] + "…"
+            lbl = f"{C.ORANGE}{lbl_text}{' ' * max(0, label_w - display_width(lbl_text))}{C.RST}"
             val = f"{C.WHITE}{value}{C.RST}"
             content = f"  {lbl}  {C.DARK}│{C.RST}  {val}"
             pad = inner - display_width(content)

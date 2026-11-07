@@ -34,6 +34,13 @@ BASE_DIR = _base_dir()
 os.chdir(BASE_DIR)           # tudo é relativo à pasta do programa
 sys.path.insert(0, str(BASE_DIR))
 
+# Console com acentuação e caracteres de caixa em qualquer terminal/redirecionamento
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 REQUIRED = [
     ("telethon", "telethon>=1.35.0"),
     ("cryptography", "cryptography>=41.0.0"),
@@ -139,8 +146,15 @@ def main() -> int:
         print(f"  Banco         : {db.path} ({db.size_bytes()} bytes)")
         health = db.health()
         print(f"  Integridade   : {health['integrity']}")
+        labels = {
+            "ram": "Memória RAM",
+            "disk": "Disco livre",
+            "cpu": "Processadores",
+            "class": "Perfil",
+            "workers": "Workers",
+        }
         for key, value in analyzer.summary().items():
-            print(f"  {key:<14}: {value}")
+            print(f"  {labels.get(key, key):<14}: {value}")
 
         import socket
 
