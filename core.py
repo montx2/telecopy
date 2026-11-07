@@ -866,6 +866,7 @@ class App:
         dest = None
         cloner = None
         clone_plan = None
+        missing_topics: Tuple[str, ...] = ()
 
         if destination_mode == "1":
             source_topic = await self._resolve_topic(source)
@@ -888,14 +889,20 @@ class App:
                 self._pop()
                 return
             dest_topic = await self._resolve_topic(dest)
+            if (getattr(source, "forum", False) and source_topic is None
+                    and not getattr(dest, "forum", False)):
+                ui.err(t("copy.clone.destination_forum_required"))
+                ui.pause()
+                self._pop()
+                return
             if (getattr(source, "forum", False)
                     and getattr(dest, "forum", False)
                     and source_topic is None and dest_topic is None):
                 from channel_clone import ChannelCloneError, ChannelCloner
 
-                cloner = ChannelCloner(self.client)
+                cloner = ChannelCloner(self.client, repo=db)
                 try:
-                    topic_map = await cloner.map_existing_topics(source, dest)
+                    clone_plan, topic_map, missing_topics = await cloner.plan_existing(source, dest)
                     dest_topic = topic_map.get(1)
                     ui.info(t("copy.clone.map_topics"))
                 except ChannelCloneError as exc:
@@ -907,7 +914,7 @@ class App:
         else:
             from channel_clone import ChannelCloneError, ChannelCloner
 
-            cloner = ChannelCloner(self.client)
+            cloner = ChannelCloner(self.client, repo=db)
             default_title = cloner.default_title(source)
             while True:
                 entered_title = ui.ask(
@@ -931,12 +938,23 @@ class App:
 
         filter_code = await self._pick_filter() or "all"
         config = self._copy_options()
-        if topic_map:
-            # Ao mapear um fórum inteiro, repetições entre tópicos são conteúdo
-            # legítimo e precisam ser preservadas.
+        if topic_map or clone_plan is not None:
+            # Repetições entre tópicos e respostas são conteúdo legítimo.
+            # Uma assinatura alteraria o texto original; hashes globais podem
+            # descartar a segunda ocorrência de um aviso em outro tópico.
             config.use_dedup = False
+            config.signature = ""
+            ui.info(t("copy.clone.faithful_forum"))
 
-        if clone_plan is not None:
+        if clone_plan is not None and clone_plan.existing:
+            rows = [
+                (t("entity.source"), getattr(source, "title", str(source.id))),
+                (t("entity.dest"), getattr(dest, "title", str(dest.id))),
+                (t("entity.type"), t("copy.clone.kind.forum")),
+                (t("copy.clone.existing_topics"), str(len(topic_map or {}))),
+                (t("copy.clone.missing_topics"), str(len(missing_topics))),
+            ]
+        elif clone_plan is not None:
             kind = (t("copy.clone.kind.forum") if clone_plan.forum
                     else t("copy.clone.kind.channel") if clone_plan.broadcast
                     else t("copy.clone.kind.group"))
@@ -969,27 +987,31 @@ class App:
             return
 
         if clone_plan is not None:
-            ui.info(t("copy.clone.creating"))
             try:
-                dest, topic_map = await cloner.create(clone_plan)
+                if clone_plan.existing:
+                    ui.info(t("copy.clone.preparing_existing"))
+                    topic_map = await cloner.ensure_topics(clone_plan, dest, topic_map or {})
+                    dest_topic = topic_map.get(1)
+                    ui.ok(t("copy.clone.ready_existing"))
+                else:
+                    ui.info(t("copy.clone.creating"))
+                    dest, topic_map = await cloner.create(clone_plan)
+                    self.picker._loaded = False
+                    ui.ok(t("copy.clone.created", title=clone_plan.title,
+                            id=getattr(dest, "id", "?")))
+                    self._show_entity(dest, t("entity.dest"))
+                    if topic_map:
+                        dest_topic = topic_map.get(1)
             except ChannelCloneError as exc:
-                logger.exception(f"Falha ao criar a estrutura do destino: {exc}")
+                logger.exception(f"Falha ao preparar a estrutura do destino: {exc}")
                 ui.err(t("copy.clone.failed", reason=str(exc)))
                 if exc.destination is not None:
                     ui.warn(t("copy.clone.partial", id=getattr(exc.destination, "id", "?")))
                 ui.pause()
                 self._pop()
                 return
-            self.picker._loaded = False
-            ui.ok(t("copy.clone.created", title=clone_plan.title,
-                    id=getattr(dest, "id", "?")))
-            self._show_entity(dest, t("entity.dest"))
-            if topic_map:
-                dest_topic = topic_map.get(1)
-
-            # Um destino recém-criado não contém nada a deduplicar. Desativar
-            # hashes globais também preserva repetições legítimas entre tópicos.
             config.use_dedup = False
+            config.signature = ""
 
         from copier import Copier
 
@@ -1003,6 +1025,8 @@ class App:
                 source_topic=source_topic,
                 dest_topic=dest_topic,
                 topic_map=topic_map,
+                topic_titles=({1: "General", **{topic.id: topic.title for topic in clone_plan.topics}}
+                              if clone_plan is not None else None),
             )
         except KeyboardInterrupt:
             ui.warn(t("copy.interrupted"))
@@ -1012,16 +1036,19 @@ class App:
             ui.pause()
         finally:
             if clone_plan is not None and dest is not None and topic_map:
-                try:
-                    setting_warnings = await cloner.apply_topic_settings(
-                        clone_plan, dest, topic_map
-                    )
-                    for topic_name, reason in setting_warnings:
-                        ui.warn(t("copy.clone.setting_failed",
-                                  topic=topic_name, reason=reason))
-                except Exception as exc:
-                    logger.exception(f"Falha ao restaurar opções dos tópicos: {exc}")
-                    ui.warn(t("copy.clone.setting_failed", topic="—", reason=str(exc)))
+                if result.get("complete"):
+                    try:
+                        setting_warnings = await cloner.apply_topic_settings(
+                            clone_plan, dest, topic_map
+                        )
+                        for topic_name, reason in setting_warnings:
+                            ui.warn(t("copy.clone.setting_failed",
+                                      topic=topic_name, reason=reason))
+                    except Exception as exc:
+                        logger.exception(f"Falha ao restaurar opções dos tópicos: {exc}")
+                        ui.warn(t("copy.clone.setting_failed", topic="—", reason=str(exc)))
+                else:
+                    ui.warn(t("copy.clone.settings_postponed"))
 
         self._record_result(result, time.time() - started)
         self._print_result(result)
@@ -1400,7 +1427,12 @@ class App:
             except Exception as exc:
                 logger.error(f"Retry: entidade indisponível {source_id}->{dest_id}: {exc}")
                 continue
-            copier = Copier(self.client, repo=db, config=self.config)
+            retry_config = self.config
+            if getattr(source, "forum", False) and getattr(dest, "forum", False):
+                retry_config = RunConfig(**self.config.to_dict())
+                retry_config.use_dedup = False
+                retry_config.signature = ""
+            copier = Copier(self.client, repo=db, config=retry_config)
             try:
                 result = await copier.retry_messages(source, dest, msg_ids)
             except Exception as exc:
@@ -1724,8 +1756,17 @@ class App:
             rows.append((t("result.bytes"), Fmt.size(result["bytes"])))
         if result.get("speed"):
             rows.append((t("result.speed"), str(result["speed"])))
-        ui.box(t("result.title"), rows,
-               color=C.GREEN if not result.get("errors") and not result.get("first_error") else C.AMBER)
+        ok = bool(result.get("complete")) and not result.get("errors") and not result.get("first_error")
+        ui.box(t("result.title"), rows, color=C.GREEN if ok else C.AMBER)
+        if result:
+            (ui.ok if ok else ui.warn)(t("result.complete" if ok else "result.incomplete"))
+        topic_rows = result.get("topics") or []
+        if topic_rows:
+            ui.box(t("result.topics"), [
+                (str(row.get("title") or row.get("id")),
+                 f"{row.get('done', 0)}/{row.get('expected', 0)}")
+                for row in topic_rows
+            ], color=C.GREEN if all(row.get("missing", 0) == 0 for row in topic_rows) else C.AMBER)
         if result.get("first_error"):
             ui.err(f"{t('result.reason')}: {result['first_error']}")
         if pause:

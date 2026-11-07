@@ -16,6 +16,8 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from telethon.errors import FloodWaitError
@@ -105,10 +107,17 @@ class FakeMessage:
     date: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     file: Optional[FakeFile] = None
     reply_to_msg_id: Optional[int] = None
+    reply_to: Any = None
     photo: Any = None
     document: Any = None
 
     def __post_init__(self) -> None:
+        if self.reply_to is None and self.reply_to_msg_id is not None:
+            self.reply_to = SimpleNamespace(
+                reply_to_msg_id=self.reply_to_msg_id,
+                reply_to_top_id=None,
+                forum_topic=False,
+            )
         if self.media is not None:
             if isinstance(self.media, MessageMediaDocument) and self.file is None:
                 name = None
@@ -151,6 +160,8 @@ class FakeClient:
         self.temp_dir = temp_dir or "/tmp"
         self._ids = 1000
         self.handlers: List[Any] = []
+        self._random_messages: Dict[int, Any] = {}
+        self.requests: List[Any] = []
 
     # -- downloads/upload ---------------------------------------------------
 
@@ -172,40 +183,114 @@ class FakeClient:
         self.downloads.append(message.id)
         return str(file)
 
+    async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
+        if progress_callback:
+            size = os.path.getsize(path) if os.path.exists(path) else 1
+            progress_callback(size, size)
+        return SimpleNamespace(path=str(path), name=file_name or os.path.basename(str(path)))
+
+    @staticmethod
+    def _reply_ids(reply_to):
+        if reply_to is None:
+            return None, None
+        if isinstance(reply_to, int):
+            return reply_to, None
+        return getattr(reply_to, "reply_to_msg_id", None), getattr(reply_to, "top_msg_id", None)
+
+    def _record_send(self, entity, kind, *, path=None, caption=None, text=None,
+                     reply_to=None, album=False, random_id=None, **extra):
+        self._ids += 1
+        msg = FakeMessage(id=self._ids, message=text or caption or "")
+        reply_id, top_id = self._reply_ids(reply_to)
+        record = {
+            "kind": kind, "dest": getattr(entity, "id", entity),
+            "path": path, "caption": caption, "text": text,
+            "size": os.path.getsize(path) if path and os.path.exists(path) else 0,
+            "album": album, "reply_to": reply_id, "top_msg_id": top_id,
+            "msg_id": self._ids, **extra,
+        }
+        self.sent.append(record)
+        if random_id is not None:
+            self._random_messages[int(random_id)] = msg
+        return msg
+
     async def send_file(self, entity, file=None, caption=None, reply_to=None,
                         progress_callback=None, **kwargs):
         files = file if isinstance(file, list) else [file]
         captions = caption if isinstance(caption, list) else [caption] * len(files)
-        total = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+        entities = kwargs.get("formatting_entities")
+        if entities and not isinstance(entities[0], list):
+            entities = [entities] * len(files)
+        total = sum(os.path.getsize(f) for f in files if isinstance(f, (str, Path)) and os.path.exists(f))
         if progress_callback:
             progress_callback(total or 1, total or 1)
         created = []
-        for index, path in enumerate(files):
-            self._ids += 1
-            created.append(FakeMessage(id=self._ids))
-            self.sent.append({
-                "kind": "file",
-                "dest": getattr(entity, "id", entity),
-                "path": path,
-                "caption": captions[index] if index < len(captions) else None,
-                "size": os.path.getsize(path) if os.path.exists(path) else 0,
-                "album": len(files) > 1,
-                "reply_to": reply_to,
-                "force_document": kwargs.get("force_document", False),
-                "msg_id": self._ids,
-            })
+        for index, item in enumerate(files):
+            is_path = isinstance(item, (str, Path))
+            created.append(self._record_send(
+                entity, "file" if is_path else "native",
+                path=str(item) if is_path else None,
+                caption=captions[index] if index < len(captions) else None,
+                reply_to=reply_to, album=len(files) > 1,
+                force_document=kwargs.get("force_document", False),
+                formatting_entities=(entities[index] if entities and index < len(entities) else None),
+                attributes=kwargs.get("attributes"), mime_type=kwargs.get("mime_type"),
+                input_media=None if is_path else item,
+            ))
         return created if len(created) > 1 else created[0]
 
     async def send_message(self, entity, text, reply_to=None, **kwargs):
-        self._ids += 1
-        self.sent.append({
-            "kind": "text",
-            "dest": getattr(entity, "id", entity),
-            "text": text,
-            "reply_to": reply_to,
-            "msg_id": self._ids,
-        })
-        return FakeMessage(id=self._ids, message=text)
+        return self._record_send(
+            entity, "text", text=text, reply_to=reply_to,
+            formatting_entities=kwargs.get("formatting_entities"),
+        )
+
+    async def get_input_entity(self, entity):
+        return entity
+
+    def _get_response_message(self, random_id, result, peer):
+        if isinstance(random_id, list):
+            return [self._random_messages.get(int(r)) for r in random_id]
+        return self._random_messages.get(int(random_id))
+
+    async def __call__(self, request):
+        self.requests.append(request)
+        name = type(request).__name__
+        if name == "SendMessageRequest":
+            return self._record_send(
+                request.peer, "text", text=request.message, reply_to=request.reply_to,
+                random_id=request.random_id, formatting_entities=request.entities,
+            ) and SimpleNamespace()
+        if name == "UploadMediaRequest":
+            # O cliente real devolve MessageMedia; para o fake, devolver a
+            # própria InputMedia permite reutilizar o caminho/atributos.
+            return request.media
+        if name == "SendMediaRequest":
+            media = request.media
+            kind = "file" if type(media).__name__.startswith("InputMediaUploaded") else "native"
+            path = getattr(getattr(media, "file", None), "path", None)
+            self._record_send(
+                request.peer, kind, path=path, caption=request.message,
+                reply_to=request.reply_to, random_id=request.random_id,
+                formatting_entities=request.entities, input_media=media,
+                attributes=getattr(media, "attributes", None),
+                mime_type=getattr(media, "mime_type", None),
+            )
+            return SimpleNamespace()
+        if name == "SendMultiMediaRequest":
+            for item in request.multi_media:
+                media = item.media
+                kind = "file" if type(media).__name__ == "InputMediaUploadedPhoto" or type(media).__name__ == "InputMediaUploadedDocument" else "native"
+                path = getattr(getattr(media, "file", None), "path", None)
+                self._record_send(
+                    request.peer, kind, path=path, caption=item.message,
+                    reply_to=request.reply_to, album=True, random_id=item.random_id,
+                    formatting_entities=item.entities, input_media=media,
+                    attributes=getattr(media, "attributes", None),
+                    mime_type=getattr(media, "mime_type", None),
+                )
+            return SimpleNamespace()
+        raise AssertionError(f"Request Telegram inesperado: {name}")
 
     async def forward_messages(self, entity, messages, from_peer=None, **kwargs):
         ids = messages if isinstance(messages, list) else [messages]
@@ -224,11 +309,12 @@ class FakeClient:
         topic = kwargs.get("reply_to")
         items = list(self.messages)
         if topic:
-            items = [
-                m for m in items
-                if m.reply_to_msg_id == topic
-                or (m.reply_to_msg_id or 0) >= topic * 1000
-            ]
+            def in_topic(m):
+                reply = getattr(m, "reply_to", None)
+                top = getattr(reply, "reply_to_top_id", None)
+                rid = getattr(reply, "reply_to_msg_id", None) or m.reply_to_msg_id
+                return top == topic or rid == topic or (rid or 0) >= topic * 1000
+            items = [m for m in items if in_topic(m)]
         for message in (items if reverse else reversed(items)):
             yield message
 

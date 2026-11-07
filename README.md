@@ -144,20 +144,41 @@ destino que já existe ou pedir ao TELECOPY para criar um novo automaticamente.
   “Encaminhado de…”. Ideal para backups e para reconstruir um canal.
 - **Encaminhar**: usa o encaminhamento nativo. É de 5 a 20 vezes mais rápido,
   mas o destino mostra o canal de origem.
+- **Usar um destino existente**: se origem e destino forem fóruns e você
+  pressionar ENTER nos dois prompts de tópico (copiar todos), o TELECOPY confere
+  a estrutura antes de enviar. Ele reutiliza tópicos já associados, cria os que
+  faltam no seu grupo e mostra no resumo quantos serão reaproveitados/criados.
+  Tópicos com título duplicado e sem ícone distintivo são recusados para evitar
+  enviar material ao lugar errado. Se a cópia não ficar completa, opções como
+  fechar/ocultar tópicos não são aplicadas, para que a retomada não fique
+  bloqueada.
 - **Criar destino automaticamente**: cria um canal/grupo privado do tipo da
   origem, copia título e descrição quando disponíveis e, se a origem for um
   fórum, recria os tópicos (nomes, ícones e opções de fixado/fechado/oculto) e
   envia cada mensagem ao tópico correspondente. O título começa igual ao da
   origem e pode ser alterado antes da criação.
 
-O Telegram não permite clonar a identidade do canal: o novo destino não recebe
-o username público, foto, membros nem permissões da origem; datas originais,
-reações e algumas mensagens de serviço também não podem ser reproduzidas como
-no original. O destino automático fica privado e a conta que o criou já é
-administradora. Confira o resumo antes de confirmar. Se uma cópia de fórum for
-interrompida, escolha o destino já criado, pressione ENTER para copiar todos os
-tópicos na origem e no destino; o TELECOPY associa os tópicos pelo nome/ícone e
-usa os checkpoints para retomar sem duplicar o que já foi enviado.
+Na cópia de fórum inteiro, o TELECOPY desativa a deduplicação por conteúdo e a
+assinatura nesta execução: avisos repetidos em tópicos diferentes são conteúdo
+legítimo, e uma assinatura alteraria o texto original. Respostas dentro dos
+tópicos são religadas às cópias das mensagens respondidas quando o checkpoint
+origem→destino está disponível. Ao final, o programa mostra uma conferência por
+tópico (concluídas/esperadas) e só marca a execução como completa se não houver
+falhas, itens não reproduzíveis ou mensagens faltantes.
+
+O Telegram não permite uma cópia 100% idêntica: o destino não recebe o username
+público, foto, membros nem permissões da origem; datas originais, autores, IDs,
+reações, votos/resultado de enquetes e várias mensagens de serviço não podem ser
+reproduzidos como no original. Botões de bot/callback, mídia paga, localização ao
+vivo e dados animados não são recriados como se fossem o original; o que a API
+não permite reproduzir é registrado como falha, não como sucesso. A cor de um
+tópico já existente não é editável pela API; para reproduzir a cor, use um destino
+novo. A ordem visual dos tópicos depende de fixados/atividade do Telegram. O
+destino automático fica privado e a conta que o criou já é administradora.
+Confira o resumo antes de confirmar. Se uma cópia de fórum for interrompida,
+escolha o mesmo destino, pressione ENTER para todos os tópicos e mantenha
+`data/telecopy.db`: o mapa de tópicos e os checkpoints retomam sem recriar o que
+já foi associado/enviado.
 
 Antes de iniciar você escolhe delay, número de workers, filtro e se quer
 retomar cópias anteriores. Um resumo aparece antes da confirmação.
@@ -222,8 +243,10 @@ começar. Ao rodar de novo no mesmo par origem → destino:
 1. O programa lê os checkpoints e **descarta tudo o que já foi enviado**.
 2. Mensagens que falharam aparecem na **Fila de repetição** (Ferramentas → 3),
    com a opção de tentar novamente na hora.
-3. Nada é enviado duas vezes, mesmo que você tenha fechado o programa no meio
-   de um álbum ou durante um download.
+3. O programa evita reenviar o que já tem checkpoint concluído. Em uma queda
+   exatamente entre o envio e a gravação do checkpoint, o Telegram pode ter
+   aceitado a mensagem sem o TELECOPY receber a confirmação; nesse caso raro a
+   retomada pode duplicar o item. Confira o destino antes de apagar checkpoints.
 
 Para **recomeçar do zero** em um par: Configurações → `b`.
 
@@ -336,8 +359,10 @@ python -m pytest -v
 
 A suíte cobre formatadores, cofre criptográfico, banco, dedup, filtros,
 traduções, motor de cópia (ordem, álbuns, retomada, erros, FloodWait e
-encaminhamento), roteamento de tópicos de fórum, criação automática de um
-fórum clonado, fila de repetição, preferências e menus.
+encaminhamento), roteamento de tópicos de fórum, replies dentro de tópicos,
+criação automática de fórum, complemento de tópicos em destino existente,
+paginação de tópicos, legendas longas com entidades, enquetes nativas, mídia não
+reproduzível, conferência por tópico, fila de repetição, preferências e menus.
 
 Também é possível rodar sem pytest:
 
@@ -410,12 +435,18 @@ Não. Basta você conseguir ler as mensagens.
 
 **Perco a conta por usar isso?**
 O programa respeita os limites oficiais: delay configurável, limite diário de
-1.000 mensagens e espera automática em FloodWait. Mesmo assim, use intervalos
+1.000 mensagens e espera automática em FloodWait. Ao atingir o limite diário, a
+execução é interrompida sem marcar as mensagens restantes como falha; retome no
+dia seguinte com o mesmo destino e o mesmo banco. Mesmo assim, use intervalos
 conservadores (0,9 s ou mais) em canais grandes.
 
 **Funciona com tópicos de fórum?**
 Sim. Ao selecionar um grupo do tipo Fórum, o programa pede o ID ou link do
-tópico (ou ENTER para todos).
+tópico (ou ENTER para todos). Para copiar a estrutura inteira para outro fórum
+seu, escolha o destino existente e pressione ENTER nos prompts de tópico da
+origem e do destino; os tópicos ausentes são criados após a confirmação. Use
+ENTER também no filtro para não deixar mensagens de fora. A conferência final
+mostra concluídas/esperadas por tópico.
 
 **Dá para adicionar uma assinatura no fim das mensagens?**
 Sim: Configurações → `6`. O limite de 1.024 caracteres de legenda é respeitado

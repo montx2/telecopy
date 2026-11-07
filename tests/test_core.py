@@ -45,10 +45,11 @@ from filters import apply as filter_apply  # noqa: E402
 from filters import resolve as resolve_filter  # noqa: E402
 from security import Vault  # noqa: E402
 from system_analyzer import analyzer  # noqa: E402
-from utils import DailyLimit, Fmt, Stats  # noqa: E402
+from utils import DailyLimit, Fmt, Stats, daily_limit  # noqa: E402
 
 from tests.fake_telegram import (  # noqa: E402
     FakeClient,
+    FakeMessage,
     album_messages,
     channel,
     document_message,
@@ -660,6 +661,207 @@ def test_retry_messages() -> None:
 
 
 # ── Runner ───────────────────────────────────────────────────────────────────
+
+def test_forum_preserva_respostas_e_general() -> None:
+    from types import SimpleNamespace
+
+    source = channel(-1201, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2201, "Fórum destino", forum=True, broadcast=False)
+    messages = [
+        text_message(5, "geral"),
+        text_message(10, "topo do tópico", reply_to_msg_id=11),
+        text_message(12, "resposta no tópico", reply_to=SimpleNamespace(
+            reply_to_msg_id=10, reply_to_top_id=11, forum_topic=True)),
+        text_message(13, "resposta no general", reply_to=SimpleNamespace(
+            reply_to_msg_id=5, reply_to_top_id=None, forum_topic=True)),
+    ]
+    client = FakeClient(messages)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forum_replies"))
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+                    rich_ok=False)
+    result = asyncio.run(copier.run(
+        source, dest, dest_topic=901, topic_map={1: 901, 11: 911},
+        topic_titles={1: "General", 11: "Perguntas"},
+    ))
+    check(result["complete"], "fórum com replies conclui a conferência")
+    by_text = {item.get("text"): item for item in client.sent}
+    check(by_text["topo do tópico"]["reply_to"] == 911, "mensagem inicial vai ao tópico")
+    check(by_text["resposta no tópico"]["top_msg_id"] == 911, "reply usa top_msg_id do tópico")
+    check(by_text["resposta no tópico"]["reply_to"] == by_text["topo do tópico"]["msg_id"],
+          "reply aponta para a cópia da mensagem respondida")
+    check(by_text["resposta no general"]["reply_to"] == by_text["geral"]["msg_id"],
+          "reply no General aponta para a cópia correta")
+    check({row["id"]: row["missing"] for row in result["topics"]} == {1: 0, 11: 0},
+          "conferência por tópico sem faltas")
+    repo.close()
+
+
+def test_forum_repeticoes_nao_sao_descartadas() -> None:
+    source = channel(-1202, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2202, "Fórum destino", forum=True, broadcast=False)
+    messages = [
+        text_message(1, "aviso repetido", reply_to_msg_id=11),
+        text_message(2, "aviso repetido", reply_to_msg_id=22),
+    ]
+    client = FakeClient(messages)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forum_repeat"))
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+                    rich_ok=False)
+    result = asyncio.run(copier.run(source, dest, topic_map={1: 1, 11: 911, 22: 922}))
+    check(result["done"] == 2 and result["duplicates"] == 0,
+          "conteúdo igual em tópicos diferentes é copiado duas vezes")
+    check([item["reply_to"] for item in client.sent] == [911, 922], "tópicos corretos")
+    repo.close()
+
+
+def test_midia_nao_suportada_nao_conclui() -> None:
+    dice = type("MessageMediaDice", (), {})()
+    messages = [FakeMessage(id=1, media=dice)]
+    result, client, repo = asyncio.run(_run_copy(messages, config=RunConfig(use_dedup=False)))
+    check(result["errors"] == 1 and result["unsupported"] == 1, "mídia não reproduzível é erro")
+    check(not result["complete"], "cópia incompleta não é marcada como completa")
+    check(not client.sent, "nada é enviado fingindo sucesso")
+    repo.close()
+
+
+def test_legenda_longa_preserva_texto_e_entidades() -> None:
+    from telethon.tl.types import MessageEntityBold
+
+    text = "A" * 1500 + "📚" + "B" * 1500
+    msg = photo_message(1, text, entities=[MessageEntityBold(offset=0, length=10)])
+    result, client, repo = asyncio.run(_run_copy([msg], config=RunConfig(use_dedup=False)))
+    check(result["done"] == 1 and result["complete"], "legenda longa conclui")
+    files = [item for item in client.sent if item["kind"] == "file"]
+    texts = [item["text"] for item in client.sent if item["kind"] == "text"]
+    check(len(files) == 1 and len(texts) >= 1, "mídia + continuações")
+    check(files[0]["caption"] + "".join(texts) == text, "nenhum caractere perdido")
+    check(files[0]["formatting_entities"][0].length == 10, "entidade preservada")
+    repo.close()
+
+
+def test_retry_forum_usa_topico_salvo() -> None:
+    source = channel(-1203, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2203, "Fórum destino", forum=True, broadcast=False)
+    messages = [document_message(10, "apostila.pdf", reply_to_msg_id=11)]
+    client = FakeClient(messages, fail_ids={10})
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forum_retry"))
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+                    rich_ok=False)
+    first = asyncio.run(copier.run(source, dest, topic_map={1: 1, 11: 911}))
+    check(first["errors"] == 1 and not first["complete"], "falha inicial registrada")
+    check(repo.checkpoint_route(source.id, dest.id, 10)["dest_topic"] == 911,
+          "tópico destino persistido para retry")
+    client.fail_ids.clear()
+    retried = asyncio.run(copier.retry_messages(source, dest, [10]))
+    check(retried["done"] == 1, "retry reenvia")
+    check(client.sent[-1]["reply_to"] == 911, "retry volta ao tópico correto")
+    repo.close()
+
+
+def test_enquete_nativa_e_copiada() -> None:
+    from types import SimpleNamespace
+
+    poll = SimpleNamespace(question="Quanto é 2+2?", answers=[
+        SimpleNamespace(text="3", option=b"0"), SimpleNamespace(text="4", option=b"1"),
+    ], closed=False, public_voters=False, multiple_choice=False, quiz=False)
+    media = type("MessageMediaPoll", (), {})()
+    media.poll = poll
+    media.results = SimpleNamespace(results=[], solution=None, solution_entities=None)
+    messages = [FakeMessage(id=1, media=media)]
+    result, client, repo = asyncio.run(_run_copy(messages, config=RunConfig(use_dedup=False)))
+    check(result["done"] == 1, "enquete é recriada")
+    check(client.sent[0]["kind"] == "native", "envio usa InputMediaPoll")
+    repo.close()
+
+
+def test_imagem_como_documento_preserva_arquivo() -> None:
+    msg = document_message(1, "scan.png", mime="image/png", size=4096)
+    check(media_info(msg)[1] == "document", "imagem em MessageMediaDocument continua documento")
+    result, client, repo = asyncio.run(_run_copy([msg], config=RunConfig(use_dedup=False)))
+    check(result["done"] == 1, "imagem-documento copiada")
+    sent = client.sent[0]
+    check(sent["kind"] == "file" and sent["force_document"], "enviada como arquivo, não recomprimida")
+    check(sent["mime_type"] == "image/png", "mime original preservado")
+    check(any(getattr(a, "filename", None) == "scan.png" for a in sent["attributes"] or []),
+          "nome original preservado")
+    repo.close()
+
+
+def test_album_forum_usa_upload_media_e_topico() -> None:
+    source = channel(-1204, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2204, "Fórum destino", forum=True, broadcast=False)
+    messages = album_messages(20, 2)
+    for msg in messages:
+        msg.reply_to_msg_id = 11
+        msg.reply_to = None
+        msg.__post_init__()
+    client = FakeClient(messages)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(_fresh_db("forum_album"))
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+                    rich_ok=False)
+    result = asyncio.run(copier.run(source, dest, topic_map={1: 1, 11: 911}))
+    check(result["done"] == 2 and result["albums"] == 1, "álbum do fórum copiado")
+    names = [type(req).__name__ for req in client.requests]
+    check("UploadMediaRequest" in names and "SendMultiMediaRequest" in names,
+          "álbum usa UploadMedia antes de SendMultiMedia")
+    check(all(item["reply_to"] == 911 and item["top_msg_id"] == 911 for item in client.sent),
+          "álbum fica dentro do tópico correto")
+    check(all(not Path(str(item["input_media"].file.name)).name.startswith("m20_")
+              for item in client.sent), "nome exibido não é o prefixo temporário")
+    repo.close()
+
+
+def test_limite_diario_interrompe_sem_marcar_falhas() -> None:
+    daily_limit.reset()
+    daily_limit.add(config.DAILY_LIMIT)
+    try:
+        result, _client, repo = asyncio.run(_run_copy(
+            [text_message(1, "a"), text_message(2, "b")],
+            config=RunConfig(use_dedup=False),
+        ))
+        check(result["done"] == 0 and result["errors"] == 0,
+              "limite diário não envia nem marca falhas")
+        check(result.get("interrupted") and not result.get("complete"),
+              "execução fica interrompida, não completa")
+        check(repo.pair_summary(-1001, -2002)["errors"] == 0,
+              "nenhum checkpoint de erro criado")
+        check(repo.failure_stats()["total"] == 0, "nenhuma falha registrada")
+        repo.close()
+    finally:
+        daily_limit.reset()
+
+
+def test_reset_all_apaga_mapa_de_topicos() -> None:
+    repo = Repository(_fresh_db("reset_map"))
+    repo.set_kv("forum_topic_map:-1:-2", '{"1": 1}')
+    repo.set_kv("preferencia_interna", "manter")
+    repo.reset_all()
+    check(repo.get_kv("forum_topic_map:-1:-2") is None, "mapa de tópicos apagado no reset")
+    check(repo.get_kv("preferencia_interna") == "manter", "outras chaves internas preservadas")
+    repo.close()
+
+
+def test_limite_diario_conta_envios() -> None:
+    daily_limit.reset()
+    try:
+        result, _client, repo = asyncio.run(_run_copy(
+            [text_message(1, "a"), text_message(2, "b")],
+            config=RunConfig(use_dedup=False),
+        ))
+        check(result["done"] == 2, "envios concluídos")
+        check(daily_limit.count >= 2, "limite diário registra mensagens enviadas")
+        repo.close()
+    finally:
+        daily_limit.reset()
+
 
 TESTS = [value for name, value in sorted(globals().items())
          if name.startswith("test_") and callable(value)]
