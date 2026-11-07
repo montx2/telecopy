@@ -60,9 +60,9 @@ if exist main.onefile-build rmdir /s /q main.onefile-build
 if exist Telecopy.exe del /q Telecopy.exe
 
 python -m nuitka ^
-    --onefile ^
+    --mode=onefile ^
     --assume-yes-for-downloads ^
-    --console ^
+    --windows-console-mode=force ^
     --enable-plugin=anti-bloat ^
     --windows-icon-from-ico=telecopy.ico ^
     --company-name=montx2 ^
