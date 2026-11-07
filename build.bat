@@ -46,11 +46,18 @@ echo.
 echo  [3/4] Rodando a bateria de testes...
 python tests\test_core.py >nul 2>&1
 if errorlevel 1 (
-    echo  [AVISO] Os testes falharam. Rode "python tests\test_core.py" para ver.
+    echo  [AVISO] Os testes do motor falharam. Rode "python tests\test_core.py" para ver.
     choice /c SN /m "Continuar mesmo assim"
     if errorlevel 2 exit /b 1
 ) else (
-    echo  Testes OK.
+    python tests\test_app_flow.py >nul 2>&1
+    if errorlevel 1 (
+        echo  [AVISO] Os testes da interface falharam. Rode "python tests\test_app_flow.py" para ver.
+        choice /c SN /m "Continuar mesmo assim"
+        if errorlevel 2 exit /b 1
+    ) else (
+        echo  Testes do motor e da interface OK.
+    )
 )
 
 echo.
@@ -71,6 +78,7 @@ python -m nuitka ^
     --product-version=4.0.0.0 ^
     --file-description="TELECOPY - Replicador de Canais Telegram" ^
     --include-package=telethon ^
+    --include-module=channel_clone ^
     --include-package=cryptography ^
     --include-package=psutil ^
     --include-package=rich ^

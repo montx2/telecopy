@@ -80,6 +80,75 @@ class FlowClient(FakeClient):
             yield SimpleNamespace(entity=entity, id=entity.id)
 
 
+class CloneFlowClient(FlowClient):
+    """Simula os requests MTProto usados para criar um clone de fórum."""
+
+    def __init__(self, messages, source):
+        super().__init__(messages, [source])
+        self.source = source
+        self.created = None
+        self.created_requests = []
+        self._next_topic_id = 100
+        self.topic_catalog = {
+            source.id: [
+                self._topic(1, "General"),
+                self._topic(11, "Perguntas", icon_color=0x6C8EBF, pinned=True),
+                self._topic(22, "Novidades"),
+            ]
+        }
+
+    @staticmethod
+    def _topic(topic_id, title, *, icon_color=None, pinned=False):
+        return SimpleNamespace(
+            id=topic_id,
+            title=title,
+            icon_color=icon_color or 0,
+            icon_emoji_id=None,
+            title_missing=False,
+            closed=False,
+            pinned=pinned,
+            hidden=False,
+            top_message=topic_id,
+            date=None,
+        )
+
+    async def __call__(self, request):
+        self.created_requests.append(request)
+        name = type(request).__name__
+        if name == "GetFullChannelRequest":
+            return SimpleNamespace(full_chat=SimpleNamespace(about="Descrição copiada"))
+        if name == "GetForumTopicsRequest":
+            peer_id = int(getattr(request.peer, "id", 0) or 0)
+            topics = self.topic_catalog.get(peer_id, [])
+            return SimpleNamespace(count=len(topics), topics=list(topics))
+        if name == "CreateChannelRequest":
+            self.created = teardown_channel(channel(
+                -500, request.title,
+                forum=bool(request.forum), broadcast=bool(request.broadcast),
+            ))
+            self.entities.append(self.created)
+            self.register_entity(self.created)
+            if request.forum:
+                self.topic_catalog[self.created.id] = [self._topic(1, "General")]
+            return SimpleNamespace(chats=[self.created], updates=[])
+        if name == "CreateForumTopicRequest":
+            self._next_topic_id += 1
+            topic = self._topic(
+                self._next_topic_id,
+                request.title,
+                icon_color=getattr(request, "icon_color", None),
+            )
+            self.topic_catalog[self.created.id].append(topic)
+            return SimpleNamespace(updates=[SimpleNamespace(topic_id=topic.id)])
+        if name in {
+            "EditForumTopicRequest",
+            "UpdatePinnedForumTopicRequest",
+            "ReorderPinnedForumTopicsRequest",
+        }:
+            return SimpleNamespace()
+        raise AssertionError(f"Request Telegram inesperado: {name}")
+
+
 def feed(*answers: str) -> None:
     """Substitui input() por respostas sequenciais."""
     queue = list(answers)
@@ -131,12 +200,75 @@ def test_fluxo_copiar_canal() -> None:
     app.config.workers = 2
 
     # buscar origem → escolher → buscar destino → escolher → filtro → opções → confirmar
-    feed("/", "Origem", "1", "/", "Destino", "1", "0", "n", "s")
+    feed("/", "Origem", "1", "1", "/", "Destino", "1", "0", "n", "s")
 
     asyncio.run(_guard(app._menu_copy()))
     check(len(client.sent) >= 4, f"fluxo de cópia enviou mensagens ({len(client.sent)})")
     check(any(s["kind"] == "text" for s in client.sent), "texto enviado")
     check(any(s["kind"] == "file" for s in client.sent), "arquivo enviado")
+
+
+def test_fluxo_cria_destino_e_reproduz_forum() -> None:
+    origem = teardown_channel(channel(-100, "Fórum Origem", forum=True, broadcast=False))
+    mensagens = [
+        text_message(1, "aviso repetido", reply_to_msg_id=11),
+        text_message(2, "aviso repetido", reply_to_msg_id=22),
+    ]
+    app = core.App()
+    client = CloneFlowClient(mensagens, origem)
+    app.client = client
+    app.picker = core.ChannelPicker(client)
+    app.dedup = core.DedupEngine(app_repo(app))
+    app.config.delay = 0.1
+    app.config.workers = 1
+    app.config.signature = ""
+    app.config.use_dedup = True
+
+    # origem → criar destino → manter título → todos os filtros → copiar
+    feed("/", "Fórum Origem", "1", "2", "", "0", "n", "s", "")
+    asyncio.run(_guard(app._menu_copy()))
+
+    channel_request = next(
+        req for req in client.created_requests
+        if type(req).__name__ == "CreateChannelRequest"
+    )
+    check(client.created is not None and client.created.forum,
+          "destino automático também é um fórum")
+    check(channel_request.forum and channel_request.megagroup and not channel_request.broadcast,
+          "cria supergrupo com fórum habilitado")
+    check(channel_request.title == "Fórum Origem"
+          and channel_request.about == "Descrição copiada",
+          "replica título e descrição da origem")
+
+    created_topics = client.topic_catalog[client.created.id]
+    check([topic.title for topic in created_topics] == [
+        "General", "Perguntas", "Novidades",
+    ], "recria os tópicos com os mesmos nomes")
+    forum_topic_requests = [req for req in client.created_requests
+                            if type(req).__name__ == "CreateForumTopicRequest"]
+    check(forum_topic_requests[0].icon_color == 0x6C8EBF,
+          "replica a cor do ícone de tópico")
+    check(any(type(req).__name__ == "UpdatePinnedForumTopicRequest"
+              for req in client.created_requests), "replica tópico fixado")
+    routes = [(item["text"], item["reply_to"]) for item in client.sent]
+    check(routes == [("aviso repetido", 101), ("aviso repetido", 102)],
+          f"envia inclusive conteúdos iguais a seus tópicos ({routes})")
+
+
+def test_mapear_topicos_de_destino_existente() -> None:
+    from channel_clone import ChannelCloner
+
+    origem = teardown_channel(channel(-150, "Fórum Origem", forum=True, broadcast=False))
+    destino = teardown_channel(channel(-250, "Fórum Destino", forum=True, broadcast=False))
+    client = CloneFlowClient([], origem)
+    client.topic_catalog[destino.id] = [
+        client._topic(1, "General"),
+        client._topic(201, "Perguntas", icon_color=0x6C8EBF),
+        client._topic(202, "Novidades"),
+    ]
+    mapping = asyncio.run(ChannelCloner(client).map_existing_topics(origem, destino))
+    check(mapping == {1: 1, 11: 201, 22: 202},
+          f"mapeia tópicos homônimos para retomar ({mapping})")
 
 
 def test_fluxo_ferramentas() -> None:
@@ -178,6 +310,87 @@ def test_fluxo_idioma_ingles() -> None:
     check(t("auth.code", n=2).endswith("(tentativa 2/3)"), "interpolação de parâmetros")
 
 
+def test_telefone_internacional_normalizado() -> None:
+    from core import normalize_phone
+
+    check(normalize_phone("+55 (37) 99938-4375") == "+5537999384375",
+          "normaliza telefone brasileiro com separadores")
+    check(normalize_phone("+1 555 123 4567") == "+15551234567",
+          "normaliza telefone internacional")
+    check(normalize_phone("5537999384375") is None,
+          "exige sinal de + e código internacional")
+    check(normalize_phone("+55abc999384375") is None,
+          "rejeita caracteres inválidos no telefone")
+    check(normalize_phone("+1234567") is None,
+          "rejeita telefone internacional curto")
+
+
+def test_cofre_credenciais_persiste_entre_instancias() -> None:
+    path = Path(_TMP) / "manager_vault" / "credentials.enc"
+    credentials = {"api_id": 123456, "api_hash": "a" * 32, "lang": "pt"}
+    core.CredentialManager(path).save(credentials)
+    loaded = core.CredentialManager(path).load()
+    check(loaded == credentials, "API ID/Hash são lidos por uma nova instância")
+
+
+def test_diretorio_empacotado_estavel_e_migrado() -> None:
+    base_a = Path(_TMP) / "exe_antigo"
+    base_a.mkdir(parents=True, exist_ok=True)
+    legado = base_a / "data"
+    legado.mkdir(parents=True, exist_ok=True)
+    (legado / "marcador.txt").write_text("preservar", encoding="utf-8")
+    env = {"LOCALAPPDATA": str(Path(_TMP) / "perfil")}
+    destino = config.get_data_dir(
+        base_a, frozen=True, env=env, system="win32", home=Path(_TMP)
+    )
+    esperado = Path(_TMP) / "perfil" / "TELECOPY" / "data"
+    check(destino == esperado, "build usa caminho estável do usuário")
+    check((destino / "marcador.txt").read_text(encoding="utf-8") == "preservar",
+          "migra dados existentes sem apagá-los")
+    outro = config.get_data_dir(
+        Path(_TMP) / "exe_movido", frozen=True, env=env,
+        system="win32", home=Path(_TMP)
+    )
+    check(outro == destino, "mover o executável não muda a pasta de dados")
+
+
+def test_fluxo_login_respeita_metodo_de_entrega() -> None:
+    from core import App
+
+    class AuthClient:
+        def __init__(self):
+            self.authorized = False
+            self.phone = None
+            self.code = None
+
+        async def send_code_request(self, phone, force_sms=False):
+            self.phone = phone
+            self.force_sms = force_sms
+            return SimpleNamespace(type=type("SentCodeTypeApp", (), {})())
+
+        async def is_user_authorized(self):
+            return self.authorized
+
+        async def sign_in(self, phone, code=None, password=None):
+            self.code = code
+            self.authorized = code == "12345"
+
+        async def get_me(self):
+            return SimpleNamespace(first_name="Teste", username="teste")
+
+    app = App()
+    client = AuthClient()
+    app.client = client
+    feed("+55 (37) 99938-4375", "12345")
+    result = asyncio.run(app._sign_in())
+    check(result, "login confirma a sessão após o código")
+    check(client.phone == "+5537999384375", "login envia telefone normalizado")
+    check(client.code == "12345", "login valida o código informado")
+    check("Telegram" in App._code_delivery_hint(
+        SimpleNamespace(type=type("SentCodeTypeApp", (), {})())
+    ), "orienta procurar o código no outro app conectado")
+
+
 def test_i18n_completo() -> None:
     import re
 
@@ -185,7 +398,7 @@ def test_i18n_completo() -> None:
 
     check(missing("pt") == () and missing("en") == (), "todas as chaves têm pt e en")
     fonte = ""
-    for name in ("core.py", "copier.py", "filters.py", "main.py", "config.py", "utils.py"):
+    for name in ("core.py", "copier.py", "channel_clone.py", "filters.py", "main.py", "config.py", "utils.py"):
         fonte += (ROOT / name).read_text(encoding="utf-8")
     usadas = set(re.findall(r"\bt\(\s*[\"']([a-zA-Z0-9_.]+)[\"']", fonte))
     definidas = set(all_keys())

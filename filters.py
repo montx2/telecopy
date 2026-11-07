@@ -121,7 +121,8 @@ _REGISTRY: Dict[str, Tuple[str, str, FilterFn]] = {
 }
 
 ORDER: List[str] = list(_REGISTRY.keys())
-_NUM_MAP: Dict[str, str] = {str(i + 1): code for i, code in enumerate(ORDER)}
+# Os números correspondem exatamente ao menu: 0 = todas, 1..N = filtros.
+_NUM_MAP: Dict[str, str] = {str(i): code for i, code in enumerate(ORDER)}
 
 
 # ── API pública ───────────────────────────────────────────────────────────────
@@ -149,7 +150,7 @@ def get_name(code: str) -> str:
 
 
 def resolve(user_input: str) -> Optional[str]:
-    """Aceita código ('photos') ou número do menu ('2')."""
+    """Aceita código ('photos') ou o número exibido no menu (0 = todas)."""
     value = (user_input or "").strip().lower()
     if value in _REGISTRY:
         return value

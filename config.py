@@ -1,9 +1,9 @@
 """
 config.py — Configuração central, constantes e primitivas de interface.
 
-Todos os caminhos são resolvidos a partir da pasta do executável/script,
-garantindo que o programa funcione de qualquer diretório de trabalho
-(duplo clique no .exe, atalho do menu Iniciar, terminal, etc.).
+Os scripts guardam dados junto ao projeto; builds empacotados usam uma pasta
+estável de dados por usuário, sem depender do diretório atual nem da localização
+do executável.
 """
 
 from __future__ import annotations
@@ -11,24 +11,117 @@ from __future__ import annotations
 import os
 import re
 import sys
+import textwrap
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# ── Caminho base (compatível com script e executável Nuitka/PyInstaller) ──────
+# ── Caminhos do programa e dos dados ─────────────────────────────────────────
+
+APP_NAME = "TELECOPY"
+APP_AUTHOR = "montx2"
+
+
+def _is_frozen_build() -> bool:
+    """Detecta PyInstaller e Nuitka, incluindo compilações one-file."""
+    return bool(getattr(sys, "frozen", False) or "__compiled__" in globals())
 
 
 def get_base_dir() -> Path:
     """Diretório onde o programa está instalado."""
-    if getattr(sys, "frozen", False):
+    if _is_frozen_build():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-BASE_DIR = get_base_dir()
+def _user_data_root(env: dict[str, str], system: str, home: Path) -> Path:
+    """Diretório de dados por usuário para builds empacotados."""
+    if system.startswith("win"):
+        root = env.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        return Path(root) / APP_NAME
+    if system == "darwin":
+        return home / "Library" / "Application Support" / APP_NAME
 
-# Dados ficam ao lado do executável — o usuário sempre encontra tudo.
-DATA_DIR = BASE_DIR / "data"
+    root = env.get("XDG_DATA_HOME")
+    data_home = Path(root) if root and Path(root).is_absolute() else home / ".local" / "share"
+    return data_home / APP_NAME.lower()
+
+
+def _migrate_legacy_data(source: Path, destination: Path) -> bool:
+    """Copia os dados antigos ao lado do executável para o local estável."""
+    import shutil
+
+    staging = destination.with_name(destination.name + ".migrating")
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if staging.exists():
+            shutil.rmtree(staging)
+        shutil.copytree(source, staging)
+        if destination.exists():
+            if any(destination.iterdir()):
+                shutil.rmtree(staging)
+                return True
+            destination.rmdir()
+        os.replace(staging, destination)
+        return True
+    except OSError:
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError:
+            pass
+        return False
+
+
+def get_data_dir(
+    base_dir: Path | None = None,
+    *,
+    frozen: bool | None = None,
+    env: dict[str, str] | None = None,
+    system: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Resolve um diretório persistente e gravável para os dados do app.
+
+    Scripts Python continuam usando ``./data`` junto ao projeto. Executáveis
+    usam o diretório de dados do usuário, que não muda quando o .exe é movido.
+    Dados de versões portáteis antigas são migrados uma vez, sem apagá-los.
+    """
+    base = Path(base_dir) if base_dir is not None else get_base_dir()
+    is_frozen = _is_frozen_build() if frozen is None else frozen
+    legacy = base / "data"
+    if not is_frozen:
+        return legacy
+
+    environ = os.environ if env is None else env
+    platform_name = sys.platform if system is None else system
+    user_home = Path.home() if home is None else Path(home)
+    preferred = _user_data_root(environ, platform_name, user_home) / "data"
+
+    try:
+        same_path = os.path.normcase(str(legacy.resolve())) == os.path.normcase(
+            str(preferred.resolve())
+        )
+    except OSError:
+        same_path = legacy == preferred
+    if same_path:
+        return preferred
+
+    # Se um usuário já executava uma versão portátil, preserva a sessão,
+    # credenciais, banco e preferências no novo local estável.
+    if legacy.is_dir():
+        try:
+            destination_has_data = preferred.exists() and any(preferred.iterdir())
+        except OSError:
+            destination_has_data = True
+        if not destination_has_data and not _migrate_legacy_data(legacy, preferred):
+            # Se não foi possível migrar, mantém o diretório antigo em uso.
+            return legacy
+    return preferred
+
+
+BASE_DIR = get_base_dir()
+DATA_DIR = get_data_dir(BASE_DIR)
 TEMP_DIR = DATA_DIR / "tmp"
 LOGS_DIR = DATA_DIR / "logs"
 VAULT_DIR = DATA_DIR / "vault"
@@ -46,9 +139,6 @@ VAULT_FILE = VAULT_DIR / "credentials.enc"
 LOG_FILE = LOGS_DIR / "telecopy.log"
 
 # ── Limites ───────────────────────────────────────────────────────────────────
-
-APP_NAME = "TELECOPY"
-APP_AUTHOR = "montx2"
 
 DAILY_LIMIT = 1000
 DAILY_WARN = 800
@@ -346,26 +436,42 @@ class UI:
 
     # -- mensagens ----------------------------------------------------------
 
+    def _message(self, marker: str, msg: str, marker_color: str,
+                 text_color: str = C.WHITE) -> None:
+        plain = _ANSI_RE.sub("", str(msg))
+        width = max(30, min(self.W - 4, term_columns(default=88) - 8))
+        lines = textwrap.wrap(
+            plain, width=width, break_long_words=True, break_on_hyphens=False
+        ) or [""]
+        for index, line in enumerate(lines):
+            if index == 0 and marker:
+                prefix = f"  {marker_color}{marker}{C.RST}  "
+            elif index == 0:
+                prefix = f"  {marker_color}"
+            else:
+                prefix = "    "
+            self._wln(f"{prefix}{text_color}{line}{C.RST}")
+
     def ok(self, msg: str) -> None:
-        self._wln(f"  {C.GREEN}✓{C.RST}  {C.WHITE}{msg}{C.RST}")
+        self._message("✓", msg, C.GREEN)
 
     def err(self, msg: str) -> None:
-        self._wln(f"  {C.RED}✗{C.RST}  {C.WHITE}{msg}{C.RST}")
+        self._message("✗", msg, C.RED)
 
     def warn(self, msg: str) -> None:
-        self._wln(f"  {C.YELLOW}!{C.RST}  {C.WHITE}{msg}{C.RST}")
+        self._message("!", msg, C.YELLOW)
 
     def info(self, msg: str) -> None:
-        self._wln(f"  {C.CYAN}·{C.RST}  {C.WHITE}{msg}{C.RST}")
+        self._message("·", msg, C.CYAN)
 
     def step(self, msg: str) -> None:
-        self._wln(f"  {C.PURPLE}›{C.RST}  {msg}")
+        self._message("›", msg, C.PURPLE)
 
     def text(self, msg: str, color: str = "") -> None:
-        self._wln(f"  {color or C.SILVER}{msg}{C.RST}")
+        self._message("", msg, color or C.SILVER, color or C.SILVER)
 
     def bullet(self, msg: str) -> None:
-        self._wln(f"  {C.DARK}•{C.RST}  {C.SILVER}{msg}{C.RST}")
+        self._message("•", msg, C.DARK, C.SILVER)
 
     # -- entrada ------------------------------------------------------------
 
@@ -378,11 +484,27 @@ class UI:
         except Exception:
             return default
 
+    def _prompt(self, prompt: str, suffix: str = ": ") -> None:
+        """Imprime prompts longos em linhas alinhadas, sem estourar o terminal."""
+        width = max(30, min(self.W, term_columns(default=88) - 8))
+        lines = textwrap.wrap(
+            str(prompt), width=width, break_long_words=True, break_on_hyphens=False
+        ) or [""]
+        for index, line in enumerate(lines):
+            last = index == len(lines) - 1
+            prefix = (f"  {C.AMBER}›{C.RST} {C.WHITE}" if index == 0
+                      else f"    {C.WHITE}")
+            rendered = f"{prefix}{line}{C.RST}{suffix if last else ''}"
+            if last:
+                self._w(rendered)
+            else:
+                self._wln(rendered)
+
     def ask(self, prompt: str, required: bool = True) -> str:
         req_msg = self._tr("prompt.required", "Este campo é obrigatório.")
         while True:
             try:
-                self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST}: ")
+                self._prompt(prompt)
                 value = input().strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -397,7 +519,7 @@ class UI:
 
         while True:
             try:
-                self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST}: ")
+                self._prompt(prompt)
                 value = getpass.getpass("").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -416,7 +538,7 @@ class UI:
         yn = self._tr("prompt.yes_no", "[s/N]" if default is False else "[S/n]")
         yes_chars = set(self._tr("prompt.yes_chars", "s sim y yes").split())
         no_chars = set(self._tr("prompt.no_chars", "n nao não no").split())
-        self._w(f"  {C.AMBER}›{C.RST} {C.WHITE}{prompt}{C.RST} {C.GRAY}{yn}{C.RST}: ")
+        self._prompt(prompt, f" {C.GRAY}{yn}{C.RST}: ")
         try:
             raw = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -441,22 +563,33 @@ class UI:
     # -- menu ---------------------------------------------------------------
 
     def menu(self, items: list[tuple]) -> None:
-        """items: lista de (tecla, título) ou (tecla, título, descrição)."""
+        """Menu compacto; descrições longas quebram com recuo consistente."""
         self.blank()
+        width = max(30, min(self.W - 4, term_columns(default=88) - 8))
         for i, entry in enumerate(items):
             key, label = str(entry[0]), str(entry[1])
-            desc = entry[2] if len(entry) > 2 else ""
-            if key == "0":
-                color = C.GRAY
-            else:
-                color = C.ORANGE if i % 2 == 0 else C.VIOLET
-            line = (
-                f"  {color}[{C.BOLD}{key}{C.RST}{color}]{C.RST}"
-                f"  {C.BOLD}{C.WHITE}{label}{C.RST}"
-            )
+            desc = str(entry[2]) if len(entry) > 2 and entry[2] else ""
+            color = C.GRAY if key == "0" else (C.ORANGE if i % 2 == 0 else C.VIOLET)
+            plain = f"[{key}]  {label}"
             if desc:
-                line += f"  {C.GRAY}— {desc}{C.RST}"
-            self._wln(line)
+                plain += f"  — {desc}"
+            lines = textwrap.wrap(
+                plain,
+                width=width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [plain]
+            marker = f"[{key}]"
+            first = lines[0]
+            if first.startswith(marker):
+                self._wln(
+                    f"  {color}{C.BOLD}{marker}{C.RST}  "
+                    f"{C.WHITE}{first[len(marker):].strip()}{C.RST}"
+                )
+            else:
+                self._wln(f"  {color}{first}{C.RST}")
+            for line in lines[1:]:
+                self._wln(f"    {C.GRAY}{line.strip()}{C.RST}")
         self.blank()
 
     # -- caixas -------------------------------------------------------------
@@ -484,15 +617,19 @@ class UI:
             if display_width(lbl_text) > label_w:
                 lbl_text = lbl_text[: max(1, label_w - 1)] + "…"
             lbl = f"{C.ORANGE}{lbl_text}{' ' * max(0, label_w - display_width(lbl_text))}{C.RST}"
-            val = f"{C.WHITE}{value}{C.RST}"
-            content = f"  {lbl}  {C.DARK}│{C.RST}  {val}"
-            pad = inner - display_width(content)
-            if pad < 0:  # valor muito longo: trunca
-                crop = inner - display_width(content) + display_width(str(value)) - 3
-                val = f"{C.WHITE}{str(value)[:max(4, crop)]}…{C.RST}"
-                content = f"  {lbl}  {C.DARK}│{C.RST}  {val}"
+            prefix = f"  {lbl}  {C.DARK}│{C.RST}  "
+            continuation = f"  {' ' * label_w}  {C.DARK}│{C.RST}  "
+            value_width = max(12, inner - display_width(prefix))
+            value_lines = textwrap.wrap(
+                str(value),
+                width=value_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            for index, value_line in enumerate(value_lines):
+                content = (prefix if index == 0 else continuation) + f"{C.WHITE}{value_line}{C.RST}"
                 pad = max(0, inner - display_width(content))
-            self._wln(f"  {col}│{content}{' ' * pad}│{C.RST}")
+                self._wln(f"  {col}│{content}{' ' * pad}│{C.RST}")
 
         self._wln(f"  {col}└{'─' * inner}┘{C.RST}")
         self.blank()
