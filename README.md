@@ -84,11 +84,16 @@ Se preferir, use o executável pronto: dê **duplo clique em `Telecopy.exe`**
 ### Verificar se está tudo certo
 
 ```bash
-python main.py --check
+python main.py --check     # ambiente, banco, hardware e acesso ao Telegram
+python demo.py             # cópia de demonstração 100% offline
 ```
 
-Isso mostra a versão do Python, a pasta de dados, a integridade do banco e a
-recomendação de desempenho para o seu computador.
+O `--check` mostra a versão do Python, a pasta de dados, a integridade do banco,
+o hardware detectado e se os servidores do Telegram estão alcançáveis.
+
+O `demo.py` executa uma cópia completa com um Telegram **simulado** — não pede
+login, não acessa a internet e não altera seus dados. É a forma mais rápida de
+confirmar que a instalação está funcionando.
 
 ---
 
@@ -253,7 +258,8 @@ data/
 ├── daily.json             contador do limite diário
 ├── vault/
 │   ├── credentials.enc    API ID/Hash cifrados (AES-256-GCM)
-│   └── local.key          chave local do cofre
+│   ├── local.key          chave local do cofre
+│   └── legacy_v3/         backup do cofre antigo (se existir)
 ├── logs/telecopy.log      log rotativo (2 MB por arquivo, 3 backups)
 ├── exports/               logs exportados
 ├── backups/               backups do banco

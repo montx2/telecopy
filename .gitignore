@@ -13,6 +13,7 @@ local.key
 
 # ── Build / artefatos ─────────────────────────────────────────────────────────
 main.build/
+demo_demo*
 main.dist/
 main.onefile-build/
 *.build/
