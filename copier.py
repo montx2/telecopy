@@ -532,23 +532,30 @@ class Copier:
                         payload = {"skip": True}
                     else:
                         payload = await self._prepare(index, item, progress)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     logger.exception(f"Falha ao preparar item {index}: {exc}")
                     payload = None
                 finally:
                     in_queue.task_done()
-                async with cond:
-                    ready[index] = payload
-                    cond.notify_all()
+                    # garante que o sender nunca fique esperando este índice
+                    async with cond:
+                        ready[index] = payload
+                        cond.notify_all()
 
         async def sender() -> None:
             for index in range(total):
                 if self._stop:
                     break
                 async with cond:
-                    while index not in ready:
-                        await cond.wait()
-                    payload = ready.pop(index)
+                    if index not in ready:
+                        try:
+                            await asyncio.wait_for(cond.wait_for(lambda: index in ready),
+                                                   timeout=600)
+                        except asyncio.TimeoutError:
+                            logger.error(f"Timeout aguardando preparação do item {index}")
+                    payload = ready.pop(index, None)
 
                 if payload is None:
                     item = items[index]

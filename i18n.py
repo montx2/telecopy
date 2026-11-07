@@ -73,6 +73,9 @@ _s("auth.conn_failed", "Não foi possível conectar ao Telegram", "Could not con
 _s("auth.connecting", "Conectando ao Telegram…", "Connecting to Telegram…")
 _s("auth.conn_hint", "Verifique sua internet, firewall ou proxy e tente novamente.",
    "Check your internet connection, firewall or proxy and try again.")
+_s("auth.try_again", "Tentar conectar novamente?", "Try connecting again?")
+_s("auth.conn_timeout", "tempo esgotado — rede bloqueando a conexão",
+   "timed out — the network is blocking the connection")
 _s("auth.signed_in", "Conectado como", "Signed in as")
 _s("auth.session_invalid", "Sessão inválida ou expirada — será necessário entrar novamente.",
    "Session invalid or expired — you'll need to sign in again.")

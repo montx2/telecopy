@@ -212,6 +212,30 @@ class DailyLimit:
 daily_limit = DailyLimit()
 
 
+# ── Integração com o logging do Telethon ─────────────────────────────────────
+
+
+def setup_telethon_logging(level: str = "ERROR") -> None:
+    """
+    Direciona os logs internos do Telethon para o arquivo do TELECOPY,
+    evitando mensagens soltas no console (ex.: "Server closed the connection").
+    """
+    import logging
+
+    class _FileHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                logger._write(record.levelname, record.getMessage())
+            except Exception:
+                pass
+
+    root = logging.getLogger("telethon")
+    root.handlers.clear()
+    root.addHandler(_FileHandler())
+    root.setLevel(getattr(logging, level.upper(), logging.ERROR))
+    root.propagate = False
+
+
 # ── Estatísticas ──────────────────────────────────────────────────────────────
 
 

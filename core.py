@@ -354,6 +354,24 @@ class App:
 
     # ── autenticação ────────────────────────────────────────────────────────
 
+    @staticmethod
+    async def _network_ok(host: str = "149.154.167.50", port: int = 443,
+                          timeout: float = 5.0) -> bool:
+        """Teste rápido de alcance aos servidores do Telegram."""
+        import socket
+
+        def probe() -> bool:
+            try:
+                with socket.create_connection((host, port), timeout=timeout):
+                    return True
+            except OSError:
+                return False
+
+        try:
+            return await asyncio.to_thread(probe)
+        except Exception:
+            return False
+
     async def _authenticate(self) -> bool:
         creds = self.creds.load()
 
@@ -371,21 +389,41 @@ class App:
             self.creds.save({"api_id": api_id, "api_hash": api_hash, "lang": get_lang()})
             ui.ok(t("auth.creds_saved"))
 
-        try:
-            self.client = TelegramClient(
-                str(SESSION_FILE), api_id, api_hash,
-                device_model=f"TELECOPY {_app.__version__}",
-                system_version=platform.platform()[:60],
-                app_version=_app.__version__,
-                connection_retries=5,
-                retry_delay=2,
-                timeout=25,
-            )
-            await self.client.connect()
-        except Exception as exc:
-            ui.err(f"{t('auth.conn_failed')}: {exc}")
+        if not await self._network_ok():
+            ui.blank()
+            ui.err(t("auth.conn_failed"))
             ui.info(t("auth.conn_hint"))
-            logger.error(f"Conexão: {exc}")
+            logger.error("Sem conexão com os servidores do Telegram")
+            ui.pause()
+            return False
+
+        for attempt in range(1, 3):
+            try:
+                self.client = TelegramClient(
+                    str(SESSION_FILE), api_id, api_hash,
+                    device_model=f"TELECOPY {_app.__version__}",
+                    system_version=platform.platform()[:60],
+                    app_version=_app.__version__,
+                    connection_retries=1,
+                    retry_delay=0,
+                    request_retries=1,
+                    timeout=12,
+                    auto_reconnect=True,
+                )
+                # timeout defensivo: nunca deixa a interface travada
+                await asyncio.wait_for(self.client.connect(), timeout=45)
+                break
+            except Exception as exc:
+                logger.error(f"Conexão (tentativa {attempt}/2): {exc}")
+                reason = (t("auth.conn_timeout") if isinstance(exc, asyncio.TimeoutError)
+                          else str(exc)) or t("err.generic")
+                ui.blank()
+                ui.err(f"{t('auth.conn_failed')}: {reason}")
+                ui.info(t("auth.conn_hint"))
+                if attempt == 2 or not ui.confirm(t("auth.try_again")):
+                    return False
+                ui.blank()
+        else:  # pragma: no cover - laço sempre termina em break/return
             return False
 
         if await self.client.is_user_authorized():

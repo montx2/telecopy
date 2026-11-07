@@ -76,6 +76,24 @@ def check_dependencies(verbose: bool = False) -> bool:
     return True
 
 
+def _migrate_legacy_data(session_file) -> None:
+    """
+    Instalações antigas guardavam a sessão como data/session.session.
+    O Telethon usa data/session.session por padrão ao receber o caminho sem
+    extensão, então basta manter o arquivo onde está — esta rotina apenas
+    garante que a pasta data/ exista e normaliza o nome quando necessário.
+    """
+    from pathlib import Path
+
+    legacy = Path(str(session_file) + ".session")
+    plain = Path(str(session_file))
+    try:
+        if plain.exists() and not legacy.exists():
+            plain.rename(legacy)
+    except OSError:
+        pass
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="telecopy",
@@ -103,11 +121,14 @@ def main() -> int:
     if not check_dependencies(verbose=args.check):
         return 1
 
-    from config import DATA_DIR, LOCK_FILE, ui
+    from config import DATA_DIR, LOCK_FILE, SESSION_FILE
     from database import db
     from i18n import set_lang
     from prefs import prefs
-    from utils import logger
+    from utils import logger, setup_telethon_logging
+
+    setup_telethon_logging("DEBUG" if args.debug else "ERROR")
+    _migrate_legacy_data(SESSION_FILE)
 
     if args.check:
         from system_analyzer import analyzer
@@ -120,6 +141,14 @@ def main() -> int:
         print(f"  Integridade   : {health['integrity']}")
         for key, value in analyzer.summary().items():
             print(f"  {key:<14}: {value}")
+
+        import socket
+
+        try:
+            with socket.create_connection(("149.154.167.50", 443), timeout=5):
+                print("  Telegram      : alcançável ✓")
+        except OSError as exc:
+            print(f"  Telegram      : inacessível — {exc}")
         print("\n  Ambiente OK.\n")
         return 0
 

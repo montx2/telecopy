@@ -423,6 +423,71 @@ def test_espelho() -> None:
     repo.close()
 
 
+def test_copy_limite_diario() -> None:
+    """Ao atingir o limite diário a cópia para e o progresso não se perde."""
+    from utils import daily_limit
+
+    daily_limit.reset()
+    daily_limit.add(10_000)
+    try:
+        resultado, client, repo = asyncio.run(
+            _run_copy([text_message(i, f"m{i}") for i in range(1, 6)])
+        )
+        check(resultado["errors"] >= 1 or resultado["done"] == 0,
+              "limite diário interrompe os envios")
+        check(repo.pair_summary(-1001, -2002)["done"] == 0,
+              "nada é marcado como concluído após o bloqueio")
+        repo.close()
+    finally:
+        daily_limit.reset()
+
+
+def test_copy_arquivo_grande_e_nome_estranho() -> None:
+    mensagens = [
+        document_message(1, "relatório final (v2) [ok].pdf", size=900_000),
+        document_message(2, "sem-extensao", size=1000),
+    ]
+    resultado, client, repo = asyncio.run(_run_copy(mensagens))
+    check(resultado["done"] == 2, "arquivos grandes/estranhos são copiados")
+    check(all(os.path.basename(str(s["path"])).strip() for s in client.sent),
+          "nomes de arquivo temporário são válidos")
+    check(resultado["bytes"] > 0, "bytes contabilizados")
+    repo.close()
+
+
+def test_copy_album_com_falha() -> None:
+    """Se um item do álbum falhar, o restante continua e o erro é registrado."""
+    mensagens = album_messages(300, 2) + [text_message(310, "depois")]
+    resultado, client, repo = asyncio.run(_run_copy(mensagens, fail_ids={301}))
+    check(resultado["errors"] >= 1, "falha no álbum é contabilizada")
+    check(resultado["done"] >= 1, "mensagens saudáveis continuam sendo copiadas")
+    check(len(repo.failures()) >= 1, "falha entra na fila de repetição")
+    repo.close()
+
+
+def test_limpeza_temporarios() -> None:
+    """Após uma cópia bem-sucedida a pasta tmp/ fica vazia."""
+    asyncio.run(_run_copy([photo_message(500), document_message(501)]))
+    restantes = [p for p in config.TEMP_DIR.glob("*") if p.is_file()]
+    check(not restantes, f"pasta tmp limpa (encontrados: {restantes})")
+
+
+def test_prefs_roundtrip() -> None:
+    from prefs import Preferences
+
+    caminho = Path(_TMP) / "prefs_test.json"
+    p = Preferences(caminho)
+    p.set_language("en")
+    p.set("onboarding_done", True)
+    cfg = RunConfig(delay=2.5, workers=3, signature="@teste")
+    p.save_config(cfg)
+    recarregado = Preferences(caminho)
+    check(recarregado.language == "en", "idioma persistido")
+    check(recarregado.get("onboarding_done") is True, "onboarding persistido")
+    check(recarregado.config.delay == 2.5, "delay persistido")
+    check(recarregado.config.signature == "@teste", "assinatura persistida")
+
+
 def test_retry_messages() -> None:
     mensagens = [document_message(i, f"arq{i}.pdf") for i in range(1, 4)]
     resultado, client, repo = asyncio.run(

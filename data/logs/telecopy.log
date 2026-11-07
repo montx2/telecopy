@@ -1,6 +1,2 @@
-[2026-11-07 18:52:21] [INFO    ] Sessão iniciada — v4.0.0 [pt]
-[2026-11-07 18:52:22] [ERROR   ] Conexão: 0 bytes read on a total of 8 expected bytes
-[2026-11-07 18:52:55] [ERROR   ] teste de traceback
-Traceback (most recent call last):
-  File "<string>", line 5, in <module>
-ZeroDivisionError: division by zero
+[2026-11-07 19:01:18] [INFO    ] Sessão iniciada — v4.0.0 [pt]
+[2026-11-07 19:02:03] [ERROR   ] Conexão (tentativa 1/3): 
