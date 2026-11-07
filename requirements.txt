@@ -1,5 +1,8 @@
-telethon>=1.35.0
-cryptography>=41.0.0
+# TELECOPY — dependências de execução
+telethon>=1.36.0
+cryptography>=42.0.0
 psutil>=5.9.0
-rich>=13.0.0
+rich>=13.7.0
+
+# opcional: acelera a criptografia do Telethon (recomendado no Windows)
 cryptg>=0.4.0

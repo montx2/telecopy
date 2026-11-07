@@ -1,27 +1,22 @@
 """
-core.py — Application core: authentication, FSM, menus, tools e configuracoes.
+core.py — Núcleo da aplicação: autenticação, navegação e menus.
 
-Melhorias v3.1:
-  • Wizard de onboarding para novos usuarios (PT/EN)
-  • Autenticacao step-by-step com instrucoes claras
-  • TODAS as ferramentas implementadas (resolve, stats, retry, dedup, maint)
-  • Configuracoes completas (delay, dedup, export, reset, idioma, about)
-  • Breadcrumb visual de navegacao
-  • Mensagens de erro mais claras
-  • Detecao automatica de recursos do sistema (workers)
-  • Carregamento de idioma do instalador
-  • Verificacao de atualizacoes
+Estrutura
+    App.start()          → idioma, splash, login, menu principal
+    ChannelPicker        → seletor paginado de canais com busca
+    _menu_*()            → fluxos de cópia, multi-destino, espelho
+    _tool_*()            → ferramentas de diagnóstico e manutenção
+    _menu_settings()     → preferências
 """
+
+from __future__ import annotations
 
 import asyncio
 import math
-import os
+import platform
 import re
 import shutil
-import sys
 import time
-import traceback
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,177 +26,180 @@ from telethon.errors import (
     FloodWaitError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
+    PhoneNumberInvalidError,
     SessionPasswordNeededError,
 )
-from telethon.tl.types import Channel, Chat, User
-
-from config import (
-    C,
-    UI,
-    RunConfig,
-    SESSION_FILE,
-    VAULT_FILE,
-    LOGS_DIR,
-    TEMP_DIR,
-    EXPORT_DIR,
-    DAILY_LIMIT,
-    ui,
-)
-from database import db, Status
-from dedup import DedupEngine
-from filters import list_filters, resolve as resolve_filter, get_name as filter_name
-from i18n import t, set_lang, get_lang
-from retry_queue import queue as rqueue
-from security import Vault
-from utils import logger, Stats, Fmt, daily_limit
+from telethon.tl.types import Channel, Chat
 
 import __init__ as _app
+from config import (
+    APP_AUTHOR,
+    BACKUP_DIR,
+    C,
+    DAILY_LIMIT,
+    DATA_DIR,
+    EXPORT_DIR,
+    LOG_FILE,
+    SESSION_FILE,
+    TEMP_DIR,
+    VAULT_FILE,
+    RunConfig,
+    ui,
+)
+from database import db
+from dedup import DedupEngine
+from filters import get_name as filter_name
+from filters import list_filters, resolve as resolve_filter
+from i18n import get_lang, set_lang, t
+from prefs import prefs
+from retry_queue import RetryQueue
+from security import Vault
+from utils import Fmt, Stats, daily_limit, logger
 
-_PAGE = 10
+PAGE_SIZE = 9
 
 
 # ==============================================================================
-# ChannelPicker — seletor paginado com busca
+# Seletor de canais
 # ==============================================================================
 
 
 class ChannelPicker:
+    """Lista paginada dos canais/grupos da conta, com busca por nome."""
+
     def __init__(self, client: TelegramClient) -> None:
         self.client = client
-        self._cache: List[Any] = []
+        self._items: List[Dict[str, Any]] = []
         self._loaded = False
 
-    async def _load(self) -> None:
-        if self._loaded:
-            return
+    # -- carregamento -------------------------------------------------------
+
+    async def load(self, force: bool = False) -> List[Dict[str, Any]]:
+        if self._loaded and not force:
+            return self._items
         ui.clear()
         print(f"\n  {C.CYAN}·{C.RST}  {t('picker.loading')}…", end="", flush=True)
-        self._cache = []
-        async for dialog in self.client.iter_dialogs():
-            ent = dialog.entity
-            if isinstance(ent, (Channel, Chat)):
-                is_forum = getattr(ent, "forum", False)
-                is_channel = isinstance(ent, Channel) and getattr(
-                    ent, "broadcast", False
-                )
-                ent_type = "Forum" if is_forum else ("Canal" if is_channel else "Grupo")
-                self._cache.append(
-                    {
-                        "entity": ent,
-                        "name": getattr(ent, "title", str(ent.id)),
-                        "id": ent.id,
-                        "type": ent_type,
-                        "members": getattr(ent, "participants_count", None),
-                    }
-                )
-        print(
-            f"\r  {C.GREEN}✓{C.RST}  {len(self._cache)} {t('picker.found')}            "
-        )
+        items: List[Dict[str, Any]] = []
+        try:
+            async for dialog in self.client.iter_dialogs():
+                ent = dialog.entity
+                if not isinstance(ent, (Channel, Chat)):
+                    continue
+                is_forum = bool(getattr(ent, "forum", False))
+                is_broadcast = isinstance(ent, Channel) and bool(getattr(ent, "broadcast", False))
+                kind = ("picker.type_forum" if is_forum
+                        else "picker.type_channel" if is_broadcast
+                        else "picker.type_group")
+                items.append({
+                    "entity": ent,
+                    "name": getattr(ent, "title", None) or str(ent.id),
+                    "id": int(ent.id),
+                    "type": t(kind),
+                    "members": getattr(ent, "participants_count", None),
+                    "forum": is_forum,
+                })
+        except Exception as exc:  # pragma: no cover - depende da rede
+            logger.error(f"Falha ao listar diálogos: {exc}")
+        items.sort(key=lambda x: x["name"].casefold())
+        self._items = items
         self._loaded = True
+        print(f"\r  {C.GREEN}✓{C.RST}  {len(items)} {t('picker.found')}                    ")
+        if not items:
+            ui.warn(t("picker.none"))
+        return items
 
-    def _render(self, items, page, total_pages, query, highlight_id=None):
+    # -- render -------------------------------------------------------------
+
+    def _render(self, rows: List[Dict[str, Any]], page: int, pages: int,
+                query: str, highlight_id: Optional[int]) -> None:
         ui.clear()
-        sub = (
-            f"{t('picker.search')}: \"{query}\"  ·  " if query else ""
-        ) + f"{t('picker.page')} {page + 1}/{total_pages}"
-        ui.header(t("picker.title"), sub)
+        subtitle = f"{t('picker.page')} {page + 1}/{pages}"
+        if query:
+            subtitle = f"{t('picker.search')}: \"{query}\"  ·  {subtitle}"
+        ui.header(t("picker.title"), subtitle)
 
-        W = ui.W
-        col_num, col_type, col_id, col_mem = 5, 8, 14, 10
-        col_name = W - col_num - col_type - col_id - col_mem - 6
+        header = (f"  {C.DARK}{'#':<6}{t('picker.header_type'):<10}"
+                  f"{t('picker.header_id'):<15}{t('picker.header_members'):<10}"
+                  f"{t('picker.header_name')}{C.RST}")
+        print(header)
+        print(f"  {C.DARK}{'─' * ui.W}{C.RST}")
 
-        print(
-            f"  {C.DARK}#    "
-            f"{'Tipo':<{col_type}}{'ID':<{col_id}}{'Membros':<{col_mem}}{'Nome':<{col_name}}{C.RST}"
-        )
-        print(f"  {C.DARK}{'─' * W}{C.RST}")
-
-        start_idx = page * _PAGE + 1
-        for i, ch in enumerate(items, start_idx):
-            hl = highlight_id and ch["id"] == highlight_id
-            nc = C.GREEN if hl else C.AMBER
-            rc = C.GREEN if hl else ""
-
-            name_raw = ch["name"]
-            if hl:
-                name_raw += f" {t('picker.source_hl')}"
-            name_raw = name_raw[: col_name - 1]
-            mem_str = str(ch["members"]) if ch["members"] is not None else "—"
-
+        for offset, item in enumerate(rows):
+            number = page * PAGE_SIZE + offset + 1
+            is_source = highlight_id is not None and item["id"] == highlight_id
+            color = C.GREEN if is_source else C.VIOLET
+            members = Fmt.number(item["members"]) if item["members"] else "—"
+            name = item["name"][:32]
+            if is_source:
+                name += f"  {t('picker.source_hl')}"
             print(
-                f"  {nc}{C.BOLD}[{i:<2}]{C.RST}"
-                f" {rc or C.VIOLET}{ch['type']:<{col_type}}{C.RST}"
-                f"{rc or C.GRAY}{str(ch['id']):<{col_id}}{C.RST}"
-                f"{rc or C.SILVER}{mem_str:<{col_mem}}{C.RST}"
-                f"{rc or C.WHITE}{name_raw:<{col_name}}{C.RST}"
+                f"  {C.AMBER}[{number:>2}]{C.RST} "
+                f"{color}{item['type']:<10}{C.RST}"
+                f"{C.GRAY}{str(item['id']):<15}{C.RST}"
+                f"{C.SILVER}{members:<10}{C.RST}"
+                f"{C.WHITE}{name}{C.RST}"
             )
 
-        print(f"  {C.DARK}{'─' * W}{C.RST}")
-
+        print(f"  {C.DARK}{'─' * ui.W}{C.RST}")
         nav = []
         if page > 0:
             nav.append(f"{C.PURPLE}[P]{C.RST} {t('picker.prev')}")
-        if page < total_pages - 1:
+        if page < pages - 1:
             nav.append(f"{C.PURPLE}[N]{C.RST} {t('picker.next')}")
         nav.append(f"{C.CYAN}[/]{C.RST} {t('picker.search_btn')}")
         nav.append(f"{C.GRAY}[0]{C.RST} {t('menu.back')}")
-        print(f"\n  {'   '.join(nav)}")
-        ui.blank()
+        print(f"\n  {'   '.join(nav)}\n")
 
-    async def pick(self, label: str = "", highlight_id: int = None) -> Optional[Any]:
-        await self._load()
-        query, page, subset = "", 0, self._cache
+    # -- seleção ------------------------------------------------------------
 
+    async def pick(self, label: str = "", highlight_id: Optional[int] = None):
+        items = await self.load()
+        if not items:
+            ui.pause()
+            return None
+
+        query = ""
+        page = 0
         while True:
             subset = (
-                [c for c in self._cache if query.lower() in c["name"].lower()]
-                if query
-                else self._cache
+                [i for i in items if query.casefold() in i["name"].casefold()]
+                if query else items
             )
-            total_pages = max(1, math.ceil(len(subset) / _PAGE))
-            page = max(0, min(page, total_pages - 1))
-            items = subset[page * _PAGE : (page + 1) * _PAGE]
+            pages = max(1, math.ceil(len(subset) / PAGE_SIZE))
+            page = max(0, min(page, pages - 1))
+            rows = subset[page * PAGE_SIZE: (page + 1) * PAGE_SIZE]
 
-            self._render(items, page, total_pages, query, highlight_id)
-            sys.stdout.write(
-                f"  {C.AMBER}›{C.RST} {C.WHITE}{label or t('picker.select')}{C.RST}: "
-            )
-            try:
-                raw = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                return None
+            self._render(rows, page, pages, query, highlight_id)
+            raw = ui.ask(label or t("picker.select"), required=False).lower()
 
             if raw in ("0", ""):
                 return None
-            if raw == "n":
-                page = min(page + 1, total_pages - 1)
+            if raw == "n" and page < pages - 1:
+                page += 1
                 continue
-            if raw == "p":
-                page = max(page - 1, 0)
+            if raw == "p" and page > 0:
+                page -= 1
                 continue
             if raw == "/":
-                sys.stdout.write(f"  {C.AMBER}›{C.RST} {t('picker.search_prompt')}: ")
-                try:
-                    query = input().strip()
-                    page = 0
-                except (EOFError, KeyboardInterrupt):
-                    pass
+                query = ui.ask(t("picker.search_prompt"), required=False)
+                page = 0
                 continue
             if raw.isdigit():
-                idx = int(raw) - 1
-                if 0 <= idx < len(subset):
-                    return subset[idx]["entity"]
-                ui.warn(t("picker.invalid"))
-                continue
+                index = int(raw) - 1
+                if 0 <= index < len(subset):
+                    return subset[index]["entity"]
             ui.warn(t("picker.invalid"))
+            time.sleep(0.6)
 
 
 # ==============================================================================
-# CredentialManager
+# Credenciais
 # ==============================================================================
 
 
 class CredentialManager:
+    """Acesso ao cofre cifrado de credenciais."""
+
     def __init__(self) -> None:
         self._vault = Vault(VAULT_FILE)
 
@@ -211,278 +209,316 @@ class CredentialManager:
     def save(self, data: Dict[str, Any]) -> None:
         self._vault.save(data)
 
+    def update(self, **kwargs: Any) -> Dict[str, Any]:
+        data = self.load() or {}
+        data.update(kwargs)
+        self.save(data)
+        return data
+
     def exists(self) -> bool:
         return self._vault.exists()
+
+    def readable(self) -> bool:
+        return self._vault.is_readable()
 
     def clear(self) -> None:
         self._vault.delete()
 
 
 # ==============================================================================
-# Aplicacao
+# Aplicação
 # ==============================================================================
 
 
 class App:
     def __init__(self) -> None:
         self.client: Optional[TelegramClient] = None
-        self.creds: CredentialManager = CredentialManager()
-        self.stats: Stats = Stats()
-        self.config: RunConfig = RunConfig()
-        self._trail: List[str] = []
-        self._running: bool = True
-        self._picker: Optional[ChannelPicker] = None
-        self._dedup: Optional[DedupEngine] = None
-        self._memory_profile: float = 0.60  # Padrão equilibrado
-        self._workers_selected: int = 4
+        self.creds = CredentialManager()
+        self.stats = Stats()
+        self.config: RunConfig = prefs.config
+        self.prefs = prefs
+        self.retry = RetryQueue(db)
+        self.dedup = DedupEngine(db, enabled=True)
+        self.picker: Optional[ChannelPicker] = None
+        self.me = None
+        self._trail: List[str] = [t("app.tagline")]
+        self._running = True
+
+    # ── ciclo de vida ───────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        first_time = not self.creds.exists()
-
-        if self._load_language_from_installer():
-            pass
-        elif first_time:
-            self._pick_language_boot()
-
-        ui.splash(_app.__version__)
+        self._load_preferences()
+        ui.splash(
+            _app.__version__,
+            f"{t('app.tagline')}  ·  v{_app.__version__}",
+            t("app.tech"),
+        )
         ui.loading_bar(t("init.loading"))
-        ui.clear()
-
         self.stats.new_session()
-        logger.info(f"Sessao iniciada — v{_app.__version__} [{get_lang()}]")
+        logger.info(f"Sessão iniciada — v{_app.__version__} [{get_lang()}]")
 
-        if first_time:
-            self._show_onboarding()
+        if not self.prefs.get("onboarding_done"):
+            self._onboarding()
 
         if not await self._authenticate():
+            ui.blank()
             ui.err(t("auth.fail"))
+            ui.pause()
             return
 
-        await self.check_updates()
-
-        self._picker = ChannelPicker(self.client)
-        self._dedup = DedupEngine(db)
+        self.picker = ChannelPicker(self.client)
+        if self.prefs.get("check_updates"):
+            await self._check_updates()
         await self._main_menu()
         await self._shutdown()
 
-    def _load_language_from_installer(self) -> bool:
-        """Le o idioma selecionado no instalador (data/config.json)."""
-        try:
-            import json
-            from pathlib import Path
+    def _load_preferences(self) -> None:
+        """Idioma salvo (prefs → cofre) ou pergunta na primeira execução."""
+        lang = self.prefs.language
+        if lang is None:
+            creds = self.creds.load() or {}
+            lang = creds.get("lang")
+        if lang in ("pt", "en"):
+            set_lang(lang)
+        else:
+            lang = self._ask_language()
+            set_lang(lang)
+        self.prefs.set_language(lang)
 
-            base_dir = (
-                Path(sys.executable).parent
-                if getattr(sys, "frozen", False)
-                else Path(__file__).parent
-            )
-            config_path = base_dir / "data" / "config.json"
-
-            if not config_path.exists():
-                return False
-
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                lang = cfg.get("language")
-
-                if lang not in ("pt", "en"):
-                    return False
-
-                set_lang(lang)
-
-                creds = self.creds.load() or {}
-                creds["lang"] = lang
-                self.creds.save(creds)
-
-                try:
-                    config_path.unlink()
-                    (base_dir / "default.lang").unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-                return True
-        except Exception:
-            pass
-        return False
-
-    async def check_updates(self) -> None:
-        """Verifica silenciosamente se ha nova versao no GitHub."""
-        try:
-            import aiohttp
-
-            timeout = aiohttp.ClientTimeout(total=3)
-
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    "https://api.github.com/repos/montx2/telecopy/releases/latest",
-                    headers={"Accept": "application/vnd.github.v3+json"},
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        latest = (
-                            data.get("tag_name", "").replace("v", "").replace("V", "")
-                        )
-
-                        if latest and latest > _app.__version__:
-                            ui.blank()
-                            ui.warn(
-                                f"Nova versao disponivel: v{latest} (voce tem v{_app.__version__})"
-                            )
-                            ui.info(
-                                f"Download: {data.get('html_url', 'https://github.com/montx2/telecopy')}"
-                            )
-                            ui.blank()
-                            if ui.confirm("Abrir pagina de download agora?"):
-                                import webbrowser
-
-                                webbrowser.open(
-                                    data.get(
-                                        "html_url", "https://github.com/montx2/telecopy"
-                                    )
-                                )
-        except Exception:
-            pass
-
-    def _pick_language_boot(self) -> None:
+    def _ask_language(self) -> str:
         ui.clear()
-        print()
-        print(
-            f"  {C.ORANGE}{C.BOLD}TELECOPY{C.RST}  {C.GRAY}v{_app.__version__}{C.RST}"
-        )
-        print()
-        print(f"  {C.SILVER}Bem-vindo! / Welcome!{C.RST}")
-        print()
-        print(f"  {C.AMBER}[1]{C.RST}  {C.WHITE}Portugues (Brasil){C.RST}")
-        print(f"  {C.AMBER}[2]{C.RST}  {C.WHITE}English{C.RST}")
-        print()
+        ui.blank()
+        print(f"  {C.ORANGE}{C.BOLD}TELECOPY{C.RST}  {C.GRAY}v{_app.__version__}{C.RST}\n")
+        print(f"  {C.SILVER}{t('lang.welcome')}{C.RST}\n")
+        print(f"  {C.AMBER}[1]{C.RST}  {C.WHITE}{t('lang.pt')}{C.RST}")
+        print(f"  {C.AMBER}[2]{C.RST}  {C.WHITE}{t('lang.en')}{C.RST}\n")
+        for _ in range(5):
+            raw = (ui.ask(t("lang.select"), required=False) or "1").strip()
+            if raw in ("1", "pt"):
+                return "pt"
+            if raw in ("2", "en"):
+                return "en"
+            ui.warn(t("menu.invalid"))
+        return "pt"
 
-        while True:
-            try:
-                sys.stdout.write(f"  {C.AMBER}›{C.RST} Select / Selecione [1/2]: ")
-                choice = input().strip()
-            except (EOFError, KeyboardInterrupt):
-                choice = "1"
-
-            if choice == "2":
-                set_lang("en")
-                break
-            elif choice in ("1", ""):
-                set_lang("pt")
-                break
-
-    def _show_onboarding(self) -> None:
+    def _onboarding(self) -> None:
         ui.clear()
-        ui.header(t("onboard.title"), t("onboard.subtitle"))
-
+        ui.header(f"{t('onboard.title')} — {_app.__version__}", t("onboard.subtitle"))
         steps = [
             (t("onboard.step1.title"), t("onboard.step1.body")),
             (t("onboard.step2.title"), t("onboard.step2.body")),
             (t("onboard.step3.title"), t("onboard.step3.body")),
-            (t("onboard.step4.title"), t("onboard.step4.body")),
         ]
-
-        for i, (title, body) in enumerate(steps, 1):
-            print(f"  {C.PURPLE}{C.BOLD}  {i}.  {title}{C.RST}")
-            words = body.split()
-            line = ""
-            for w in words:
-                if len(line) + len(w) + 1 > 68:
-                    print(f"      {C.SILVER}{line}{C.RST}")
-                    line = w
-                else:
-                    line = f"{line} {w}" if line else w
-            if line:
+        for index, (title, body) in enumerate(steps, start=1):
+            print(f"  {C.PURPLE}{C.BOLD}{index}.  {title}{C.RST}")
+            for line in self._wrap(body, 70):
                 print(f"      {C.SILVER}{line}{C.RST}")
             print()
-
-        ui.rule("─", C.DARK)
-        ui.blank()
         print(f"  {C.CYAN}·{C.RST}  {t('onboard.tip')}")
-        ui.blank()
         ui.pause(t("onboard.continue"))
+        self.prefs.set("onboarding_done", True)
+
+    @staticmethod
+    def _wrap(text: str, width: int = 70) -> List[str]:
+        lines, current = [], ""
+        for word in str(text).split():
+            if len(current) + len(word) + 1 > width:
+                lines.append(current)
+                current = word
+            else:
+                current = f"{current} {word}".strip()
+        if current:
+            lines.append(current)
+        return lines
+
+    async def _shutdown(self) -> None:
+        ui.clear()
+        ui.blank()
+        ui.info(t("shutdown.saving"))
+        self.stats.save()
+        self.prefs.save_config(self.config)
+        ui.info(t("shutdown.db"))
+        try:
+            db.close()
+        except Exception:
+            pass
+        if self.client is not None:
+            ui.info(t("shutdown.disc"))
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+        ui.blank()
+        ui.ok(t("shutdown.bye"))
+        ui.blank()
+
+    # ── autenticação ────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _network_ok(host: str = "149.154.167.50", port: int = 443,
+                          timeout: float = 5.0) -> bool:
+        """Teste rápido de alcance aos servidores do Telegram."""
+        import socket
+
+        def probe() -> bool:
+            try:
+                with socket.create_connection((host, port), timeout=timeout):
+                    return True
+            except OSError:
+                return False
+
+        try:
+            return await asyncio.to_thread(probe)
+        except Exception:
+            return False
 
     async def _authenticate(self) -> bool:
         creds = self.creds.load()
 
-        if creds:
-            api_id = creds.get("api_id")
-            api_hash = creds.get("api_hash")
-            if creds.get("lang"):
-                set_lang(creds["lang"])
+        if creds and creds.get("api_id") and creds.get("api_hash"):
+            api_id = int(creds["api_id"])
+            api_hash = str(creds["api_hash"])
         else:
-            ui.clear()
-            ui.header(t("auth.first_time.title"), t("auth.first_time.subtitle"))
-
-            print(f"  {C.AMBER}{C.BOLD}{t('auth.creds_guide.title')}{C.RST}")
-            print()
-            for line in t("auth.creds_guide.steps").split("|"):
-                print(f"  {C.CYAN}›{C.RST}  {C.SILVER}{line.strip()}{C.RST}")
-            print()
-            ui.rule("─", C.DARK)
-            ui.blank()
-
-            raw = ui.ask(t("auth.api_id"))
-            if not raw.isdigit():
-                ui.err(t("auth.api_id_invalid"))
+            if creds is None and self.creds.exists():
+                ui.warn(t("init.recovered"))
+                ui.pause()
+            pair = self._ask_credentials()
+            if not pair:
                 return False
-            api_id = int(raw)
-            api_hash = ui.ask(t("auth.api_hash"))
-            if len(api_hash) < 30:
-                ui.err(t("auth.api_hash_short"))
-                return False
-
-            self.creds.save(
-                {"api_id": api_id, "api_hash": api_hash, "lang": get_lang()}
-            )
+            api_id, api_hash = pair
+            self.creds.save({"api_id": api_id, "api_hash": api_hash, "lang": get_lang()})
             ui.ok(t("auth.creds_saved"))
 
-        try:
-            self.client = TelegramClient(str(SESSION_FILE), api_id, api_hash)
-            await self.client.connect()
-        except Exception as exc:
-            ui.err(f"{t('auth.conn_failed')}: {exc}")
+        if not await self._network_ok():
+            ui.blank()
+            ui.err(t("auth.conn_failed"))
+            ui.info(t("auth.conn_hint"))
+            logger.error("Sem conexão com os servidores do Telegram")
+            ui.pause()
+            return False
+
+        for attempt in range(1, 3):
+            try:
+                self.client = TelegramClient(
+                    str(SESSION_FILE), api_id, api_hash,
+                    device_model=f"TELECOPY {_app.__version__}",
+                    system_version=platform.platform()[:60],
+                    app_version=_app.__version__,
+                    connection_retries=1,
+                    retry_delay=0,
+                    request_retries=1,
+                    timeout=12,
+                    auto_reconnect=True,
+                )
+                # timeout defensivo: nunca deixa a interface travada
+                await asyncio.wait_for(self.client.connect(), timeout=45)
+                break
+            except Exception as exc:
+                logger.error(f"Conexão (tentativa {attempt}/2): {exc}")
+                reason = (t("auth.conn_timeout") if isinstance(exc, asyncio.TimeoutError)
+                          else str(exc)) or t("err.generic")
+                ui.blank()
+                ui.err(f"{t('auth.conn_failed')}: {reason}")
+                ui.info(t("auth.conn_hint"))
+                if attempt == 2 or not ui.confirm(t("auth.try_again")):
+                    return False
+                ui.blank()
+        else:  # pragma: no cover - laço sempre termina em break/return
             return False
 
         if await self.client.is_user_authorized():
-            me = await self.client.get_me()
-            ui.ok(
-                f"{t('auth.signed_in')}  {C.WHITE}{me.first_name}{C.RST}  {C.GRAY}({me.phone}){C.RST}"
-            )
-            await asyncio.sleep(0.7)
+            self.me = await self.client.get_me()
+            label = getattr(self.me, "first_name", None) or getattr(self.me, "username", "")
+            ui.ok(f"{t('auth.signed_in')} {C.WHITE}{label}{C.RST}")
+            await asyncio.sleep(0.5)
             return True
 
+        return await self._sign_in()
+
+    def _ask_credentials(self) -> Optional[Tuple[int, str]]:
+        ui.clear()
+        ui.header(t("auth.first_time.title"), t("auth.first_time.subtitle"))
+        print(f"  {C.AMBER}{C.BOLD}{t('auth.creds_guide.title')}{C.RST}\n")
+        for step in t("auth.creds_guide.steps").split("|"):
+            print(f"  {C.CYAN}›{C.RST}  {C.SILVER}{step.strip()}{C.RST}")
+        print()
+        ui.divider()
+        ui.blank()
+
+        for _ in range(3):
+            raw_id = ui.ask(t("auth.api_id"))
+            if raw_id.isdigit() and int(raw_id) > 0:
+                break
+            ui.err(t("auth.api_id_invalid"))
+        else:
+            return None
+        api_id = int(raw_id)
+
+        for _ in range(3):
+            api_hash = ui.ask(t("auth.api_hash")).strip()
+            if re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+                break
+            ui.err(t("auth.api_hash_invalid"))
+        else:
+            return None
+
+        return api_id, api_hash
+
+    async def _sign_in(self) -> bool:
         ui.clear()
         ui.header(t("auth.sign_in.title"), t("auth.sign_in.subtitle"))
-        phone = ui.ask(t("auth.phone"))
+
+        phone = ""
+        for _ in range(3):
+            phone = ui.ask(t("auth.phone")).replace(" ", "").replace("-", "")
+            if phone.startswith("+") and len(phone) >= 8:
+                break
+            ui.err(t("auth.phone_invalid"))
+        else:
+            return False
 
         try:
             await self.client.send_code_request(phone)
+        except FloodWaitError as exc:
+            ui.warn(t("auth.flood", sec=exc.seconds))
+            await asyncio.sleep(int(exc.seconds) + 2)
+            try:
+                await self.client.send_code_request(phone)
+            except Exception as exc2:
+                ui.err(f"{t('auth.code_send_fail')}: {exc2}")
+                return False
+        except PhoneNumberInvalidError:
+            ui.err(t("auth.phone_invalid"))
+            return False
         except Exception as exc:
             ui.err(f"{t('auth.code_send_fail')}: {exc}")
             return False
 
-        for attempt in range(3):
+        for attempt in range(1, 4):
             ui.blank()
             ui.info(t("auth.code_hint"))
-            code = ui.ask(t("auth.code", n=attempt + 1))
+            code = ui.ask(t("auth.code", n=attempt))
             try:
                 await self.client.sign_in(phone, code)
                 break
-            except PhoneCodeInvalidError:
-                ui.warn(t("auth.code_wrong"))
-            except PhoneCodeExpiredError:
-                ui.warn(t("auth.code_expired"))
-                await self.client.send_code_request(phone)
             except SessionPasswordNeededError:
                 ui.blank()
                 ui.warn(t("auth.2fa_hint"))
-                pw = ui.ask(t("auth.2fa"), required=True)
+                password = ui.secret(t("auth.2fa"))
                 try:
-                    await self.client.sign_in(password=pw)
+                    await self.client.sign_in(password=password)
                     break
                 except Exception as exc:
                     ui.err(f"{t('auth.2fa_fail')}: {exc}")
                     return False
+            except PhoneCodeInvalidError:
+                ui.warn(t("auth.code_wrong"))
+            except PhoneCodeExpiredError:
+                ui.warn(t("auth.code_expired"))
+                try:
+                    await self.client.send_code_request(phone)
+                except Exception:
+                    pass
             except Exception as exc:
                 ui.err(str(exc))
                 return False
@@ -490,1027 +526,97 @@ class App:
             ui.err(t("auth.too_many"))
             return False
 
-        me = await self.client.get_me()
-        ui.ok(f"{t('auth.signed_in')}  {C.WHITE}{me.first_name}{C.RST}")
+        self.me = await self.client.get_me()
+        label = getattr(self.me, "first_name", None) or getattr(self.me, "username", "")
+        ui.ok(f"{t('auth.signed_in')} {C.WHITE}{label}{C.RST}")
         await asyncio.sleep(0.6)
         return True
 
-    # ==============================================================================
-    # Configuracao Inteligente de Performance (RAM + Workers)
-    # ==============================================================================
+    async def _check_updates(self) -> None:
+        """Aviso opcional de versão nova (silencioso se sem internet)."""
+        import json
+        import urllib.request
 
-    async def _configure_performance(self) -> Tuple[int, float]:
-        """Configura workers e perfil de memoria baseado no hardware detectado."""
-        from system_analyzer import analyzer
-
-        ui.clear()
-        ui.header("CONFIGURACAO DE PERFORMANCE")
-
-        p = analyzer.profile
-        ram_total = p.ram_total_gb
-        ram_avail = p.ram_available_gb
-
-        # Detecta automaticamente o perfil recomendado baseado na RAM total
-        if ram_total >= 16:
-            default_profile = 0.60  # 60% = Equilibrado para PCs fortes
-            profile_name = "Equilibrado (Recomendado)"
-        elif ram_total >= 8:
-            default_profile = 0.60  # 60% = Equilibrado
-            profile_name = "Equilibrado (Recomendado)"
-        else:
-            default_profile = 0.40  # 40% = Conservador para PCs fracos
-            profile_name = "Economico (Recomendado)"
-
-        # Calcula valores reais
-        conservador = min(ram_avail * 0.30, p.disk_free_gb * 0.15)
-        equilibrado = min(ram_avail * 0.60, p.disk_free_gb * 0.20)
-        agressivo = min(ram_avail * 0.85, p.disk_free_gb * 0.30)
-
-        ui.box(
-            "RECURSOS DETECTADOS",
-            [
-                ("Memoria Total", f"{ram_total:.1f} GB"),
-                ("Memoria Disponivel", f"{ram_avail:.1f} GB"),
-                ("Armazenamento", f"{p.disk_type} - {p.disk_free_gb:.1f}GB livre"),
-                (
-                    "Processadores",
-                    f"{p.cpu_count_logical} logicos / {p.cpu_count_physical} fisicos",
-                ),
-                (
-                    "Classificacao",
-                    (
-                        "Alto Desempenho"
-                        if p.is_high_end_pc
-                        else "Standard" if not p.is_low_end_pc else "Basico"
-                    ),
-                ),
-            ],
-            color=C.CYAN,
-        )
-
-        ui.section("Perfil de Memoria")
-        print(f"  {C.GRAY}Define quanto da RAM usar para buffer de arquivos.{C.RST}")
-        print(
-            f"  {C.GRAY}Mais RAM = downloads paralelos maiores, mas risco de travamento.{C.RST}"
-        )
-        ui.blank()
-
-        # Menu com recomendacao automatica destacada
-        items = [
-            (
-                "1",
-                f"{profile_name} [PADRAO]",
-                f"Usa ate {min(ram_avail * default_profile, p.disk_free_gb * 0.2):.1f}GB. Otimizado para seu PC ({ram_total:.0f}GB RAM).",
-            ),
-            (
-                "2",
-                "Conservador (30% da RAM)",
-                f"Usa ate {conservador:.1f}GB. Seguro para multitarefa ou PCs antigos.",
-            ),
-            (
-                "3",
-                "Agressivo (85% da RAM)",
-                f"Usa ate {agressivo:.1f}GB. Maxima velocidade. FECHE outros programas!",
-            ),
-            ("4", "Personalizado", "Defina a porcentagem exata (10-90%)."),
-        ]
-
-        ui.menu(items)
-        choice = ui.ask("Perfil de memoria", required=False) or "1"
-
-        percent = default_profile
-
-        if choice == "1":
-            percent = default_profile
-            ui.ok(f"Perfil recomendado ativado ({percent*100:.0f}%)")
-
-        elif choice == "2":
-            percent = 0.30
-            ui.ok(f"Modo Conservador ativado. Limite: {conservador:.1f}GB")
-
-        elif choice == "3":
-            percent = 0.85
-            ui.warn("ATENCAO: Modo Agressivo selecionado!")
-            print(f"  {C.YELLOW}Isto alocara ate {agressivo:.1f}GB de RAM.{C.RST}")
-            print(
-                f"  {C.YELLOW}Recomendado: Feche navegadores, jogos e outros apps.{C.RST}"
-            )
-            ui.blank()
-
-            if not ui.confirm("Confirmar uso agressivo?"):
-                percent = default_profile
-                ui.ok("Retornando ao perfil recomendado")
-
-        elif choice == "4":
-            while True:
-                custom = ui.ask(f"Porcentagem da RAM disponivel (10-90)", required=True)
-                try:
-                    val = int(custom.replace("%", ""))
-                    if 10 <= val <= 90:
-                        percent = val / 100
-                        uso_gb = ram_avail * percent
-
-                        if val > 75:
-                            ui.warn(f"Alerta: {val}% e considerado agressivo!")
-                            if not ui.confirm(f"Confirmar uso de {uso_gb:.1f}GB?"):
-                                continue
-                        elif val < 30:
-                            ui.info(f"Configuracao economica: {uso_gb:.1f}GB")
-                        else:
-                            ui.ok(f"Configurado: {uso_gb:.1f}GB ({val}%)")
-                        break
-                    else:
-                        ui.err("Digite entre 10 e 90")
-                except ValueError:
-                    ui.err("Numero invalido")
-
-        self._memory_profile = percent
-
-        # Agora configura workers baseado na RAM que sobrou
-        ui.blank()
-        ram_para_workers = ram_avail * (1 - percent)  # RAM restante
-        workers_sugeridos = min(int(ram_para_workers / 0.5), p.cpu_count_logical, 8)
-        workers_sugeridos = max(1, workers_sugeridos)
-
-        ui.section("Workers (Paralelismo)")
-        print(
-            f"  {C.GRAY}Workers processam multiplas mensagens simultaneamente.{C.RST}"
-        )
-        print(
-            f"  {C.GRAY}Mais workers = mais rapido, mas pode desordenar mensagens.{C.RST}"
-        )
-        ui.blank()
-
-        items_workers = [
-            (
-                "1",
-                f"Automatico ({workers_sugeridos} workers) [RECOMENDADO]",
-                f"Baseado em {ram_para_workers:.1f}GB RAM livre e {p.cpu_count_logical} CPUs",
-            ),
-            (
-                "2",
-                f"Sequencial (1 worker)",
-                "Ordem garantida, mas mais lento. Recomendado para aulas/cursos.",
-            ),
-            (
-                "3",
-                "Maximo possivel",
-                f"Usa ate {p.max_safe_workers} workers (pode desordenar)",
-            ),
-            ("4", "Personalizado", "Definir numero especifico"),
-        ]
-
-        ui.menu(items_workers)
-        choice_w = ui.ask("Modo de processamento", required=False) or "1"
-
-        workers = workers_sugeridos
-
-        if choice_w == "1":
-            workers = workers_sugeridos
-            ui.ok(f"Workers automaticos: {workers}")
-
-        elif choice_w == "2":
-            workers = 1
-            ui.ok("Modo sequencial ativado (ordem garantida)")
-
-        elif choice_w == "3":
-            workers = p.max_safe_workers
-            ui.warn(f"Modo maximo: {workers} workers (pode desordenar mensagens)")
-
-        elif choice_w == "4":
-            while True:
-                custom = ui.ask(
-                    f"Numero de workers (1-{p.max_safe_workers})", required=True
+        def fetch() -> Optional[str]:
+            try:
+                request = urllib.request.Request(
+                    "https://api.github.com/repos/montx2/telecopy/releases/latest",
+                    headers={"Accept": "application/vnd.github+json",
+                             "User-Agent": "TELECOPY"},
                 )
-                try:
-                    val = int(custom)
-                    if 1 <= val <= p.max_safe_workers:
-                        workers = val
-                        ui.ok(f"Workers definidos: {workers}")
-                        break
-                    else:
-                        ui.err(f"Digite entre 1 e {p.max_safe_workers}")
-                except ValueError:
-                    ui.err("Numero invalido")
-
-        self._workers_selected = workers
-
-        # Salva no vault para proximas vezes
-        creds = self.creds.load() or {}
-        creds["memory_profile"] = percent
-        creds["workers"] = workers
-        self.creds.save(creds)
-
-        await asyncio.sleep(1.0)
-        return workers, percent
-
-    async def _analyze_channel_size(self, source) -> Optional[float]:
-        """Estima tamanho do canal em GB."""
-        ui.info("Analisando volume de dados (pode levar alguns segundos)...")
-
-        sample_size = 0
-        sample_bytes = 0
+                with urllib.request.urlopen(request, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                return str(data.get("tag_name") or "").lstrip("vV") or None
+            except Exception:
+                return None
 
         try:
-            async for msg in self.client.iter_messages(source, limit=30):
-                if msg.media and hasattr(msg.media, "document"):
-                    sample_bytes += getattr(msg.media.document, "size", 0)
-                    sample_size += 1
+            latest = await asyncio.to_thread(fetch)
+        except Exception:
+            return
+        if latest and self._version_tuple(latest) > self._version_tuple(_app.__version__):
+            ui.blank()
+            ui.warn(f"Nova versão disponível: v{latest} (instalada: v{_app.__version__})")
+            ui.info("https://github.com/montx2/telecopy/releases")
+            ui.blank()
 
-            if sample_size == 0:
-                return None
+    @staticmethod
+    def _version_tuple(value: str) -> Tuple[int, ...]:
+        parts = re.findall(r"\d+", str(value))
+        return tuple(int(p) for p in parts[:4]) or (0,)
 
-            avg_bytes = sample_bytes / sample_size
-
-            total_msgs = 0
-            async for _ in self.client.iter_messages(source, limit=0):
-                total_msgs += 1
-
-            if total_msgs == 0:
-                return None
-
-            estimated_bytes = avg_bytes * total_msgs
-            return estimated_bytes / (1024**3)
-
-        except Exception as e:
-            logger.warning(f"Falha ao estimar tamanho: {e}")
-            return None
-
-    # ==============================================================================
-    # Menus Principais
-    # ==============================================================================
+    # ── menu principal ──────────────────────────────────────────────────────
 
     async def _main_menu(self) -> None:
-        self._trail = ["TELECOPY"]
-
         while self._running:
             ui.clear()
             ui.header(
-                "TELECOPY", f"v{_app.__version__}  ·  {t('app.by')} {_app.__author__}"
+                "TELECOPY",
+                f"v{_app.__version__}  ·  {t('app.by')} {APP_AUTHOR}  ·  "
+                f"{getattr(self.me, 'first_name', '') or ''}",
             )
-
-            level, count, remaining = daily_limit.status()
-            if level == "limit":
-                ui.warn(t("limit.reached", count=count, limit=DAILY_LIMIT))
-            elif level == "warn":
-                ui.warn(
-                    t("limit.warn", count=count, limit=DAILY_LIMIT, remaining=remaining)
-                )
-
-            ui.menu(
-                [
-                    ("1", t("menu.copy"), t("menu.copy.desc")),
-                    ("2", t("menu.multi"), t("menu.multi.desc")),
-                    ("3", t("menu.mirror"), t("menu.mirror.desc")),
-                    ("4", t("menu.tools"), t("menu.tools.desc")),
-                    ("5", t("menu.settings"), t("menu.settings.desc")),
-                    ("0", t("menu.exit"), ""),
-                ]
-            )
-
-            choice = ui.ask(t("menu.option"), required=False) or ""
-
-            if choice == "1":
-                await self._menu_copy()
-            elif choice == "2":
-                await self._menu_multi()
-            elif choice == "3":
-                await self._menu_mirror()
-            elif choice == "4":
-                await self._menu_tools()
-            elif choice == "5":
-                await self._menu_settings()
-            elif choice == "0":
-                self._running = False
-
-    async def _resolve_topic(self, ent) -> Optional[int]:
-        if not getattr(ent, "forum", False):
-            return None
-        ui.blank()
-        ui.warn(t("picker.forum_warn"))
-        while True:
-            raw = ui.ask(t("picker.topic_prompt"), required=False)
-            if raw == "0" or not raw:
-                return -1
-            if raw.isdigit():
-                return int(raw)
-            url = raw.split("?")[0]
-            url = re.sub(r"^https?://(www\.)?t\.me/", "", url)
-            parts = [p for p in url.split("/") if p]
-            tid = None
-            if len(parts) >= 1:
-                if parts[0] == "c" and len(parts) >= 3 and parts[2].isdigit():
-                    tid = int(parts[2])
-                elif parts[0] != "c" and len(parts) >= 2 and parts[1].isdigit():
-                    tid = int(parts[1])
-            if tid is not None:
-                return tid
-            ui.err(t("picker.topic_invalid"))
-
-    # ==============================================================================
-    # Fluxo: Copiar canal (com configuracao inteligente)
-    # ==============================================================================
-
-    async def _menu_copy(self) -> None:
-        self._push(t("copy.title"))
-        ui.clear()
-        ui.header(t("copy.title"))
-        self._trail_line()
-
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
-        if source is None:
-            self._pop()
-            return
-
-        source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
-        self._show_entity(source, t("entity.source"))
-
-        dest = await self._pick_entity(
-            t("entity.dest"),
-            t("copy.dest_hint"),
-            highlight_id=getattr(source, "id", None),
-        )
-        if dest is None:
-            self._pop()
-            return
-
-        dest_topic = await self._resolve_topic(dest)
-        if dest_topic == -1:
-            self._pop()
-            return
-        self._show_entity(dest, t("entity.dest"))
-
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
-
-        # Configuracao de performance (Workers + Memoria)
-        from copier import Copier
-        from system_analyzer import analyzer
-
-        ui.blank()
-        if ui.confirm("Deseja analisar e otimizar a configuracao de performance?"):
-            workers, memory_pct = await self._configure_performance()
-
-            if ui.confirm("Estimar tamanho do canal para calibrar (10s)?"):
-                est_gb = await self._analyze_channel_size(source)
-                if est_gb:
-                    analysis = analyzer.estimate_for_channel(est_gb)
-                    if analysis["warning"]:
-                        ui.warn(analysis["warning"])
-                        ui.pause()
-                    # Ajusta workers se o canal for muito grande
-                    if est_gb > 10 and workers > 2:
-                        workers = max(2, workers // 2)
-                        ui.info(
-                            f"Canal grande detectado. Reduzindo para {workers} workers para seguranca."
-                        )
-                    ui.ok(
-                        f"Canal estimado em {est_gb:.1f}GB. Configuracao final: {workers} workers, {memory_pct*100:.0f}% RAM"
-                    )
-        else:
-            # Carrega do vault ou usa padrao
-            creds = self.creds.load() or {}
-            workers = creds.get("workers", 4)
-            memory_pct = creds.get("memory_profile", 0.60)
-
-        ui.blank()
-        resume = ui.confirm(t("copy.resume"))
-        ui.blank()
-        if not ui.confirm(t("copy.confirm")):
-            self._pop()
-            return
-
-        copier = Copier(
-            self.client,
-            repo=db,
-            delay=self.config.delay,
-            workers=workers,
-            memory_profile=memory_pct,
-        )
-
-        try:
-            result = await copier.run(
-                source,
-                dest,
-                filter_code=filter_code,
-                resume=resume,
-                source_topic_id=source_topic,
-                dest_topic_id=dest_topic,
-            )
-        except KeyboardInterrupt:
-            ui.warn(t("copy.cancelled"))
-            result = {}
-
-        self._print_result(result)
-        self.stats.inc("total", result.get("done", 0))
-        self._pop()
-
-    async def _menu_multi(self) -> None:
-        self._push(t("menu.multi"))
-        ui.clear()
-        ui.header(t("multi.title"))
-        self._trail_line()
-
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
-        if source is None:
-            self._pop()
-            return
-
-        source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
-        self._show_entity(source, t("entity.source"))
-
-        dests: List[Tuple[Any, Optional[int]]] = []
-
-        while True:
-            ui.blank()
-            back_label = (
-                f"{t('menu.back')} / {t('multi.start')}" if dests else t("menu.back")
-            )
-            ui.menu(
-                [
-                    ("1", t("picker.from_list"), t("picker.from_list.desc")),
-                    ("2", t("picker.manual"), t("picker.manual.desc")),
-                    ("0", back_label, ""),
-                ]
-            )
-            modo = ui.ask(t("multi.dest_n", n=len(dests) + 1), required=False) or "0"
-            if modo == "0":
-                break
-
-            ent = None
-            if modo == "1":
-                ent = await self._picker.pick(
-                    t("entity.dest"), highlight_id=getattr(source, "id", None)
-                )
-            elif modo == "2":
-                raw = ui.ask(t("copy.dest"))
-                if raw:
-                    try:
-                        ent = await self.client.get_entity(raw)
-                    except Exception as exc:
-                        ui.err(f"{t('copy.dest_not_found')}: {exc}")
-                        ui.pause()
-                        continue
-
-            if ent is not None:
-                ent_topic = await self._resolve_topic(ent)
-                if ent_topic != -1:
-                    dests.append((ent, ent_topic))
-                    ui.ok(f"{t('multi.added')}: {getattr(ent, 'title', ent.id)}")
-
-        if not dests:
-            ui.warn(t("multi.no_dests"))
-            ui.pause()
-            self._pop()
-            return
-
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
-
-        if not ui.confirm(t("multi.confirm", n=len(dests))):
-            self._pop()
-            return
-
-        from copier import Copier
-
-        for i, (dest, dest_topic) in enumerate(dests, 1):
-            ui.section(
-                t("multi.dest_label", i=i, total=len(dests))
-                + f": {getattr(dest, 'title', dest.id)}"
-            )
-            copier = Copier(
-                self.client,
-                repo=db,
-                delay=self.config.delay,
-                workers=self._workers_selected,
-            )
+            self._limit_banner()
+            ui.menu([
+                ("1", t("menu.copy"), t("menu.copy.desc")),
+                ("2", t("menu.multi"), t("menu.multi.desc")),
+                ("3", t("menu.mirror"), t("menu.mirror.desc")),
+                ("4", t("menu.tools"), t("menu.tools.desc")),
+                ("5", t("menu.settings"), t("menu.settings.desc")),
+                ("0", t("menu.exit"), ""),
+            ])
+            choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
             try:
-                result = await copier.run(
-                    source,
-                    dest,
-                    filter_code=filter_code,
-                    source_topic_id=source_topic,
-                    dest_topic_id=dest_topic,
-                )
-                self._print_result(result)
-            except Exception as exc:
-                ui.err(f"{t('multi.failed')}: {exc}")
-
-        self._pop()
-
-    async def _menu_mirror(self) -> None:
-        self._push(t("menu.mirror"))
-        ui.clear()
-        ui.header(t("mirror.title"))
-        self._trail_line()
-
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
-        if source is None:
-            self._pop()
-            return
-
-        source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
-        self._show_entity(source, t("entity.source"))
-
-        dest = await self._pick_entity(
-            t("entity.dest"),
-            t("copy.dest_hint"),
-            highlight_id=getattr(source, "id", None),
-        )
-        if dest is None:
-            self._pop()
-            return
-
-        dest_topic = await self._resolve_topic(dest)
-        if dest_topic == -1:
-            self._pop()
-            return
-        self._show_entity(dest, t("entity.dest"))
-
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
-
-        from copier import Copier
-
-        copier = Copier(
-            self.client,
-            repo=db,
-            delay=self.config.delay,
-            workers=self._workers_selected,
-        )
-        await copier.mirror(
-            source,
-            dest,
-            filter_code=filter_code,
-            source_topic_id=source_topic,
-            dest_topic_id=dest_topic,
-        )
-        self._pop()
-
-    async def _menu_tools(self) -> None:
-        self._push(t("menu.tools"))
-        while True:
-            ui.clear()
-            ui.header(t("tools.title"))
-            self._trail_line()
-            ui.menu(
-                [
-                    ("1", t("tools.resolve"), t("tools.resolve.desc")),
-                    ("2", t("tools.stats"), t("tools.stats.desc")),
-                    ("3", t("tools.retry"), t("tools.retry.desc")),
-                    ("4", t("tools.dedup"), t("tools.dedup.desc")),
-                    ("5", t("tools.maint"), t("tools.maint.desc")),
-                    ("0", t("menu.back"), ""),
-                ]
-            )
-            choice = ui.ask(t("menu.option"), required=False) or "0"
-            if choice == "1":
-                await self._tool_resolve()
-            elif choice == "2":
-                await self._tool_stats()
-            elif choice == "3":
-                await self._tool_retry()
-            elif choice == "4":
-                await self._tool_dedup()
-            elif choice == "5":
-                await self._tool_maint()
-            elif choice == "0":
-                self._pop()
-                return
-
-    async def _tool_resolve(self) -> None:
-        ui.clear()
-        ui.header(t("tools.resolve.title"))
-        self._trail_line()
-        ui.info(t("tools.resolve.hint"))
-        ui.blank()
-
-        while True:
-            raw = ui.ask(t("tools.resolve.query"), required=False)
-            if not raw:
-                break
-            try:
-                ent = await self.client.get_entity(raw)
-            except Exception as exc:
-                ui.err(f"{t('tools.resolve.not_found')}: {exc}")
-                continue
-
-            info = self._entity_info(ent)
-            rows = [
-                (t("tools.resolve.name"), info["name"]),
-                ("ID", str(info["id"])),
-                (t("tools.resolve.type"), info["type"]),
-                (
-                    t("tools.resolve.access"),
-                    (
-                        t("tools.resolve.public")
-                        if not info["private"]
-                        else t("tools.resolve.private")
-                    ),
-                ),
-            ]
-
-            mem = getattr(ent, "participants_count", None)
-            if mem is not None:
-                rows.append(("Membros", Fmt.number(mem)))
-
-            ui.box(t("tools.resolve.result"), rows, color=C.CYAN)
-
-        ui.pause()
-
-    async def _tool_stats(self) -> None:
-        ui.clear()
-        ui.header(t("tools.stats.title"))
-        self._trail_line()
-
-        s = self.stats.data
-        session_rows = [
-            (t("tools.stats.total"), Fmt.number(s.get("total", 0))),
-            (t("tools.stats.photos"), Fmt.number(s.get("photos", 0))),
-            (t("tools.stats.videos"), Fmt.number(s.get("videos", 0))),
-            (t("tools.stats.audio"), Fmt.number(s.get("audio", 0))),
-            (t("tools.stats.documents"), Fmt.number(s.get("documents", 0))),
-            (t("tools.stats.sessions"), Fmt.number(s.get("sessions", 0))),
-        ]
-        if s.get("bytes_sent", 0):
-            session_rows.append((t("tools.stats.bytes"), Fmt.size(s["bytes_sent"])))
-        ui.box(t("tools.stats.session"), session_rows, color=C.PURPLE)
-
-        try:
-            gs = db.global_stats()
-            db_rows = [
-                (t("tools.stats.total"), Fmt.number(gs.get("success", 0))),
-                (t("tools.stats.errors"), Fmt.number(gs.get("errors", 0))),
-                (t("tools.stats.duplicates"), Fmt.number(gs.get("duplicates", 0))),
-                (t("tools.stats.moved"), Fmt.size(gs.get("bytes", 0))),
-                (t("tools.stats.sessions"), Fmt.number(gs.get("sessions", 0))),
-            ]
-            ui.box(t("tools.stats.alltime"), db_rows, color=C.INDIGO)
-        except Exception:
-            pass
-
-        level, count, remaining = daily_limit.status()
-        color = (
-            C.RED if level == "limit" else (C.YELLOW if level == "warn" else C.GREEN)
-        )
-        daily_rows = [
-            (t("tools.stats.today"), Fmt.number(count)),
-            (t("tools.stats.limit"), Fmt.number(DAILY_LIMIT)),
-            (t("tools.stats.remaining"), Fmt.number(remaining)),
-        ]
-        ui.box(t("tools.stats.daily"), daily_rows, color=color)
-        ui.pause()
-
-    async def _tool_retry(self) -> None:
-        ui.clear()
-        ui.header(t("tools.retry.title"))
-        self._trail_line()
-
-        rstats = rqueue.stats()
-        retry_rows = [
-            (t("tools.retry.pending"), str(rstats["pending"])),
-            (t("tools.retry.exhausted"), str(rstats["exhausted"])),
-            (t("tools.retry.total"), str(rstats["total"])),
-        ]
-        ui.box(t("tools.retry.queue"), retry_rows, color=C.AMBER)
-
-        if rstats["exhausted"] > 0:
-            if ui.confirm(t("tools.retry.clear")):
-                removed = rqueue.clear_exhausted()
-                ui.ok(f"{removed} {t('tools.retry.cleared')}")
-        elif rstats["total"] == 0:
-            ui.info("Fila vazia — nenhum item pendente.")
-
-        ui.pause()
-
-    async def _tool_dedup(self) -> None:
-        ui.clear()
-        ui.header(t("tools.dedup.title"))
-        self._trail_line()
-
-        if self._dedup is None:
-            self._dedup = DedupEngine(db)
-
-        stats = self._dedup.stats()
-        lru = stats["lru"]
-        bloom = stats["bloom"]
-
-        lru_rows = [
-            (
-                t("tools.dedup.items"),
-                f"{Fmt.number(lru['items'])} / {Fmt.number(lru['capacity'])}",
-            ),
-            (t("tools.dedup.usage"), f"{lru['usage_pct']}%"),
-        ]
-        ui.box(t("tools.dedup.lru"), lru_rows, color=C.CYAN)
-
-        bloom_rows = [
-            (t("tools.dedup.items"), Fmt.number(bloom["items"])),
-            (t("tools.dedup.memory"), f"{bloom['memory_kb']} KB"),
-            (t("tools.dedup.hashes"), str(bloom["hash_funcs"])),
-            (t("tools.dedup.fp"), f"{bloom['fp_rate']}%"),
-        ]
-        ui.box(t("tools.dedup.bloom"), bloom_rows, color=C.PURPLE)
-        ui.pause()
-
-    async def _tool_maint(self) -> None:
-        ui.clear()
-        ui.header(t("tools.maint.title"))
-        self._trail_line()
-
-        tmp_files = list(TEMP_DIR.glob("*")) if TEMP_DIR.exists() else []
-        tmp_size = sum(f.stat().st_size for f in tmp_files if f.is_file())
-        if tmp_files:
-            ui.info(
-                f"{len(tmp_files)} {t('tools.maint.tmp_found')} ({Fmt.size(tmp_size)})"
-            )
-            if ui.confirm(t("tools.maint.tmp_delete")):
-                removed = 0
-                for f in tmp_files:
-                    try:
-                        f.unlink()
-                        removed += 1
-                    except OSError:
-                        pass
-                ui.ok(f"{t('tools.maint.tmp_cleared')} ({removed} arquivos)")
-        else:
-            ui.info(t("tools.maint.tmp_none"))
-
-        ui.blank()
-
-        if ui.confirm(t("tools.maint.db_prune")):
-            try:
-                removed = db.prune(days=30)
-                ui.ok(f"{removed} {t('tools.maint.db_done')}")
-            except Exception as exc:
-                ui.err(str(exc))
-
-        ui.blank()
-
-        if ui.confirm(t("tools.maint.db_vacuum")):
-            try:
-                import sqlite3
-
-                conn = sqlite3.connect(str(db.path))
-                conn.execute("VACUUM")
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.close()
-                ui.ok(t("tools.maint.db_vacuum_done"))
-            except Exception as exc:
-                ui.err(str(exc))
-
-        ui.pause()
-
-    async def _menu_settings(self) -> None:
-        self._push(t("menu.settings"))
-        while True:
-            ui.clear()
-            ui.header(t("settings.title"))
-            self._trail_line()
-
-            dedup_status = (
-                t("settings.on") if self.config.use_dedup else t("settings.off")
-            )
-            ui.menu(
-                [
-                    (
-                        "1",
-                        t("settings.delay.option"),
-                        f"{t('settings.delay')}: {self.config.delay}s",
-                    ),
-                    (
-                        "2",
-                        t("settings.dedup.toggle"),
-                        f"{t('settings.dedup')}: {dedup_status}",
-                    ),
-                    ("3", t("settings.logs.export"), t("settings.logs.desc")),
-                    ("4", t("settings.creds.reset"), t("settings.creds.desc")),
-                    (
-                        "5",
-                        t("settings.lang"),
-                        f"{t('settings.lang.current')}: {get_lang().upper()}",
-                    ),
-                    ("6", t("settings.about"), ""),
-                    ("0", t("menu.back"), ""),
-                ]
-            )
-            choice = ui.ask(t("menu.option"), required=False) or "0"
-            if choice == "1":
-                await self._set_delay()
-            elif choice == "2":
-                self.config.use_dedup = not self.config.use_dedup
-                ui.ok(
-                    f"{t('settings.dedup')}: {t('settings.on') if self.config.use_dedup else t('settings.off')}"
-                )
-                await asyncio.sleep(0.8)
-            elif choice == "3":
-                await self._export_logs()
-            elif choice == "4":
-                await self._reset_creds()
-            elif choice == "5":
-                await self._change_lang()
-            elif choice == "6":
-                self._about()
-            elif choice == "0":
-                self._pop()
-                return
-
-    async def _set_delay(self) -> None:
-        ui.clear()
-        ui.header(t("settings.delay.option"))
-        self._trail_line()
-        ui.info(t("settings.delay.hint"))
-        ui.blank()
-
-        raw = ui.ask(
-            t("settings.delay.title", current=self.config.delay), required=False
-        )
-        if not raw:
-            return
-        try:
-            val = float(raw.replace(",", "."))
-            if val < 0.1:
-                val = 0.1
-            self.config.delay = val
-            ui.ok(t("settings.delay.set", val=val))
-        except ValueError:
-            ui.err(t("settings.delay.invalid"))
-        await asyncio.sleep(1.0)
-
-    async def _export_logs(self) -> None:
-        ui.clear()
-        ui.header(t("settings.logs.export"))
-        self._trail_line()
-
-        log_file = LOGS_DIR / "telecopy.log"
-        if not log_file.exists():
-            ui.warn(t("settings.logs.none"))
-            ui.pause()
-            return
-
-        size = log_file.stat().st_size
-        ui.info(f"Log: {log_file}  ({Fmt.size(size)})")
-        ui.blank()
-
-        if not ui.confirm(t("settings.logs.export_confirm")):
-            return
-
-        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = EXPORT_DIR / f"telecopy_{ts}.log"
-        try:
-            shutil.copy2(log_file, dest)
-            ui.ok(f"{t('settings.logs.done')}: {dest}")
-        except Exception as exc:
-            ui.err(str(exc))
-        ui.pause()
-
-    async def _reset_creds(self) -> None:
-        ui.clear()
-        ui.header(t("settings.creds.reset"))
-        self._trail_line()
-        ui.warn(t("settings.creds.confirm"))
-        ui.blank()
-
-        if not ui.confirm(t("settings.creds.confirm_short")):
-            return
-
-        self.creds.clear()
-        session_path = Path(str(SESSION_FILE) + ".session")
-        if session_path.exists():
-            try:
-                session_path.unlink()
-            except OSError:
-                pass
-
-        ui.ok(t("settings.creds.cleared"))
-        ui.pause()
-        self._running = False
-
-    async def _change_lang(self) -> None:
-        ui.clear()
-        ui.header(t("settings.lang.title"))
-        self._trail_line()
-        ui.blank()
-        print(f"  {C.AMBER}[1]{C.RST}  {C.WHITE}Portugues (Brasil){C.RST}")
-        print(f"  {C.AMBER}[2]{C.RST}  {C.WHITE}English{C.RST}")
-        ui.blank()
-
-        raw = ui.ask(t("menu.option"), required=False) or ""
-        if raw == "1":
-            set_lang("pt")
-        elif raw == "2":
-            set_lang("en")
-
-        creds = self.creds.load() or {}
-        creds["lang"] = get_lang()
-        self.creds.save(creds)
-
-        ui.ok(t("settings.lang.set"))
-        await asyncio.sleep(0.8)
-
-    def _about(self) -> None:
-        ui.clear()
-        ui.splash(_app.__version__)
-
-        rows = [
-            (t("about.version"), _app.__version__),
-            (t("about.author"), _app.__author__),
-            (t("about.license"), _app.__license__),
-            (t("about.arch"), t("about.arch.val")),
-            (t("about.dedup"), t("about.dedup.val")),
-        ]
-        ui.box(t("about.title"), rows, color=C.PURPLE)
-        ui.pause()
-
-    async def _pick_entity(
-        self, label: str, hint: str, highlight_id: int = None
-    ) -> Optional[Any]:
-        ui.info(hint)
-        ui.blank()
-        ui.menu(
-            [
-                ("1", t("picker.from_list"), t("picker.from_list.desc")),
-                ("2", t("picker.manual"), t("picker.manual.desc")),
-                ("0", t("menu.back"), ""),
-            ]
-        )
-        modo = ui.ask(t("menu.option"), required=False) or "0"
-        if modo == "0":
-            return None
-
-        if modo == "1":
-            return await self._picker.pick(label, highlight_id=highlight_id)
-
-        if modo == "2":
-            raw = ui.ask(f"{label} (username, link ou ID)")
-            if not raw:
-                return None
-            try:
-                return await self.client.get_entity(raw)
-            except Exception as exc:
-                ui.err(f"{t('copy.source_not_found')}: {exc}")
+                if choice == "1":
+                    await self._menu_copy()
+                elif choice == "2":
+                    await self._menu_multi()
+                elif choice == "3":
+                    await self._menu_mirror()
+                elif choice == "4":
+                    await self._menu_tools()
+                elif choice == "5":
+                    await self._menu_settings()
+                elif choice == "0":
+                    self._running = False
+                elif choice:
+                    ui.warn(t("menu.invalid"))
+                    time.sleep(0.6)
+            except KeyboardInterrupt:
+                ui.warn(t("copy.cancelled"))
+                await asyncio.sleep(0.6)
+            except Exception as exc:  # nunca derruba o programa por um menu
+                logger.exception("Erro em menu")
+                ui.err(f"{t('err.generic')}: {exc}")
                 ui.pause()
-                return None
 
-        return None
+    def _limit_banner(self) -> None:
+        level, count, remaining = daily_limit.status()
+        if level == "limit":
+            ui.warn(t("limit.reached", count=count, limit=DAILY_LIMIT))
+        elif level == "warn":
+            ui.warn(t("limit.warn", count=count, limit=DAILY_LIMIT, remaining=remaining))
 
-    async def _pick_filter(self) -> Optional[str]:
-        ui.clear()
-        ui.header(t("filter.title"))
-        self._trail_line()
-
-        items = [("0", t("filter.all"), t("filter.all.desc"))]
-        items += [
-            (str(i + 1), name, desc)
-            for i, (code, name, desc) in enumerate(list_filters())
-            if code != "all"
-        ]
-        ui.menu(items)
-        ui.info(t("filter.back_hint"))
-        ui.blank()
-
-        choice = ui.ask(t("filter.default"), required=False) or "0"
-        if choice in ("b", "v", ""):
-            return "all"
-        if choice == "0":
-            return "all"
-
-        code = resolve_filter(choice)
-        if code:
-            ui.ok(f"{t('filter.selected')}: {filter_name(code)}")
-            await asyncio.sleep(0.5)
-            return code
-        return "all"
-
-    async def _shutdown(self) -> None:
-        ui.clear()
-        ui.blank()
-        ui.info(t("shutdown.saving"))
-        self.stats.save()
-        ui.info(t("shutdown.db"))
-        db.close()
-        if self.client:
-            ui.info(t("shutdown.disc"))
-            await self.client.disconnect()
-        ui.blank()
-        ui.ok(t("shutdown.bye"))
-        ui.blank()
+    # ── navegação ───────────────────────────────────────────────────────────
 
     def _push(self, name: str) -> None:
         if not self._trail or self._trail[-1] != name:
@@ -1522,477 +628,493 @@ class App:
 
     def _trail_line(self) -> None:
         if len(self._trail) > 1:
-            sep = f"  {C.DARK}›{C.RST}{C.DARK}  "
+            sep = f" {C.DARK}›{C.RST} "
             print(f"  {C.DARK}" + sep.join(self._trail) + C.RST)
             ui.blank()
 
-    def _show_entity(self, ent, label: str) -> None:
-        info = self._entity_info(ent)
-        ui.box(
-            label,
-            [
-                (t("entity.name"), info["name"]),
-                (t("entity.id"), str(info["id"])),
-                (t("entity.type"), info["type"]),
-            ],
-        )
+    # ── seleção de entidades ────────────────────────────────────────────────
 
-    def _entity_info(self, ent) -> Dict[str, Any]:
-        return {
-            "name": getattr(ent, "title", None)
-            or getattr(ent, "username", str(ent.id)),
-            "id": ent.id,
-            "type": type(ent).__name__,
-            "private": not getattr(ent, "username", None),
-        }
+    async def _pick_entity(self, label: str, hint: str,
+                           highlight_id: Optional[int] = None):
+        ui.info(hint)
+        ui.menu([
+            ("1", t("picker.from_list"), t("picker.from_list.desc")),
+            ("2", t("picker.manual"), t("picker.manual.desc")),
+            ("0", t("menu.back"), ""),
+        ])
+        mode = (ui.ask(t("picker.how"), required=False) or "0").strip()
 
-    def _print_result(self, result: Dict[str, Any]) -> None:
-        if not result:
-            return
-        rows = [
-            (t("result.sent"), str(result.get("done", 0))),
-            (t("result.skipped"), str(result.get("skipped", 0))),
-            (t("result.errors"), str(result.get("errors", 0))),
-            (t("result.time"), result.get("elapsed", "—")),
-        ]
-        if result.get("speed"):
-            rows.append(("Velocidade", result["speed"]))
-        if result.get("albums", 0):
-            rows.append(("Albuns", str(result["albums"])))
+        if mode == "0":
+            return None
+        if mode == "1":
+            return await self.picker.pick(label, highlight_id=highlight_id)
+        if mode == "2":
+            raw = ui.ask(f"{label} (@usuario, link ou ID)")
+            if not raw:
+                return None
+            return await self._resolve_entity(raw)
+        ui.warn(t("menu.invalid"))
+        return None
 
-        ui.box(t("result.title"), rows, color=C.GREEN)
-        ui.pause()
+    async def _resolve_entity(self, raw: str):
+        """Aceita @user, t.me/..., ID numérico e links privados t.me/c/..."""
+        value = raw.strip()
+        try:
+            if re.fullmatch(r"-?\d+", value):
+                return await self.client.get_entity(int(value))
+            return await self.client.get_entity(value)
+        except Exception as exc:
+            logger.warning(f"Entidade não encontrada ({value}): {exc}")
+            ui.err(f"{t('entity.not_found')}")
+            ui.pause()
+            return None
 
-    # ==============================================================================
-    # Menus
-    # ==============================================================================
-
-    async def _main_menu(self) -> None:
-        self._trail = ["TELECOPY"]
-
-        while self._running:
-            ui.clear()
-            ui.header(
-                "TELECOPY", f"v{_app.__version__}  ·  {t('app.by')} {_app.__author__}"
-            )
-
-            level, count, remaining = daily_limit.status()
-            if level == "limit":
-                ui.warn(t("limit.reached", count=count, limit=DAILY_LIMIT))
-            elif level == "warn":
-                ui.warn(
-                    t("limit.warn", count=count, limit=DAILY_LIMIT, remaining=remaining)
-                )
-
-            ui.menu(
-                [
-                    ("1", t("menu.copy"), t("menu.copy.desc")),
-                    ("2", t("menu.multi"), t("menu.multi.desc")),
-                    ("3", t("menu.mirror"), t("menu.mirror.desc")),
-                    ("4", t("menu.tools"), t("menu.tools.desc")),
-                    ("5", t("menu.settings"), t("menu.settings.desc")),
-                    ("0", t("menu.exit"), ""),
-                ]
-            )
-
-            choice = ui.ask(t("menu.option"), required=False) or ""
-
-            if choice == "1":
-                await self._menu_copy()
-            elif choice == "2":
-                await self._menu_multi()
-            elif choice == "3":
-                await self._menu_mirror()
-            elif choice == "4":
-                await self._menu_tools()
-            elif choice == "5":
-                await self._menu_settings()
-            elif choice == "0":
-                self._running = False
-
-    async def _resolve_topic(self, ent) -> Optional[int]:
-        if not getattr(ent, "forum", False):
+    async def _resolve_topic(self, entity) -> Optional[int]:
+        """Retorna o id do tópico (ou None para todos)."""
+        if not getattr(entity, "forum", False):
             return None
         ui.blank()
         ui.warn(t("picker.forum_warn"))
-        while True:
-            raw = ui.ask(t("picker.topic_prompt"), required=False)
-            if raw == "0" or not raw:
-                return -1
-            if raw.isdigit():
-                return int(raw)
-            url = raw.split("?")[0]
-            url = re.sub(r"^https?://(www\.)?t\.me/", "", url)
-            parts = [p for p in url.split("/") if p]
-            tid = None
-            if len(parts) >= 1:
-                if parts[0] == "c" and len(parts) >= 3 and parts[2].isdigit():
-                    tid = int(parts[2])
-                elif parts[0] != "c" and len(parts) >= 2 and parts[1].isdigit():
-                    tid = int(parts[1])
-            if tid is not None:
-                return tid
-            ui.err(t("picker.topic_invalid"))
+        raw = ui.ask(t("picker.topic_prompt"), required=False)
+        if not raw:
+            return None
+        if raw.isdigit():
+            return int(raw)
+        match = re.search(r"t\.me/(?:c/)?[^/]+/(?:(\d+)/)?(\d+)", raw)
+        if match:
+            return int(match.group(1) or match.group(2))
+        ui.err(t("picker.topic_invalid"))
+        return None
 
-    # ==============================================================================
-    # Fluxo: Copiar canal
-    # ==============================================================================
+    async def _pick_filter(self) -> Optional[str]:
+        ui.clear()
+        ui.header(t("filter.title"))
+        self._trail_line()
+        items = [("0", t("filter.all"), t("filter.all.desc"))]
+        items += [(str(i + 1), name, desc)
+                  for i, (code, name, desc) in enumerate(list_filters())
+                  if code != "all"]
+        ui.menu(items)
+        ui.info(t("filter.back_hint"))
+        ui.blank()
+        choice = (ui.ask(t("filter.default"), required=False) or "0").strip()
+        if choice in ("", "0"):
+            return "all"
+        code = resolve_filter(choice)
+        if not code:
+            ui.warn(t("menu.invalid"))
+            return "all"
+        self.prefs.set("last_filter", code)
+        return code
+
+    # ── resumo de entidade ──────────────────────────────────────────────────
+
+    def _show_entity(self, entity, label: str) -> None:
+        rows = [
+            (t("entity.name"), getattr(entity, "title", None) or str(entity.id)),
+            (t("entity.id"), str(entity.id)),
+            (t("entity.type"), type(entity).__name__),
+        ]
+        username = getattr(entity, "username", None)
+        if username:
+            rows.append((t("entity.username"), f"@{username}"))
+        members = getattr(entity, "participants_count", None)
+        if members:
+            rows.append((t("entity.members"), Fmt.number(members)))
+        ui.box(label, rows)
+
+    # ── fluxo: copiar canal ─────────────────────────────────────────────────
 
     async def _menu_copy(self) -> None:
-        self._push(t("copy.title"))
+        self._push(t("menu.copy"))
         ui.clear()
-        ui.header(t("copy.title"))
+        ui.header(t("menu.copy"))
         self._trail_line()
 
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
+        source = await self.picker.pick(t("entity.source"))
         if source is None:
             self._pop()
             return
-
         source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
         self._show_entity(source, t("entity.source"))
 
-        dest = await self._pick_entity(
-            t("entity.dest"),
-            t("copy.dest_hint"),
-            highlight_id=getattr(source, "id", None),
-        )
+        dest = None
+        for _ in range(3):
+            candidate = await self.picker.pick(t("entity.dest"), highlight_id=source.id)
+            if candidate is None:
+                self._pop()
+                return
+            if candidate.id == source.id:
+                ui.err(t("entity.same"))
+                ui.pause()
+                ui.clear()
+                ui.header(t("menu.copy"))
+                self._trail_line()
+                self._show_entity(source, t("entity.source"))
+                continue
+            dest = candidate
+            break
         if dest is None:
             self._pop()
             return
 
         dest_topic = await self._resolve_topic(dest)
-        if dest_topic == -1:
-            self._pop()
-            return
         self._show_entity(dest, t("entity.dest"))
 
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
+        filter_code = await self._pick_filter() or "all"
+        config = self._copy_options()
 
-        # Configuracao de workers inteligente
-        from copier import Copier
-        from system_analyzer import analyzer
+        rows = [
+            (t("entity.source"), getattr(source, "title", str(source.id))),
+            (t("entity.dest"), getattr(dest, "title", str(dest.id))),
+            (t("filter.default"), filter_name(filter_code)),
+            (t("copy.mode"),
+             t("copy.mode.forward") if config.forward_mode else t("copy.mode.copy")),
+            (t("settings.delay"), f"{config.delay:.1f}s"),
+            (t("settings.workers"), str(config.workers)),
+            (t("settings.resume"), t("settings.on") if config.resume else t("settings.off")),
+        ]
+        ui.box(t("copy.summary"), rows, color=C.CYAN)
 
-        ui.blank()
-        if ui.confirm("Deseja analisar e otimizar a configuracao de performance?"):
-            workers, memory_pct = await self._configure_performance()
-
-            if ui.confirm("Estimar tamanho do canal para calibrar (10s)?"):
-                est_gb = await self._analyze_channel_size(source)
-                if est_gb:
-                    analysis = analyzer.estimate_for_channel(est_gb)
-                    if analysis["warning"]:
-                        ui.warn(analysis["warning"])
-                        ui.pause()
-                    workers = analysis["recommended"]
-                    ui.ok(
-                        f"Canal estimado em {est_gb:.1f}GB. Usando {workers} workers."
-                    )
-        else:
-            workers = self.config.workers_dl
-
-        ui.blank()
-        resume = ui.confirm(t("copy.resume"))
-        ui.blank()
         if not ui.confirm(t("copy.confirm")):
             self._pop()
             return
 
-        copier = Copier(self.client, repo=db, delay=self.config.delay, workers=workers, memory_profile=memory_pct)
-        try:
-            result = await copier.run(
-                source,
-                dest,
-                filter_code=filter_code,
-                resume=resume,
-                source_topic_id=source_topic,
-                dest_topic_id=dest_topic,
-            )
-        except KeyboardInterrupt:
-            ui.warn(t("copy.cancelled"))
-            result = {}
-
-        self._print_result(result)
-        self.stats.inc("total", result.get("done", 0))
-        self._pop()
-
-    # ==============================================================================
-    # Fluxo: Modo Espelho
-    # ==============================================================================
-
-    async def _menu_mirror(self) -> None:
-        self._push(t("menu.mirror"))
-        ui.clear()
-        ui.header(t("mirror.title"))
-        self._trail_line()
-
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
-        if source is None:
-            self._pop()
-            return
-
-        source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
-        self._show_entity(source, t("entity.source"))
-
-        dest = await self._pick_entity(
-            t("entity.dest"),
-            t("copy.dest_hint"),
-            highlight_id=getattr(source, "id", None),
-        )
-        if dest is None:
-            self._pop()
-            return
-
-        dest_topic = await self._resolve_topic(dest)
-        if dest_topic == -1:
-            self._pop()
-            return
-        self._show_entity(dest, t("entity.dest"))
-
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
-
         from copier import Copier
 
-        copier = Copier(
-            self.client,
-            repo=db,
-            delay=self.config.delay,
-            workers=self.config.workers_dl,
-        )
-        await copier.mirror(
-            source,
-            dest,
-            filter_code=filter_code,
-            source_topic_id=source_topic,
-            dest_topic_id=dest_topic,
-        )
+        copier = Copier(self.client, repo=db, config=config)
+        result: Dict[str, Any] = {}
+        started = time.time()
+        try:
+            result = await copier.run(
+                source, dest,
+                filter_code=filter_code,
+                source_topic=source_topic,
+                dest_topic=dest_topic,
+            )
+        except KeyboardInterrupt:
+            ui.warn(t("copy.interrupted"))
+        except Exception as exc:
+            logger.exception("Falha na cópia")
+            ui.err(f"{t('err.generic')}: {exc}")
+            ui.pause()
+
+        self._record_result(result, time.time() - started)
+        self._print_result(result)
         self._pop()
 
-    # ==============================================================================
-    # Fluxo: Multi-destino
-    # ==============================================================================
+    def _copy_options(self) -> RunConfig:
+        cfg = RunConfig(**{k: v for k, v in self.config.to_dict().items()})
+        ui.blank()
+        if ui.confirm(f"{t('copy.options')}: {t('copy.mode.copy')} / "
+                      f"{t('copy.mode.forward')}? Alterar configurações?"):
+            ui.menu([
+                ("1", t("copy.mode"),
+                 t("copy.mode.forward") if cfg.forward_mode else t("copy.mode.copy")),
+                ("2", t("settings.delay"), f"{cfg.delay:.1f}s"),
+                ("3", t("settings.workers"), str(cfg.workers)),
+                ("4", t("settings.resume"),
+                 t("settings.on") if cfg.resume else t("settings.off")),
+                ("0", t("menu.back"), ""),
+            ])
+            while True:
+                choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
+                if choice == "0":
+                    break
+                if choice == "1":
+                    cfg.forward_mode = not cfg.forward_mode
+                    ui.ok(f"{t('copy.mode')}: "
+                          f"{t('copy.mode.forward') if cfg.forward_mode else t('copy.mode.copy')}")
+                elif choice == "2":
+                    raw = ui.ask(t("settings.delay.hint"), required=False)
+                    try:
+                        if raw:
+                            cfg.delay = max(0.1, float(raw.replace(",", ".")))
+                            ui.ok(t("settings.delay.set", val=f"{cfg.delay:.1f}"))
+                    except ValueError:
+                        ui.err(t("settings.delay.invalid"))
+                elif choice == "3":
+                    raw = ui.ask(t("settings.workers.title", max=8, current=cfg.workers),
+                                 required=False)
+                    try:
+                        if raw:
+                            cfg.workers = max(1, min(8, int(raw)))
+                            ui.ok(t("settings.workers.set", val=cfg.workers))
+                    except ValueError:
+                        ui.err(t("menu.invalid"))
+                elif choice == "4":
+                    cfg.resume = not cfg.resume
+                    ui.ok(f"{t('settings.resume')}: "
+                          f"{t('settings.on') if cfg.resume else t('settings.off')}")
+            self.config = cfg
+            self.prefs.save_config(cfg)
+        return cfg
+
+    # ── fluxo: multi-destino ────────────────────────────────────────────────
 
     async def _menu_multi(self) -> None:
         self._push(t("menu.multi"))
         ui.clear()
-        ui.header(t("multi.title"))
+        ui.header(t("menu.multi"))
         self._trail_line()
 
-        source = await self._pick_entity(t("entity.source"), t("copy.source_hint"))
+        source = await self.picker.pick(t("entity.source"))
         if source is None:
             self._pop()
             return
-
         source_topic = await self._resolve_topic(source)
-        if source_topic == -1:
-            self._pop()
-            return
         self._show_entity(source, t("entity.source"))
 
-        dests: List[Tuple[Any, Optional[int]]] = []
+        targets: List[Tuple[Any, Optional[int]]] = []
+        seen: set = set()
 
         while True:
-            ui.blank()
-            back_label = (
-                f"{t('menu.back')} / {t('multi.start')}" if dests else t("menu.back")
-            )
-            ui.menu(
-                [
-                    ("1", t("picker.from_list"), t("picker.from_list.desc")),
-                    ("2", t("picker.manual"), t("picker.manual.desc")),
-                    ("0", back_label, ""),
-                ]
-            )
-            modo = ui.ask(t("multi.dest_n", n=len(dests) + 1), required=False) or "0"
-            if modo == "0":
+            if targets:
+                ui.section(t("multi.list"))
+                for index, (entity, topic) in enumerate(targets, start=1):
+                    extra = f" · tópico {topic}" if topic else ""
+                    ui.bullet(f"{index}. {getattr(entity, 'title', entity.id)}{extra}")
+            ui.menu([
+                ("1", t("picker.from_list"), t("picker.from_list.desc")),
+                ("2", t("picker.manual"), t("picker.manual.desc")),
+                ("3", t("multi.remove"), ""),
+                ("0", t("multi.start") if targets else t("menu.back"), ""),
+            ])
+            mode = (ui.ask(t("multi.dest_n", n=len(targets) + 1), required=False) or "0").strip()
+
+            if mode == "0":
                 break
+            if mode == "3":
+                if targets:
+                    removed = targets.pop()
+                    seen.discard(removed[0].id)
+                    ui.ok(f"{t('multi.remove')}: {getattr(removed[0], 'title', '')}")
+                continue
 
-            ent = None
-            if modo == "1":
-                ent = await self._picker.pick(
-                    t("entity.dest"), highlight_id=getattr(source, "id", None)
-                )
-            elif modo == "2":
-                raw = ui.ask(t("copy.dest"))
+            entity = None
+            if mode == "1":
+                entity = await self.picker.pick(t("entity.dest"), highlight_id=source.id)
+            elif mode == "2":
+                raw = ui.ask(f"{t('entity.dest')} (@usuario, link ou ID)")
                 if raw:
-                    try:
-                        ent = await self.client.get_entity(raw)
-                    except Exception as exc:
-                        ui.err(f"{t('copy.dest_not_found')}: {exc}")
-                        ui.pause()
-                        continue
+                    entity = await self._resolve_entity(raw)
 
-            if ent is not None:
-                ent_topic = await self._resolve_topic(ent)
-                if ent_topic != -1:
-                    dests.append((ent, ent_topic))
-                    ui.ok(f"{t('multi.added')}: {getattr(ent, 'title', ent.id)}")
+            if entity is None:
+                continue
+            if entity.id == source.id:
+                ui.err(t("entity.same"))
+                continue
+            if entity.id in seen:
+                ui.warn(f"{getattr(entity, 'title', entity.id)} — {t('multi.already')}")
+                continue
 
-        if not dests:
+            topic = await self._resolve_topic(entity)
+            targets.append((entity, topic))
+            seen.add(entity.id)
+            ui.ok(f"{t('multi.added')}: {getattr(entity, 'title', entity.id)}")
+
+        if not targets:
             ui.warn(t("multi.no_dests"))
             ui.pause()
             self._pop()
             return
 
-        filter_code = await self._pick_filter()
-        if filter_code is None:
-            self._pop()
-            return
-
-        if not ui.confirm(t("multi.confirm", n=len(dests))):
+        filter_code = await self._pick_filter() or "all"
+        if not ui.confirm(t("multi.confirm", n=len(targets))):
             self._pop()
             return
 
         from copier import Copier
 
-        for i, (dest, dest_topic) in enumerate(dests, 1):
-            ui.section(
-                t("multi.dest_label", i=i, total=len(dests))
-                + f": {getattr(dest, 'title', dest.id)}"
-            )
-            copier = Copier(self.client, repo=db, delay=self.config.delay)
+        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0}
+        for index, (dest, topic) in enumerate(targets, start=1):
+            ui.section(f"{t('multi.dest_label', i=index, total=len(targets))}: "
+                       f"{getattr(dest, 'title', dest.id)}")
+            copier = Copier(self.client, repo=db, config=self.config)
             try:
                 result = await copier.run(
-                    source,
-                    dest,
+                    source, dest,
                     filter_code=filter_code,
-                    source_topic_id=source_topic,
-                    dest_topic_id=dest_topic,
+                    source_topic=source_topic,
+                    dest_topic=topic,
                 )
-                self._print_result(result)
+            except KeyboardInterrupt:
+                ui.warn(t("copy.interrupted"))
+                break
             except Exception as exc:
+                logger.exception("Falha no multi-destino")
                 ui.err(f"{t('multi.failed')}: {exc}")
+                continue
+            for key in totals:
+                totals[key] += int(result.get(key, 0) or 0)
+            self._print_result(result, pause=False)
 
+        ui.box(t("multi.total_sent", n=len(targets)), [
+            (t("result.sent"), Fmt.number(totals["done"])),
+            (t("result.skipped"), Fmt.number(totals["skipped"])),
+            (t("result.errors"), Fmt.number(totals["errors"])),
+            (t("result.bytes"), Fmt.size(totals["bytes"])),
+        ], color=C.GREEN)
+        ui.pause()
         self._pop()
 
-    # ==============================================================================
-    # Ferramentas
-    # ==============================================================================
+    # ── fluxo: modo espelho ─────────────────────────────────────────────────
+
+    async def _menu_mirror(self) -> None:
+        self._push(t("menu.mirror"))
+        ui.clear()
+        ui.header(t("menu.mirror"))
+        self._trail_line()
+
+        source = await self.picker.pick(t("entity.source"))
+        if source is None:
+            self._pop()
+            return
+        source_topic = await self._resolve_topic(source)
+        self._show_entity(source, t("entity.source"))
+
+        dest = await self.picker.pick(t("entity.dest"), highlight_id=source.id)
+        if dest is None or dest.id == source.id:
+            if dest is not None:
+                ui.err(t("entity.same"))
+                ui.pause()
+            self._pop()
+            return
+        dest_topic = await self._resolve_topic(dest)
+        self._show_entity(dest, t("entity.dest"))
+
+        filter_code = await self._pick_filter() or "all"
+        ui.blank()
+        ui.info(t("mirror.stop"))
+        if not ui.confirm(t("copy.confirm")):
+            self._pop()
+            return
+
+        from copier import Copier
+
+        copier = Copier(self.client, repo=db, config=self.config)
+        try:
+            await copier.mirror(source, dest, filter_code=filter_code,
+                                source_topic=source_topic, dest_topic=dest_topic)
+        except KeyboardInterrupt:
+            ui.warn(t("mirror.stopped"))
+        ui.pause()
+        self._pop()
+
+    # ── ferramentas ─────────────────────────────────────────────────────────
 
     async def _menu_tools(self) -> None:
         self._push(t("menu.tools"))
         while True:
             ui.clear()
-            ui.header(t("tools.title"))
+            ui.header(t("menu.tools"))
             self._trail_line()
-            ui.menu(
-                [
-                    ("1", t("tools.resolve"), t("tools.resolve.desc")),
-                    ("2", t("tools.stats"), t("tools.stats.desc")),
-                    ("3", t("tools.retry"), t("tools.retry.desc")),
-                    ("4", t("tools.dedup"), t("tools.dedup.desc")),
-                    ("5", t("tools.maint"), t("tools.maint.desc")),
-                    ("0", t("menu.back"), ""),
-                ]
-            )
-            choice = ui.ask(t("menu.option"), required=False) or "0"
-            if choice == "1":
-                await self._tool_resolve()
-            elif choice == "2":
-                await self._tool_stats()
-            elif choice == "3":
-                await self._tool_retry()
-            elif choice == "4":
-                await self._tool_dedup()
-            elif choice == "5":
-                await self._tool_maint()
-            elif choice == "0":
+            ui.menu([
+                ("1", t("tools.resolve"), t("tools.resolve.desc")),
+                ("2", t("tools.stats"), t("tools.stats.desc")),
+                ("3", t("tools.retry"), t("tools.retry.desc")),
+                ("4", t("tools.dedup"), t("tools.dedup.desc")),
+                ("5", t("tools.maint"), t("tools.maint.desc")),
+                ("0", t("menu.back"), ""),
+            ])
+            choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
+            if choice == "0":
                 self._pop()
                 return
+            try:
+                if choice == "1":
+                    await self._tool_resolve()
+                elif choice == "2":
+                    self._tool_stats()
+                elif choice == "3":
+                    await self._tool_retry()
+                elif choice == "4":
+                    self._tool_dedup()
+                elif choice == "5":
+                    await self._tool_maintenance()
+                elif choice:
+                    ui.warn(t("menu.invalid"))
+            except Exception as exc:
+                logger.exception("Erro em ferramentas")
+                ui.err(f"{t('err.generic')}: {exc}")
+                ui.pause()
 
     async def _tool_resolve(self) -> None:
         ui.clear()
         ui.header(t("tools.resolve.title"))
         self._trail_line()
         ui.info(t("tools.resolve.hint"))
-        ui.blank()
-
         while True:
+            ui.blank()
             raw = ui.ask(t("tools.resolve.query"), required=False)
             if not raw:
                 break
-            try:
-                ent = await self.client.get_entity(raw)
-            except Exception as exc:
-                ui.err(f"{t('tools.resolve.not_found')}: {exc}")
+            entity = await self._resolve_entity(raw)
+            if entity is None:
                 continue
-
-            info = self._entity_info(ent)
             rows = [
-                (t("tools.resolve.name"), info["name"]),
-                ("ID", str(info["id"])),
-                (t("tools.resolve.type"), info["type"]),
-                (
-                    t("tools.resolve.access"),
-                    (
-                        t("tools.resolve.public")
-                        if not info["private"]
-                        else t("tools.resolve.private")
-                    ),
-                ),
+                (t("tools.resolve.name"), getattr(entity, "title", None) or str(entity.id)),
+                ("ID", str(entity.id)),
+                (t("tools.resolve.type"), type(entity).__name__),
+                (t("tools.resolve.access"),
+                 t("tools.resolve.public") if getattr(entity, "username", None)
+                 else t("tools.resolve.private")),
             ]
-
-            mem = getattr(ent, "participants_count", None)
-            if mem is not None:
-                rows.append(("Membros", Fmt.number(mem)))
-
+            members = getattr(entity, "participants_count", None)
+            if members:
+                rows.append((t("entity.members"), Fmt.number(members)))
+            if getattr(entity, "username", None):
+                rows.append((t("entity.username"), f"@{entity.username}"))
             ui.box(t("tools.resolve.result"), rows, color=C.CYAN)
-
         ui.pause()
 
-    async def _tool_stats(self) -> None:
+    def _tool_stats(self) -> None:
         ui.clear()
         ui.header(t("tools.stats.title"))
         self._trail_line()
 
-        s = self.stats.data
-        session_rows = [
-            (t("tools.stats.total"), Fmt.number(s.get("total", 0))),
-            (t("tools.stats.photos"), Fmt.number(s.get("photos", 0))),
-            (t("tools.stats.videos"), Fmt.number(s.get("videos", 0))),
-            (t("tools.stats.audio"), Fmt.number(s.get("audio", 0))),
-            (t("tools.stats.documents"), Fmt.number(s.get("documents", 0))),
-            (t("tools.stats.sessions"), Fmt.number(s.get("sessions", 0))),
-        ]
-        if s.get("bytes_sent", 0):
-            session_rows.append((t("tools.stats.bytes"), Fmt.size(s["bytes_sent"])))
-        ui.box(t("tools.stats.session"), session_rows, color=C.PURPLE)
+        data = self.stats.data
+        ui.box(t("tools.stats.session"), [
+            (t("tools.stats.total"), Fmt.number(data.get("total", 0))),
+            (t("tools.stats.photos"), Fmt.number(data.get("photos", 0))),
+            (t("tools.stats.videos"), Fmt.number(data.get("videos", 0))),
+            (t("tools.stats.audio"), Fmt.number(data.get("audio", 0))),
+            (t("tools.stats.documents"), Fmt.number(data.get("documents", 0))),
+            (t("tools.stats.text"), Fmt.number(data.get("text", 0))),
+            (t("tools.stats.bytes"), Fmt.size(data.get("bytes_sent", 0))),
+            (t("tools.stats.sessions"), Fmt.number(data.get("sessions", 0))),
+            (t("tools.stats.last_run"), Fmt.date(data.get("last_run"))),
+        ], color=C.PURPLE)
 
         try:
-            gs = db.global_stats()
-            db_rows = [
-                (t("tools.stats.total"), Fmt.number(gs.get("success", 0))),
-                (t("tools.stats.errors"), Fmt.number(gs.get("errors", 0))),
-                (t("tools.stats.duplicates"), Fmt.number(gs.get("duplicates", 0))),
-                (t("tools.stats.moved"), Fmt.size(gs.get("bytes", 0))),
-                (t("tools.stats.sessions"), Fmt.number(gs.get("sessions", 0))),
-            ]
-            ui.box(t("tools.stats.alltime"), db_rows, color=C.INDIGO)
+            global_stats = db.global_stats()
+            ui.box(t("tools.stats.alltime"), [
+                (t("tools.stats.total"), Fmt.number(global_stats.get("success", 0))),
+                (t("tools.stats.errors"), Fmt.number(global_stats.get("errors", 0))),
+                (t("tools.stats.duplicates"), Fmt.number(global_stats.get("duplicates", 0))),
+                (t("tools.stats.moved"), Fmt.size(global_stats.get("bytes", 0))),
+                (t("tools.stats.sessions"), Fmt.number(global_stats.get("sessions", 0))),
+            ], color=C.INDIGO)
         except Exception:
             pass
 
         level, count, remaining = daily_limit.status()
-        color = (
-            C.RED if level == "limit" else (C.YELLOW if level == "warn" else C.GREEN)
-        )
-        daily_rows = [
+        color = C.RED if level == "limit" else (C.YELLOW if level == "warn" else C.GREEN)
+        ui.box(t("tools.stats.daily"), [
             (t("tools.stats.today"), Fmt.number(count)),
             (t("tools.stats.limit"), Fmt.number(DAILY_LIMIT)),
             (t("tools.stats.remaining"), Fmt.number(remaining)),
-        ]
-        ui.box(t("tools.stats.daily"), daily_rows, color=color)
+        ], color=color)
+
+        recent = db.recent_sessions(6)
+        if recent:
+            ui.section(t("tools.stats.recent"))
+            rows = []
+            for sess in recent:
+                label = f"{(sess.get('source_name') or '?')[:18]} → {(sess.get('dest_name') or '?')[:18]}"
+                rows.append([label, str(sess.get("success") or 0), Fmt.date(sess.get("started_at"))])
+            ui.table(["Cópia", "Enviadas", "Quando"], rows,
+                     widths=[42, 10, 18])
         ui.pause()
 
     async def _tool_retry(self) -> None:
@@ -2000,392 +1122,385 @@ class App:
         ui.header(t("tools.retry.title"))
         self._trail_line()
 
-        rstats = rqueue.stats()
-        retry_rows = [
-            (t("tools.retry.pending"), str(rstats["pending"])),
-            (t("tools.retry.exhausted"), str(rstats["exhausted"])),
-            (t("tools.retry.total"), str(rstats["total"])),
-        ]
-        ui.box(t("tools.retry.queue"), retry_rows, color=C.AMBER)
+        stats = self.retry.stats()
+        ui.box(t("tools.retry.queue"), [
+            (t("tools.retry.pending"), Fmt.number(stats["pending"])),
+            (t("tools.retry.total"), Fmt.number(stats["total"])),
+            (t("tools.retry.attempts"), Fmt.number(stats["attempts"])),
+        ], color=C.AMBER)
 
-        if rstats["exhausted"] > 0:
-            if ui.confirm(t("tools.retry.clear")):
-                removed = rqueue.clear_exhausted()
-                ui.ok(f"{removed} {t('tools.retry.cleared')}")
-        elif rstats["total"] == 0:
-            ui.info("Fila vazia — nenhum item pendente.")
+        jobs = self.retry.all_jobs()
+        if not jobs:
+            ui.info(t("tools.retry.empty"))
+            ui.pause()
+            return
 
+        rows = []
+        for job in jobs[:12]:
+            rows.append([
+                str(job.msg_id),
+                str(job.attempts),
+                (job.reason or "—")[:34],
+            ])
+        ui.table(["msg_id", "tent.", "motivo"], rows, widths=[10, 7, 46])
+
+        if stats["pending"] and ui.confirm(t("tools.retry.retry_now")):
+            result = await self._retry_pending()
+            if result:
+                self._print_result(result)
+                return
+        if ui.confirm(t("tools.retry.clear")):
+            removed = self.retry.clear_all()
+            ui.ok(f"{removed} {t('tools.retry.cleared')}")
         ui.pause()
 
-    async def _tool_dedup(self) -> None:
+    async def _retry_pending(self) -> Dict[str, Any]:
+        """Reprocessa as mensagens que falharam, agrupadas por origem/destino."""
+        from copier import Copier
+
+        jobs = self.retry.all_pending()
+        if not jobs:
+            ui.info(t("queue.nothing"))
+            return {}
+
+        groups: Dict[Tuple[int, int], List[int]] = {}
+        for job in jobs:
+            groups.setdefault((job.source_id, job.dest_id), []).append(job.msg_id)
+
+        ui.info(t("queue.retry_start"))
+        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0}
+        for (source_id, dest_id), msg_ids in groups.items():
+            try:
+                source = await self.client.get_entity(source_id)
+                dest = await self.client.get_entity(dest_id)
+            except Exception as exc:
+                logger.error(f"Retry: entidade indisponível {source_id}->{dest_id}: {exc}")
+                continue
+            copier = Copier(self.client, repo=db, config=self.config)
+            try:
+                result = await copier.retry_messages(source, dest, msg_ids)
+            except Exception as exc:
+                logger.exception("Falha ao reprocessar")
+                ui.err(f"{t('err.generic')}: {exc}")
+                continue
+            for key in totals:
+                totals[key] += int(result.get(key, 0) or 0)
+        return totals
+
+    def _tool_dedup(self) -> None:
         ui.clear()
         ui.header(t("tools.dedup.title"))
         self._trail_line()
 
-        if self._dedup is None:
-            self._dedup = DedupEngine(db)
-
-        stats = self._dedup.stats()
-        lru = stats["lru"]
-        bloom = stats["bloom"]
-
-        lru_rows = [
-            (
-                t("tools.dedup.items"),
-                f"{Fmt.number(lru['items'])} / {Fmt.number(lru['capacity'])}",
-            ),
+        stats = self.dedup.stats()
+        lru, bloom = stats["lru"], stats["bloom"]
+        ui.box(t("tools.dedup.lru"), [
+            (t("tools.dedup.items"), f"{Fmt.number(lru['items'])} / {Fmt.number(lru['capacity'])}"),
             (t("tools.dedup.usage"), f"{lru['usage_pct']}%"),
-        ]
-        ui.box(t("tools.dedup.lru"), lru_rows, color=C.CYAN)
-
-        bloom_rows = [
+        ], color=C.CYAN)
+        ui.box(t("tools.dedup.bloom"), [
             (t("tools.dedup.items"), Fmt.number(bloom["items"])),
             (t("tools.dedup.memory"), f"{bloom['memory_kb']} KB"),
             (t("tools.dedup.hashes"), str(bloom["hash_funcs"])),
             (t("tools.dedup.fp"), f"{bloom['fp_rate']}%"),
-        ]
-        ui.box(t("tools.dedup.bloom"), bloom_rows, color=C.PURPLE)
+        ], color=C.PURPLE)
+        ui.box(t("tools.dedup.db"), [
+            (t("tools.dedup.history"), Fmt.number(db.dedup_count())),
+            (t("tools.dedup.size"), Fmt.size(db.size_bytes())),
+        ], color=C.INDIGO)
+
+        if ui.confirm(t("tools.dedup.reset")):
+            self.dedup.reset()
+            ui.ok(t("tools.dedup.reset_done"))
         ui.pause()
 
-    async def _tool_maint(self) -> None:
+    async def _tool_maintenance(self) -> None:
         ui.clear()
         ui.header(t("tools.maint.title"))
         self._trail_line()
 
-        tmp_files = list(TEMP_DIR.glob("*")) if TEMP_DIR.exists() else []
-        tmp_size = sum(f.stat().st_size for f in tmp_files if f.is_file())
-        if tmp_files:
-            ui.info(
-                f"{len(tmp_files)} {t('tools.maint.tmp_found')} ({Fmt.size(tmp_size)})"
-            )
+        health = db.health()
+        ui.box(t("tools.maint.health"), [
+            (t("tools.maint.integrity"), str(health["integrity"])),
+            (t("tools.dedup.size"), Fmt.size(health["size"])),
+            (t("tools.stats.sessions"), Fmt.number(health["counts"].get("sessions", 0))),
+            (t("tools.dedup.history"), Fmt.number(health["counts"].get("dedup", 0))),
+        ], color=C.GREEN)
+
+        temp_files = [f for f in TEMP_DIR.glob("*") if f.is_file()] if TEMP_DIR.exists() else []
+        if temp_files:
+            size = sum(f.stat().st_size for f in temp_files)
+            ui.info(f"{len(temp_files)} {t('tools.maint.tmp_found')} ({Fmt.size(size)})")
             if ui.confirm(t("tools.maint.tmp_delete")):
                 removed = 0
-                for f in tmp_files:
+                for path in temp_files:
                     try:
-                        f.unlink()
+                        path.unlink()
                         removed += 1
                     except OSError:
                         pass
-                ui.ok(f"{t('tools.maint.tmp_cleared')} ({removed} arquivos)")
+                ui.ok(f"{t('tools.maint.tmp_cleared')}: {removed}")
         else:
             ui.info(t("tools.maint.tmp_none"))
 
-        ui.blank()
+        if ui.confirm(t("tools.maint.backup")):
+            target = BACKUP_DIR / f"telecopy_{datetime.now():%Y%m%d_%H%M%S}.db"
+            try:
+                db.vacuum()
+                shutil.copy2(db.path, target)
+                ui.ok(f"{t('tools.maint.backup_done')}: {target}")
+            except Exception as exc:
+                ui.err(str(exc))
 
         if ui.confirm(t("tools.maint.db_prune")):
             try:
                 removed = db.prune(days=30)
-                ui.ok(f"{removed} {t('tools.maint.db_done')}")
+                total = sum(removed.values())
+                ui.ok(f"{Fmt.number(total)} {t('tools.maint.db_done')}")
             except Exception as exc:
                 ui.err(str(exc))
 
-        ui.blank()
-
         if ui.confirm(t("tools.maint.db_vacuum")):
             try:
-                import sqlite3
-
-                conn = sqlite3.connect(str(db.path))
-                conn.execute("VACUUM")
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.close()
+                db.vacuum()
                 ui.ok(t("tools.maint.db_vacuum_done"))
             except Exception as exc:
                 ui.err(str(exc))
 
         ui.pause()
 
-    # ==============================================================================
-    # Configuracoes
-    # ==============================================================================
+    # ── configurações ───────────────────────────────────────────────────────
 
     async def _menu_settings(self) -> None:
         self._push(t("menu.settings"))
         while True:
             ui.clear()
-            ui.header(t("settings.title"))
+            ui.header(t("menu.settings"))
             self._trail_line()
 
-            dedup_status = (
-                t("settings.on") if self.config.use_dedup else t("settings.off")
-            )
-            ui.menu(
-                [
-                    (
-                        "1",
-                        t("settings.delay.option"),
-                        f"{t('settings.delay')}: {self.config.delay}s",
-                    ),
-                    (
-                        "2",
-                        t("settings.dedup.toggle"),
-                        f"{t('settings.dedup')}: {dedup_status}",
-                    ),
-                    ("3", t("settings.logs.export"), t("settings.logs.desc")),
-                    ("4", t("settings.creds.reset"), t("settings.creds.desc")),
-                    (
-                        "5",
-                        t("settings.lang"),
-                        f"{t('settings.lang.current')}: {get_lang().upper()}",
-                    ),
-                    ("6", t("settings.about"), ""),
-                    ("0", t("menu.back"), ""),
-                ]
-            )
-            choice = ui.ask(t("menu.option"), required=False) or "0"
-            if choice == "1":
-                await self._set_delay()
-            elif choice == "2":
-                self.config.use_dedup = not self.config.use_dedup
-                ui.ok(
-                    f"{t('settings.dedup')}: {t('settings.on') if self.config.use_dedup else t('settings.off')}"
-                )
-                await asyncio.sleep(0.8)
-            elif choice == "3":
-                await self._export_logs()
-            elif choice == "4":
-                await self._reset_creds()
-            elif choice == "5":
-                await self._change_lang()
-            elif choice == "6":
-                self._about()
-            elif choice == "0":
+            cfg = self.config
+            ui.box(t("settings.status"), [
+                (t("settings.delay"), f"{cfg.delay:.1f}s"),
+                (t("settings.workers"), str(cfg.workers)),
+                (t("settings.dedup"), t("settings.on") if cfg.use_dedup else t("settings.off")),
+                (t("settings.resume"), t("settings.on") if cfg.resume else t("settings.off")),
+                (t("settings.forward"),
+                 t("copy.mode.forward") if cfg.forward_mode else t("copy.mode.copy")),
+                (t("settings.signature"), cfg.signature or "—"),
+                (t("settings.lang"), get_lang().upper()),
+            ], color=C.INDIGO)
+
+            ui.menu([
+                ("1", t("settings.delay.option"), f"{cfg.delay:.1f}s"),
+                ("2", t("settings.workers.option"), str(cfg.workers)),
+                ("3", t("settings.dedup.toggle"), ""),
+                ("4", t("settings.resume.toggle"), ""),
+                ("5", t("settings.forward.toggle"), ""),
+                ("6", t("settings.signature.option"), ""),
+                ("7", t("settings.lang"), get_lang().upper()),
+                ("8", t("settings.logs.export"), t("settings.logs.desc")),
+                ("9", t("settings.about"), ""),
+                ("b", t("settings.data_reset"), t("settings.data_reset.desc")),
+                ("c", t("settings.creds.reset"), t("settings.creds.desc")),
+                ("0", t("menu.back"), ""),
+            ])
+            choice = (ui.ask(t("menu.option"), required=False) or "0").strip().lower()
+
+            if choice == "0":
                 self._pop()
                 return
+            if choice == "1":
+                self._set_delay()
+            elif choice == "2":
+                self._set_workers()
+            elif choice == "3":
+                cfg.use_dedup = not cfg.use_dedup
+                self._save_config()
+                ui.ok(f"{t('settings.dedup')}: "
+                      f"{t('settings.on') if cfg.use_dedup else t('settings.off')}")
+                await asyncio.sleep(0.7)
+            elif choice == "4":
+                cfg.resume = not cfg.resume
+                self._save_config()
+                ui.ok(f"{t('settings.resume')}: "
+                      f"{t('settings.on') if cfg.resume else t('settings.off')}")
+                await asyncio.sleep(0.7)
+            elif choice == "5":
+                cfg.forward_mode = not cfg.forward_mode
+                self._save_config()
+                ui.ok(f"{t('settings.forward')}: "
+                      f"{t('copy.mode.forward') if cfg.forward_mode else t('copy.mode.copy')}")
+                await asyncio.sleep(0.7)
+            elif choice == "6":
+                self._set_signature()
+            elif choice == "7":
+                self._change_language()
+            elif choice == "8":
+                self._export_logs()
+            elif choice == "9":
+                self._about()
+            elif choice == "b":
+                if ui.confirm(t("settings.data_reset.confirm")):
+                    db.reset_all()
+                    self.dedup.reset()
+                    ui.ok(t("settings.data_reset.done"))
+                    await asyncio.sleep(1.2)
+            elif choice == "c":
+                if await self._reset_credentials():
+                    return
+            elif choice:
+                ui.warn(t("menu.invalid"))
+                await asyncio.sleep(0.6)
 
-    async def _set_delay(self) -> None:
-        ui.clear()
-        ui.header(t("settings.delay.option"))
-        self._trail_line()
-        ui.info(t("settings.delay.hint"))
+    def _save_config(self) -> None:
+        self.prefs.save_config(self.config)
+
+    def _set_delay(self) -> None:
         ui.blank()
-
-        raw = ui.ask(
-            t("settings.delay.title", current=self.config.delay), required=False
-        )
+        ui.info(t("settings.delay.hint"))
+        raw = ui.ask(t("settings.delay.title", current=f"{self.config.delay:.1f}"),
+                     required=False)
         if not raw:
             return
         try:
-            val = float(raw.replace(",", "."))
-            if val < 0.1:
-                val = 0.1
-            self.config.delay = val
-            ui.ok(t("settings.delay.set", val=val))
+            value = max(0.1, float(raw.replace(",", ".")))
         except ValueError:
             ui.err(t("settings.delay.invalid"))
-        await asyncio.sleep(1.0)
-
-    async def _export_logs(self) -> None:
-        ui.clear()
-        ui.header(t("settings.logs.export"))
-        self._trail_line()
-
-        log_file = LOGS_DIR / "telecopy.log"
-        if not log_file.exists():
-            ui.warn(t("settings.logs.none"))
-            ui.pause()
             return
+        self.config.delay = value
+        self._save_config()
+        ui.ok(t("settings.delay.set", val=f"{value:.1f}"))
 
-        size = log_file.stat().st_size
-        ui.info(f"Log: {log_file}  ({Fmt.size(size)})")
+    def _set_workers(self) -> None:
+        from system_analyzer import analyzer
+
         ui.blank()
+        ui.info(t("settings.workers.hint", rec=analyzer.recommended()))
+        raw = ui.ask(t("settings.workers.title", max=8, current=self.config.workers),
+                     required=False)
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            ui.err(t("menu.invalid"))
+            return
+        if not 1 <= value <= 8:
+            ui.err(t("menu.invalid"))
+            return
+        self.config.workers = value
+        self._save_config()
+        ui.ok(t("settings.workers.set", val=value))
 
+    def _set_signature(self) -> None:
+        ui.blank()
+        ui.info(t("settings.signature.hint"))
+        raw = ui.ask(t("settings.signature.option"), required=False)
+        self.config.signature = raw.strip()
+        self._save_config()
+        ui.ok(t("settings.signature.set"))
+
+    def _change_language(self) -> None:
+        ui.blank()
+        print(f"  {C.AMBER}[1]{C.RST}  {C.WHITE}{t('lang.pt')}{C.RST}")
+        print(f"  {C.AMBER}[2]{C.RST}  {C.WHITE}{t('lang.en')}{C.RST}")
+        raw = (ui.ask(t("lang.select"), required=False) or "").strip()
+        if raw in ("1", "pt"):
+            set_lang("pt")
+        elif raw in ("2", "en"):
+            set_lang("en")
+        else:
+            return
+        self.prefs.set_language(get_lang())
+        self.creds.update(lang=get_lang())
+        ui.ok(t("settings.lang.set"))
+
+    def _export_logs(self) -> None:
+        ui.blank()
+        if not LOG_FILE.exists():
+            ui.warn(t("settings.logs.none"))
+            return
         if not ui.confirm(t("settings.logs.export_confirm")):
             return
-
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = EXPORT_DIR / f"telecopy_{ts}.log"
+        target = EXPORT_DIR / f"telecopy_{datetime.now():%Y%m%d_%H%M%S}.log"
         try:
-            shutil.copy2(log_file, dest)
-            ui.ok(f"{t('settings.logs.done')}: {dest}")
+            shutil.copy2(LOG_FILE, target)
+            ui.ok(f"{t('settings.logs.done')}: {target}")
         except Exception as exc:
             ui.err(str(exc))
-        ui.pause()
-
-    async def _reset_creds(self) -> None:
-        ui.clear()
-        ui.header(t("settings.creds.reset"))
-        self._trail_line()
-        ui.warn(t("settings.creds.confirm"))
-        ui.blank()
-
-        if not ui.confirm(t("settings.creds.confirm_short")):
-            return
-
-        self.creds.clear()
-        session_path = Path(str(SESSION_FILE) + ".session")
-        if session_path.exists():
-            try:
-                session_path.unlink()
-            except OSError:
-                pass
-
-        ui.ok(t("settings.creds.cleared"))
-        ui.pause()
-        self._running = False
-
-    async def _change_lang(self) -> None:
-        ui.clear()
-        ui.header(t("settings.lang.title"))
-        self._trail_line()
-        ui.blank()
-        print(f"  {C.AMBER}[1]{C.RST}  {C.WHITE}Portugues (Brasil){C.RST}")
-        print(f"  {C.AMBER}[2]{C.RST}  {C.WHITE}English{C.RST}")
-        ui.blank()
-
-        raw = ui.ask(t("menu.option"), required=False) or ""
-        if raw == "1":
-            set_lang("pt")
-        elif raw == "2":
-            set_lang("en")
-
-        creds = self.creds.load() or {}
-        creds["lang"] = get_lang()
-        self.creds.save(creds)
-
-        ui.ok(t("settings.lang.set"))
-        await asyncio.sleep(0.8)
 
     def _about(self) -> None:
         ui.clear()
-        ui.splash(_app.__version__)
-
-        rows = [
+        ui.splash(_app.__version__, f"{t('app.tagline')} · v{_app.__version__}", t("app.tech"))
+        ui.box(t("about.title"), [
             (t("about.version"), _app.__version__),
             (t("about.author"), _app.__author__),
             (t("about.license"), _app.__license__),
             (t("about.arch"), t("about.arch.val")),
             (t("about.dedup"), t("about.dedup.val")),
-        ]
-        ui.box(t("about.title"), rows, color=C.PURPLE)
+            (t("about.system"), f"{platform.system()} {platform.release()}"),
+            (t("about.python"), platform.python_version()),
+            (t("about.data_dir"), str(DATA_DIR)),
+            (t("about.site"), "github.com/montx2/telecopy"),
+        ], color=C.PURPLE)
         ui.pause()
 
-    # ==============================================================================
-    # Seletor generico de entidade
-    # ==============================================================================
-
-    async def _pick_entity(
-        self, label: str, hint: str, highlight_id: int = None
-    ) -> Optional[Any]:
-        ui.info(hint)
+    async def _reset_credentials(self) -> bool:
         ui.blank()
-        ui.menu(
-            [
-                ("1", t("picker.from_list"), t("picker.from_list.desc")),
-                ("2", t("picker.manual"), t("picker.manual.desc")),
-                ("0", t("menu.back"), ""),
-            ]
-        )
-        modo = ui.ask(t("menu.option"), required=False) or "0"
-        if modo == "0":
-            return None
-
-        if modo == "1":
-            return await self._picker.pick(label, highlight_id=highlight_id)
-
-        if modo == "2":
-            raw = ui.ask(f"{label} (username, link ou ID)")
-            if not raw:
-                return None
+        ui.warn(t("settings.creds.confirm"))
+        if not ui.confirm(t("settings.creds.confirm_short")):
+            return False
+        self.creds.clear()
+        session_path = Path(str(SESSION_FILE) + ".session")
+        if not session_path.exists():
+            session_path = Path(str(SESSION_FILE))
+        if session_path.exists():
             try:
-                return await self.client.get_entity(raw)
-            except Exception as exc:
-                ui.err(f"{t('copy.source_not_found')}: {exc}")
-                ui.pause()
-                return None
+                session_path.unlink()
+            except OSError:
+                pass
+        if self.client is not None:
+            try:
+                await self.client.log_out()
+            except Exception:
+                pass
+        ui.ok(t("settings.creds.cleared"))
+        ui.pause()
+        self._running = False
+        return True
 
-        return None
+    # ── resultados ──────────────────────────────────────────────────────────
 
-    async def _pick_filter(self) -> Optional[str]:
-        ui.clear()
-        ui.header(t("filter.title"))
-        self._trail_line()
-
-        items = [("0", t("filter.all"), t("filter.all.desc"))]
-        items += [
-            (str(i + 1), name, desc)
-            for i, (code, name, desc) in enumerate(list_filters())
-            if code != "all"
-        ]
-        ui.menu(items)
-        ui.info(t("filter.back_hint"))
-        ui.blank()
-
-        choice = ui.ask(t("filter.default"), required=False) or "0"
-        if choice in ("b", "v", ""):
-            return "all"
-        if choice == "0":
-            return "all"
-
-        code = resolve_filter(choice)
-        if code:
-            ui.ok(f"{t('filter.selected')}: {filter_name(code)}")
-            await asyncio.sleep(0.5)
-            return code
-        return "all"
-
-    async def _shutdown(self) -> None:
-        ui.clear()
-        ui.blank()
-        ui.info(t("shutdown.saving"))
-        self.stats.save()
-        ui.info(t("shutdown.db"))
-        db.close()
-        if self.client:
-            ui.info(t("shutdown.disc"))
-            await self.client.disconnect()
-        ui.blank()
-        ui.ok(t("shutdown.bye"))
-        ui.blank()
-
-    def _push(self, name: str) -> None:
-        if not self._trail or self._trail[-1] != name:
-            self._trail.append(name)
-
-    def _pop(self) -> None:
-        if len(self._trail) > 1:
-            self._trail.pop()
-
-    def _trail_line(self) -> None:
-        if len(self._trail) > 1:
-            sep = f"  {C.DARK}›{C.RST}{C.DARK}  "
-            print(f"  {C.DARK}" + sep.join(self._trail) + C.RST)
-            ui.blank()
-
-    def _show_entity(self, ent, label: str) -> None:
-        info = self._entity_info(ent)
-        ui.box(
-            label,
-            [
-                (t("entity.name"), info["name"]),
-                (t("entity.id"), str(info["id"])),
-                (t("entity.type"), info["type"]),
-            ],
-        )
-
-    def _entity_info(self, ent) -> Dict[str, Any]:
-        return {
-            "name": getattr(ent, "title", None)
-            or getattr(ent, "username", str(ent.id)),
-            "id": ent.id,
-            "type": type(ent).__name__,
-            "private": not getattr(ent, "username", None),
-        }
-
-    def _print_result(self, result: Dict[str, Any]) -> None:
+    def _record_result(self, result: Dict[str, Any], elapsed: float) -> None:
         if not result:
             return
-        rows = [
-            (t("result.sent"), str(result.get("done", 0))),
-            (t("result.skipped"), str(result.get("skipped", 0))),
-            (t("result.errors"), str(result.get("errors", 0))),
-            (t("result.time"), result.get("elapsed", "—")),
-        ]
-        if result.get("speed"):
-            rows.append(("Velocidade", result["speed"]))
-        if result.get("albums", 0):
-            rows.append(("Albuns", str(result["albums"])))
+        try:
+            self.stats.inc("total", int(result.get("done", 0)))
+            self.stats.add_bytes(int(result.get("bytes", 0)), "sent")
+            self.stats.add_time(elapsed)
+        except Exception:
+            pass
 
-        ui.box(t("result.title"), rows, color=C.GREEN)
-        ui.pause()
+    def _print_result(self, result: Dict[str, Any], pause: bool = True) -> None:
+        if not result:
+            if pause:
+                ui.pause()
+            return
+        rows = [
+            (t("result.sent"), Fmt.number(result.get("done", 0))),
+            (t("result.skipped"), Fmt.number(result.get("skipped", 0))),
+            (t("result.duplicates"), Fmt.number(result.get("duplicates", 0))),
+            (t("result.errors"), Fmt.number(result.get("errors", 0))),
+            (t("result.time"), str(result.get("elapsed", "—"))),
+        ]
+        if result.get("albums"):
+            rows.append((t("result.albums"), Fmt.number(result["albums"])))
+        if result.get("bytes"):
+            rows.append((t("result.bytes"), Fmt.size(result["bytes"])))
+        if result.get("speed"):
+            rows.append((t("result.speed"), str(result["speed"])))
+        ui.box(t("result.title"), rows,
+               color=C.GREEN if not result.get("errors") else C.AMBER)
+        if pause:
+            ui.pause()

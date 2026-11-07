@@ -1,155 +1,170 @@
 """
-filters.py — Message filtering engine with i18n support.
+filters.py — Filtros de mensagens (combináveis) e seleção interativa.
 """
 
+from __future__ import annotations
+
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
-from i18n import t
-
 FilterFn = Callable[[object], bool]
 
+_URL_RE = re.compile(r"(https?://|www\.|t\.me/)", re.I)
 
-# ── Individual predicates ─────────────────────────────────────────────────────
 
-def _is_photo(msg) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaPhoto
-        return isinstance(msg.media, MessageMediaPhoto)
-    except Exception:
+# ── Predicados ────────────────────────────────────────────────────────────────
+
+
+def media_of(msg):
+    return getattr(msg, "media", None)
+
+
+def is_photo(msg) -> bool:
+    name = type(media_of(msg)).__name__
+    return name in ("MessageMediaPhoto",)
+
+
+def is_document(msg) -> bool:
+    return type(media_of(msg)).__name__ == "MessageMediaDocument"
+
+
+def _doc_mime(msg) -> str:
+    media = media_of(msg)
+    doc = getattr(media, "document", None)
+    return (getattr(doc, "mime_type", "") or "").lower() if doc else ""
+
+
+def is_video(msg) -> bool:
+    if not is_document(msg):
         return False
+    mime = _doc_mime(msg)
+    if mime.startswith("video/"):
+        return True
+    attrs = getattr(getattr(media_of(msg), "document", None), "attributes", []) or []
+    return any(type(a).__name__ == "DocumentAttributeVideo" for a in attrs)
 
 
-def _is_video(msg) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaDocument
-        if not isinstance(msg.media, MessageMediaDocument):
-            return False
-        mime = getattr(msg.media.document, "mime_type", "") or ""
-        return "video" in mime.lower()
-    except Exception:
+def is_audio(msg) -> bool:
+    if not is_document(msg):
         return False
+    mime = _doc_mime(msg)
+    if mime.startswith("audio/") or "voice" in mime or "ogg" in mime:
+        return True
+    attrs = getattr(getattr(media_of(msg), "document", None), "attributes", []) or []
+    return any(type(a).__name__ in ("DocumentAttributeAudio",) for a in attrs)
 
 
-def _is_audio(msg) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaDocument, DocumentAttributeAudio
-        if not isinstance(msg.media, MessageMediaDocument):
-            return False
-        doc  = msg.media.document
-        mime = getattr(doc, "mime_type", "") or ""
-        if "audio" in mime.lower() or "voice" in mime.lower():
-            return True
-        return any(isinstance(a, DocumentAttributeAudio)
-                   for a in getattr(doc, "attributes", []))
-    except Exception:
+def is_sticker(msg) -> bool:
+    name = type(media_of(msg)).__name__
+    if name == "MessageMediaDocument":
+        attrs = getattr(getattr(media_of(msg), "document", None), "attributes", []) or []
+        return any(type(a).__name__ == "DocumentAttributeSticker" for a in attrs)
+    return False
+
+
+def is_plain_document(msg) -> bool:
+    """Documentos que não são vídeo, áudio, sticker ou imagem."""
+    if not is_document(msg) or is_sticker(msg):
         return False
-
-
-def _is_document(msg) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaDocument
-        if not isinstance(msg.media, MessageMediaDocument):
-            return False
-        mime = getattr(msg.media.document, "mime_type", "") or ""
-        return not any(x in mime.lower() for x in ("video", "audio", "image"))
-    except Exception:
+    if is_video(msg) or is_audio(msg):
         return False
+    mime = _doc_mime(msg)
+    return not mime.startswith("image/")
 
 
-def _is_text(msg) -> bool:
-    try:
-        return bool(msg.text and not msg.media)
-    except Exception:
+def is_text(msg) -> bool:
+    return bool((getattr(msg, "message", "") or "").strip()) and media_of(msg) is None
+
+
+def has_link(msg) -> bool:
+    text = getattr(msg, "message", "") or ""
+    return bool(_URL_RE.search(text))
+
+
+def is_media(msg) -> bool:
+    return media_of(msg) is not None
+
+
+def is_recent(msg, days: int = 7) -> bool:
+    date = getattr(msg, "date", None)
+    if not date:
         return False
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date >= datetime.now(timezone.utc) - timedelta(days=days)
 
 
-def _has_link(msg) -> bool:
-    try:
-        text = (msg.text or "").lower()
-        return any(p in text for p in ("http://", "https://", "t.me/"))
-    except Exception:
-        return False
-
-
-def _is_media(msg) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-        return isinstance(msg.media, (MessageMediaPhoto, MessageMediaDocument))
-    except Exception:
-        return False
-
-
-def _is_large(msg, threshold: int = 50 * 1024 * 1024) -> bool:
-    try:
-        from telethon.tl.types import MessageMediaDocument
-        if not isinstance(msg.media, MessageMediaDocument):
-            return False
-        return (getattr(msg.media.document, "size", 0) or 0) > threshold
-    except Exception:
-        return False
-
-
-def _is_recent(msg, days: int = 7) -> bool:
-    try:
-        if not msg.date:
-            return False
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        date   = msg.date
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
-        return date >= cutoff
-    except Exception:
-        return False
-
-
-def _is_original(msg) -> bool:
+def is_original(msg) -> bool:
     return not getattr(msg, "fwd_from", None)
 
 
-# ── Registry ──────────────────────────────────────────────────────────────────
-# code → (i18n_name_key, i18n_desc_key, predicate)
+def is_large(msg, threshold: int = 50 * 1024 * 1024) -> bool:
+    doc = getattr(media_of(msg), "document", None)
+    return bool(doc) and int(getattr(doc, "size", 0) or 0) > threshold
+
+
+# ── Registro: código → (chave i18n do nome, chave da descrição, função) ───────
 
 _REGISTRY: Dict[str, Tuple[str, str, FilterFn]] = {
     "all":       ("filter.all",       "filter.all.desc",       lambda m: True),
-    "photos":    ("filter.photos",    "filter.photos.desc",    _is_photo),
-    "videos":    ("filter.videos",    "filter.videos.desc",    _is_video),
-    "audio":     ("filter.audio",     "filter.audio.desc",     _is_audio),
-    "documents": ("filter.documents", "filter.documents.desc", _is_document),
-    "text":      ("filter.text",      "filter.text.desc",      _is_text),
-    "links":     ("filter.links",     "filter.links.desc",     _has_link),
-    "media":     ("filter.media",     "filter.media.desc",     _is_media),
-    "large":     ("filter.large",     "filter.large.desc",     _is_large),
-    "recent":    ("filter.recent",    "filter.recent.desc",    _is_recent),
-    "original":  ("filter.original",  "filter.original.desc",  _is_original),
+    "photos":    ("filter.photos",    "filter.photos.desc",    is_photo),
+    "videos":    ("filter.videos",    "filter.videos.desc",    is_video),
+    "audio":     ("filter.audio",     "filter.audio.desc",     is_audio),
+    "documents": ("filter.documents", "filter.documents.desc", is_plain_document),
+    "text":      ("filter.text",      "filter.text.desc",      is_text),
+    "links":     ("filter.links",     "filter.links.desc",     has_link),
+    "media":     ("filter.media",     "filter.media.desc",     is_media),
+    "large":     ("filter.large",     "filter.large.desc",     is_large),
+    "recent":    ("filter.recent",    "filter.recent.desc",    is_recent),
+    "original":  ("filter.original",  "filter.original.desc",  is_original),
 }
 
-_NUM_MAP: Dict[str, str] = {str(i + 1): k for i, k in enumerate(_REGISTRY)}
+ORDER: List[str] = list(_REGISTRY.keys())
+_NUM_MAP: Dict[str, str] = {str(i + 1): code for i, code in enumerate(ORDER)}
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── API pública ───────────────────────────────────────────────────────────────
+
+
+def _tr(key: str, fallback: str) -> str:
+    try:
+        from i18n import t
+
+        return t(key)
+    except Exception:
+        return fallback
+
 
 def list_filters() -> List[Tuple[str, str, str]]:
-    """Return list of (code, translated_name, translated_desc)."""
-    return [(code, t(nk), t(dk)) for code, (nk, dk, _) in _REGISTRY.items()]
+    return [
+        (code, _tr(name_key, code), _tr(desc_key, ""))
+        for code, (name_key, desc_key, _) in _REGISTRY.items()
+    ]
 
 
 def get_name(code: str) -> str:
     entry = _REGISTRY.get(code)
-    return t(entry[0]) if entry else code
+    return _tr(entry[0], code) if entry else code
 
 
-def resolve(code: str) -> Optional[str]:
-    if code in _REGISTRY:
-        return code
-    return _NUM_MAP.get(code)
+def resolve(user_input: str) -> Optional[str]:
+    """Aceita código ('photos') ou número do menu ('2')."""
+    value = (user_input or "").strip().lower()
+    if value in _REGISTRY:
+        return value
+    return _NUM_MAP.get(value)
 
 
 def apply(code: str, msg) -> bool:
     entry = _REGISTRY.get(code)
-    if not entry:
+    if not entry or code == "all":
         return True
     try:
         return entry[2](msg)
     except Exception:
         return True
+
+
+def available_codes() -> List[str]:
+    return list(ORDER)

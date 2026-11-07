@@ -1,127 +1,102 @@
 @echo off
-REM TELECOPY Build Script - Compilação automática para .exe
-REM Execute este arquivo para compilar o programa
-
+REM ════════════════════════════════════════════════════════════════════════════
+REM  TELECOPY — script de compilação (gera um .exe único com Nuitka)
+REM  Uso: duplo clique, ou "build.bat" no terminal.
+REM ════════════════════════════════════════════════════════════════════════════
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 cls
-
 echo.
-echo ╔════════════════════════════════════════════════════════════════════════════╗
-echo ║          TELECOPY v3.0.1 — Script de Compilação / Build Script            ║
-echo ╚════════════════════════════════════════════════════════════════════════════╝
+echo  ============================================================
+echo    TELECOPY — compilacao do executavel
+echo  ============================================================
 echo.
 
-echo ✓ Python encontrado: 
-cd C:\Users\montx2\Desktop\Telecopy
-echo
-
-REM Verifica se Python está instalado
-python --version >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo ❌ ERRO: Python não encontrado no PATH
-    echo.
-    echo    Instale Python 3.10+ de: https://www.python.org/downloads/
-    echo    IMPORTANTE: Marque a opção "Add Python to PATH" durante a instalação
-    echo.
+where python >nul 2>&1
+if errorlevel 1 (
+    echo  [ERRO] Python nao encontrado no PATH.
+    echo         Instale de https://www.python.org/downloads/
+    echo         e marque "Add Python to PATH".
     pause
     exit /b 1
 )
-
-echo ✓ Python encontrado: 
+echo  Python:
 python --version
 echo.
 
-REM Verifica/instala Nuitka
-echo 📦 Verificando Nuitka...
-python -m nuitka --version >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo ⚠ Nuitka não está instalado. Instalando...
-    pip install nuitka zstandard
-    if %ERRORLEVEL% NEQ 0 (
-        echo ❌ Erro ao instalar Nuitka
-        pause
-        exit /b 1
-    )
-)
-echo ✓ Nuitka está pronto
-echo.
-
-REM Verifica dependências Python
-echo 📦 Verificando dependências do projeto...
-python -m pip install -q -r requirements.txt
-if %ERRORLEVEL% NEQ 0 (
-    echo ❌ Erro ao instalar dependências
-    echo    Execute: pip install -r requirements.txt
+echo  [1/4] Instalando dependencias...
+python -m pip install --upgrade pip >nul 2>&1
+python -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo  [ERRO] Falha ao instalar dependencias.
     pause
     exit /b 1
 )
-echo ✓ Dependências instaladas
-echo.
 
-REM Remove compilações anteriores
-if exist "main.exe" (
-    echo 🗑 Removendo compilação anterior...
-    del /f /q "main.exe" >nul 2>&1
-)
-if exist "main.dist" (
-    rmdir /s /q "main.dist" >nul 2>&1
-)
 echo.
+echo  [2/4] Instalando Nuitka e Zstandard...
+python -m pip install --upgrade nuitka zstandard ordered-set
+if errorlevel 1 (
+    echo  [ERRO] Falha ao instalar o Nuitka.
+    pause
+    exit /b 1
+)
 
-REM Compila
-echo 🔨 Compilando TELECOPY para .exe...
-echo    (Isto pode levar 2-5 minutos na primeira execução)
 echo.
+echo  [3/4] Rodando a bateria de testes...
+python tests\test_core.py >nul 2>&1
+if errorlevel 1 (
+    echo  [AVISO] Os testes falharam. Rode "python tests\test_core.py" para ver.
+    choice /c SN /m "Continuar mesmo assim"
+    if errorlevel 2 exit /b 1
+) else (
+    echo  Testes OK.
+)
+
+echo.
+echo  [4/4] Compilando (pode levar de 2 a 8 minutos)...
+if exist main.dist rmdir /s /q main.dist
+if exist main.onefile-build rmdir /s /q main.onefile-build
+if exist Telecopy.exe del /q Telecopy.exe
 
 python -m nuitka ^
     --onefile ^
+    --assume-yes-for-downloads ^
     --console ^
-    --windows-icon-from-ico=ico.ico ^
-    --follow-imports ^
+    --enable-plugin=anti-bloat ^
+    --windows-icon-from-ico=telecopy.ico ^
+    --company-name=montx2 ^
+    --product-name=TELECOPY ^
+    --file-version=4.0.0.0 ^
+    --product-version=4.0.0.0 ^
+    --file-description="TELECOPY - Replicador de Canais Telegram" ^
     --include-package=telethon ^
     --include-package=cryptography ^
     --include-package=psutil ^
     --include-package=rich ^
+    --nofollow-import-to=tkinter ^
+    --nofollow-import-to=pytest ^
+    --nofollow-import-to=tests ^
     --remove-output ^
+    --output-filename=Telecopy.exe ^
     main.py
 
-if %ERRORLEVEL% EQU 0 (
+if errorlevel 1 (
     echo.
-    echo ╔════════════════════════════════════════════════════════════════════════════╗
-    echo ║                      ✅ COMPILAÇÃO CONCLUÍDA!                             ║
-    echo ╚════════════════════════════════════════════════════════════════════════════╝
-    echo.
-    echo    📁 Arquivo gerado: main.exe
-    echo    📍 Localização: %CD%\main.exe
-    echo.
-    echo    Para executar: double-click no main.exe OU execute:
-    echo.
-    echo       main.exe
-    echo.
-    echo    Se a janela desaparecer, procure por:
-    echo       data\logs\startup.log
-    echo.
-    pause
-    
-    REM Oferece executar logo
-    set /p RUN="Executar agora? (S/N): "
-    if /i "!RUN!"=="S" (
-        cls
-        main.exe
-    )
-) else (
-    echo.
-    echo ╔════════════════════════════════════════════════════════════════════════════╗
-    echo ║                  ❌ ERRO DURANTE COMPILAÇÃO                              ║
-    echo ╚════════════════════════════════════════════════════════════════════════════╝
-    echo.
-    echo    Verifique as mensagens de erro acima.
-    echo.
-    echo    Se precisar de ajuda:
-    echo    1. Verifique que Python 3.10+ está instalado
-    echo    2. Execute: pip install -r requirements.txt
-    echo    3. Tente novamente
-    echo.
+    echo  [ERRO] A compilacao falhou. Veja as mensagens acima.
     pause
     exit /b 1
 )
+
+echo.
+echo  ============================================================
+echo    BUILD CONCLUIDO: %CD%\Telecopy.exe
+echo  ============================================================
+echo.
+echo  Crie o instalador com:  iscc setup.iss
+echo.
+choice /c SN /m "Executar agora"
+if errorlevel 2 goto :end
+Telecopy.exe
+:end
+endlocal

@@ -1,0 +1,48 @@
+# ── Dados do usuário (nunca versionar) ────────────────────────────────────────
+data/
+!data/.gitkeep
+
+# Credenciais / segredos
+*.pfx
+*.pem
+*.key
+*.session
+*.session-journal
+*.enc
+local.key
+
+# ── Build / artefatos ─────────────────────────────────────────────────────────
+main.build/
+demo_demo*
+main.dist/
+main.onefile-build/
+*.build/
+dist/
+build/
+*.exe
+*.pyd
+*.dll
+*.so
+*.obj
+*.c
+!build.bat
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Editores / sistema ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

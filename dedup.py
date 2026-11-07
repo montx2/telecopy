@@ -1,76 +1,66 @@
 """
-dedup.py — Three-layer deduplication engine.
+dedup.py — Motor de deduplicação em três camadas.
 
-Lookup order (fastest → authoritative):
-    1. LRU cache   — in-memory, O(1)
-    2. Bloom filter — in-memory, O(k), probabilistic (FP ≈ 0.1 %)
-    3. SQLite      — on-disk,   O(1) with index, always correct
+    1. LRU em memória   — O(1), primeiras ~50 mil mensagens
+    2. Bloom filter     — O(k), probabilístico (falso positivo ≈ 0,1 %)
+    3. SQLite           — fonte da verdade, índice por (hash, destino)
 
-On a cache miss in layers 1 and 2 we go to SQLite, so a Bloom
-false-positive just adds one unnecessary DB query — harmless.
+Um falso positivo do Bloom apenas gera uma consulta extra ao SQLite,
+nunca um "skip" indevido.
 """
+
+from __future__ import annotations
 
 import hashlib
 import math
 import threading
 from collections import OrderedDict
-from typing import Optional
+from typing import Dict, Optional
 
 from config import BLOOM_CAPACITY, BLOOM_FP_RATE, LRU_SIZE
 
 
 # ── Bloom filter ──────────────────────────────────────────────────────────────
 
-class BloomFilter:
-    """
-    Space-efficient probabilistic membership test.
 
-    Uses double hashing (MD5 + SHA-1) to simulate k independent hash
-    functions.  No external dependencies; backed by a bytearray.
-    """
+class BloomFilter:
+    """Bloom filter com dupla hash (blake2b + sha1) e vetor de bits."""
 
     def __init__(self, capacity: int = BLOOM_CAPACITY, fp_rate: float = BLOOM_FP_RATE) -> None:
-        self.capacity = capacity
-        self.fp_rate  = fp_rate
+        self.capacity = max(1, int(capacity))
+        self.fp_rate = fp_rate
+        self._m = max(64, int(-(self.capacity * math.log(fp_rate)) / (math.log(2) ** 2)))
+        self._k = max(1, int((self._m / self.capacity) * math.log(2)))
+        self._bits = bytearray((self._m + 7) // 8)
+        self._count = 0
+        self._lock = threading.RLock()
 
-        # m = -(n · ln p) / (ln 2)²
-        self._m = max(1, int(-(capacity * math.log(fp_rate)) / math.log(2) ** 2))
-        # k = (m/n) · ln 2
-        self._k = max(1, int((self._m / capacity) * math.log(2)))
-
-        self._bits   = bytearray((self._m + 7) // 8)
-        self._count  = 0
-        self._lock   = threading.RLock()
-
-    # -- internal helpers ------------------------------------------------------
+    def _hashes(self, key: str) -> tuple[int, int]:
+        data = key.encode("utf-8", "replace")
+        h1 = int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "big")
+        h2 = int.from_bytes(hashlib.sha1(data).digest()[:8], "big") | 1
+        return h1, h2
 
     def _positions(self, key: str):
-        h1 = int(hashlib.md5(key.encode()).hexdigest(), 16)
-        h2 = int(hashlib.sha1(key.encode()).hexdigest(), 16)
+        h1, h2 = self._hashes(key)
         for i in range(self._k):
             yield (h1 + i * h2) % self._m
 
-    def _set(self, pos: int) -> None:
-        self._bits[pos >> 3] |= 1 << (pos & 7)
-
-    def _test(self, pos: int) -> bool:
-        return bool(self._bits[pos >> 3] & (1 << (pos & 7)))
-
-    # -- public API ------------------------------------------------------------
-
     def add(self, key: str) -> None:
         with self._lock:
-            for p in self._positions(key):
-                self._set(p)
+            for pos in self._positions(key):
+                self._bits[pos >> 3] |= 1 << (pos & 7)
             self._count += 1
 
     def __contains__(self, key: str) -> bool:
         with self._lock:
-            return all(self._test(p) for p in self._positions(key))
+            return all(
+                self._bits[pos >> 3] & (1 << (pos & 7)) for pos in self._positions(key)
+            )
 
     def clear(self) -> None:
         with self._lock:
-            self._bits  = bytearray((self._m + 7) // 8)
+            self._bits = bytearray((self._m + 7) // 8)
             self._count = 0
 
     @property
@@ -82,30 +72,28 @@ class BloomFilter:
         return len(self._bits) / 1024
 
     def fp_current(self) -> float:
-        """Estimated current false-positive rate."""
         if self._count == 0:
             return 0.0
         return (1 - math.exp(-self._k * self._count / self._m)) ** self._k
 
-    def stats(self) -> dict:
+    def stats(self) -> Dict[str, float]:
         return {
-            "capacity":    self.capacity,
-            "items":       self._count,
-            "bits":        self._m,
-            "hash_funcs":  self._k,
-            "memory_kb":   round(self.memory_kb, 2),
-            "fp_rate":     round(self.fp_current() * 100, 4),
+            "capacity": self.capacity,
+            "items": self._count,
+            "bits": self._m,
+            "hash_funcs": self._k,
+            "memory_kb": round(self.memory_kb, 1),
+            "fp_rate": round(self.fp_current() * 100, 4),
         }
 
 
-# ── LRU cache ─────────────────────────────────────────────────────────────────
+# ── LRU ───────────────────────────────────────────────────────────────────────
+
 
 class LRUCache:
-    """Fixed-capacity LRU cache mapping str keys to int values."""
-
     def __init__(self, capacity: int = LRU_SIZE) -> None:
-        self._capacity = capacity
-        self._cache: OrderedDict[str, int] = OrderedDict()
+        self._capacity = max(1, int(capacity))
+        self._cache: "OrderedDict[str, int]" = OrderedDict()
         self._lock = threading.RLock()
 
     def get(self, key: str) -> Optional[int]:
@@ -119,69 +107,71 @@ class LRUCache:
         with self._lock:
             self._cache[key] = value
             self._cache.move_to_end(key)
-            if len(self._cache) > self._capacity:
+            while len(self._cache) > self._capacity:
                 self._cache.popitem(last=False)
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
 
-    def stats(self) -> dict:
+    def stats(self) -> Dict[str, float]:
         return {
-            "items":    len(self._cache),
+            "items": len(self._cache),
             "capacity": self._capacity,
             "usage_pct": round(len(self._cache) / self._capacity * 100, 1),
         }
 
 
-# ── Deduplication engine ──────────────────────────────────────────────────────
+# ── Motor ─────────────────────────────────────────────────────────────────────
+
 
 class DedupEngine:
-    """
-    Orchestrates the three deduplication layers.
+    """Orquestra as três camadas. Recebe o repositório (injeção de dependência)."""
 
-    Callers interact with two async methods:
-        check(hash, dest_id) → Optional[int]
-        register(hash, dest_id, msg_id, size, source_id)
-
-    The engine does NOT import `database` directly — it receives a
-    repository object at construction time to stay testable.
-    """
-
-    def __init__(self, repo) -> None:
-        self._repo  = repo
-        self._lru   = LRUCache()
+    def __init__(self, repo, enabled: bool = True) -> None:
+        self._repo = repo
+        self.enabled = enabled
+        self._lru = LRUCache()
         self._bloom = BloomFilter()
+        self._warmed: set[int] = set()
+        self._lock = threading.RLock()
 
-    # -- warm-up ---------------------------------------------------------------
-
-    def warm_up(self, dest_id: int) -> None:
-        """Populate Bloom filter + LRU from recently stored hashes."""
-        for h, msg_id in self._repo.load_dedup_hashes(dest_id):
-            key = f"{h}:{dest_id}"
-            self._bloom.add(key)
-            self._lru.put(key, msg_id)
-
-    # -- public API (called from async context via asyncio.to_thread) ----------
+    def warm_up(self, dest_id: int, limit: int = 200_000) -> int:
+        """Carrega hashes já enviados para este destino (uma vez por execução)."""
+        if not self.enabled or dest_id in self._warmed:
+            return 0
+        with self._lock:
+            if dest_id in self._warmed:
+                return 0
+            count = 0
+            try:
+                for content_hash, msg_id in self._repo.load_dedup_hashes(dest_id, limit):
+                    key = f"{content_hash}:{dest_id}"
+                    self._bloom.add(key)
+                    self._lru.put(key, msg_id)
+                    count += 1
+            except Exception:
+                count = 0
+            self._warmed.add(dest_id)
+            return count
 
     def check(self, content_hash: str, dest_id: int) -> Optional[int]:
-        """
-        Return previously sent msg_id if duplicate, else None.
-        This method is synchronous — wrap with asyncio.to_thread if needed.
-        """
+        """Retorna o id da mensagem já enviada ou None."""
+        if not self.enabled or not content_hash:
+            return None
         key = f"{content_hash}:{dest_id}"
 
-        # 1. LRU
         hit = self._lru.get(key)
         if hit is not None:
             return hit
 
-        # 2. Bloom filter — definitive miss
         if key not in self._bloom:
-            return None
+            return None  # definitivamente novo
 
-        # 3. SQLite — resolves potential false positive
-        msg_id = self._repo.check_dedup(content_hash, dest_id)
+        try:
+            msg_id = self._repo.check_dedup(content_hash, dest_id)
+        except Exception:
+            return None
         if msg_id is not None:
             self._lru.put(key, msg_id)
         return msg_id
@@ -191,80 +181,124 @@ class DedupEngine:
         content_hash: str,
         dest_id: int,
         sent_msg_id: int,
-        file_size: int,
+        file_size: int = 0,
         source_id: int = 0,
     ) -> None:
-        """Record a successful send in all three layers."""
+        if not content_hash:
+            return
         key = f"{content_hash}:{dest_id}"
         self._lru.put(key, sent_msg_id)
         self._bloom.add(key)
-        self._repo.register_dedup(content_hash, dest_id, sent_msg_id, file_size, source_id)
+        if self.enabled:
+            try:
+                self._repo.register_dedup(
+                    content_hash, dest_id, sent_msg_id, file_size, source_id
+                )
+            except Exception:
+                pass
 
-    # -- stats -----------------------------------------------------------------
+    def reset(self) -> None:
+        self._lru.clear()
+        self._bloom.clear()
+        self._warmed.clear()
 
-    def stats(self) -> dict:
-        return {
-            "lru":   self._lru.stats(),
-            "bloom": self._bloom.stats(),
-        }
+    def stats(self) -> Dict[str, Dict[str, float]]:
+        return {"lru": self._lru.stats(), "bloom": self._bloom.stats()}
 
     def format_stats(self) -> str:
-        s = self.stats()
-        lru   = s["lru"]
-        bloom = s["bloom"]
+        lru = self._lru.stats()
+        bloom = self._bloom.stats()
         return (
-            f"LRU {lru['items']}/{lru['capacity']} ({lru['usage_pct']}%)  "
-            f"·  Bloom {bloom['items']} items  {bloom['memory_kb']} KB  "
-            f"FP {bloom['fp_rate']}%"
+            f"LRU {lru['items']}/{lru['capacity']} ({lru['usage_pct']}%) · "
+            f"Bloom {bloom['items']} itens {bloom['memory_kb']} KB · FP {bloom['fp_rate']}%"
         )
 
 
-# ── Content hashing helpers ───────────────────────────────────────────────────
+# ── Hashes de conteúdo ────────────────────────────────────────────────────────
+
 
 def hash_bytes(data: bytes, sample: int = 1024 * 1024) -> str:
-    """
-    SHA-256 of data.  For large files, hash first + last MB + size
-    to keep things fast without sacrificing practical uniqueness.
-    """
+    """SHA-256 rápido: arquivos grandes usam início + fim + tamanho."""
     if len(data) <= sample * 2:
         return hashlib.sha256(data).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(data[:sample])
+    digest.update(data[-sample:])
+    digest.update(str(len(data)).encode())
+    return digest.hexdigest()
 
-    h = hashlib.sha256()
-    h.update(data[:sample])
-    h.update(data[-sample:])
-    h.update(str(len(data)).encode())
-    return h.hexdigest()
+
+def hash_file(path: str, sample: int = 1024 * 1024) -> str:
+    """Hash de arquivo sem carregá-lo inteiro na memória."""
+    import os
+
+    size = os.path.getsize(path)
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        if size <= sample * 2:
+            for chunk in iter(lambda: fh.read(1024 * 256), b""):
+                digest.update(chunk)
+        else:
+            digest.update(fh.read(sample))
+            fh.seek(-sample, os.SEEK_END)
+            digest.update(fh.read(sample))
+            digest.update(str(size).encode())
+    return digest.hexdigest()
+
+
+def _media_identity(msg) -> str:
+    """Identidade estável da mídia (documento/foto do Telegram)."""
+    media = getattr(msg, "media", None)
+    if media is None:
+        return "none"
+
+    doc = getattr(media, "document", None)
+    if doc is not None:
+        doc_id = getattr(doc, "id", 0) or 0
+        size = getattr(doc, "size", 0) or 0
+        mime = getattr(doc, "mime_type", "") or ""
+        access = getattr(doc, "access_hash", 0) or 0
+        return f"doc:{doc_id}:{size}:{mime}:{access}"
+
+    photo = getattr(media, "photo", None)
+    if photo is not None:
+        # fotos são recomprimidas ao reenviar: usa o id do arquivo original
+        return f"photo:{getattr(photo, 'id', 0)}:{getattr(photo, 'access_hash', 0)}"
+
+    # geo, contato, enquete, etc.
+    return f"other:{type(media).__name__}"
 
 
 def hash_message(msg) -> str:
-    """Build a stable hash from a Telethon message object."""
-    parts = []
+    """
+    Hash estável por conteúdo.  Duas cópias da mesma mensagem (mesmo que
+    em canais diferentes) produzem o mesmo hash.
+    """
+    parts: list[str] = []
 
-    # Text
+    media_id = _media_identity(msg)
+    parts.append(f"m:{media_id}")
+
     text = (
-        getattr(msg, "text", None)
-        or getattr(msg, "caption", None)
-        or getattr(msg, "message", None)
+        getattr(msg, "message", None)
+        or getattr(msg, "text", None)
+        or getattr(msg, "raw_text", None)
         or ""
     )
-    parts.append(f"t:{text[:500]}")
+    if text:
+        parts.append(f"t:{text.strip()}")
 
-    # Media identity
-    for attr in ("photo", "video", "audio", "voice", "document", "sticker"):
-        obj = getattr(msg, attr, None)
-        if obj:
-            parts.append(
-                f"m:{attr}:{getattr(obj, 'id', 0)}:{getattr(obj, 'size', 0)}"
-            )
-            break
+    if media_id == "none":
+        # Mensagens só de texto: granularidade de dia evita colapsar
+        # avisos legítimos repetidos em datas diferentes.
+        date = getattr(msg, "date", None)
+        if date is not None:
+            try:
+                parts.append(f"d:{date.strftime('%Y%m%d')}")
+            except Exception:
+                pass
     else:
-        parts.append("m:none")
+        # Legendas diferentes de uma mesma mídia continuam sendo mídias distintas
+        parts.append(f"g:{getattr(msg, 'grouped_id', '') or ''}")
 
-    # Date (day granularity — avoids timezone drift issues)
-    if getattr(msg, "date", None):
-        try:
-            parts.append(f"d:{msg.date.strftime('%Y%m%d')}")
-        except Exception:
-            pass
-
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+    return hashlib.sha256("|".join(parts).encode("utf-8", "replace")).hexdigest()
