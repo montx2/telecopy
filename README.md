@@ -333,7 +333,7 @@ puder ser lido, o programa mostra o caminho e pede as credenciais novamente.
 | “Dependências ausentes” | Rode o comando de `pip install` que o programa mostra |
 | “Não foi possível conectar ao Telegram” | Verifique internet/firewall/proxy; em redes corporativas pode ser necessário liberar a porta 443. Use `--debug` para ver detalhes na pasta de dados indicada pelo programa |
 | O código de login não chegou | Confira o método indicado pelo TELECOPY: o código pode aparecer no chat oficial “Telegram” em outro aparelho conectado, por SMS ou outro método. Não solicite códigos em sequência; o Telegram pode aplicar limite temporário |
-| A cópia mostra `0 enviadas` | Veja a primeira falha exibida. Para canais, a conta precisa de permissão para publicar no destino; se o Telegram marcou a origem como protegida, a cópia é bloqueada. Falhas repetidas agora interrompem a execução cedo |
+| A cópia mostra `0 enviadas` | Veja a primeira falha exibida. Para canais, a conta precisa de permissão para publicar no destino; em canais com restrição de encaminhamento, o TELECOPY usa automaticamente o modo de reenvio (download + upload). Falhas repetidas agora interrompem a execução cedo |
 | API ID/Hash é pedido em toda inicialização | Veja o caminho mostrado após “Credenciais salvas e verificadas”. Execute `python main.py --check` e confirme que a pasta de dados está gravável; executáveis usam o diretório estável do usuário |
 | “Canal não encontrado” | Confirme que você é **membro** (origem) e **admin** (destino) e que o link/ID está correto. Use Ferramentas → 1 para testar |
 | “Você precisa ser ADMINISTRADOR no destino” | No Telegram: canal → Administradores → adicionar você com permissão *Postar mensagens* |

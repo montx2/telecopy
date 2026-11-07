@@ -278,8 +278,8 @@ _s("copy.stop_fatal", "Cópia interrompida: essa falha bloqueia o envio. Confira
    "Copy stopped: this error blocks sending. Check the source, destination and your permissions before trying again.")
 _s("copy.stop_flood", "Cópia pausada após um limite temporário do Telegram. Aguarde o tempo indicado antes de tentar novamente.",
    "Copy paused after a temporary Telegram limit. Wait the indicated time before trying again.")
-_s("copy.source_protected", "O Telegram marcou o conteúdo deste canal como protegido. O TELECOPY não vai copiar nem tentar contornar essa restrição. Peça autorização ao responsável pelo canal.",
-   "Telegram marked this channel's content as protected. TELECOPY will not copy it or try to bypass that restriction. Ask the channel owner for permission.")
+_s("copy.source_protected", "Canal com restrição de encaminhamento: usando modo de reenvio (download + upload).",
+   "Channel with forwarding restriction: using re-send mode (download + upload).")
 _s("copy.limit_reached", "Limite diário de {limit} mensagens atingido. Aguarde amanhã ou ajuste em Configurações.",
    "Daily limit of {limit} messages reached. Wait until tomorrow or change it in Settings.")
 _s("copy.limit_warn", "Atenção: {count}/{limit} mensagens hoje.", "Warning: {count}/{limit} messages today.")

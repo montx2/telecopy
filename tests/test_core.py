@@ -549,20 +549,75 @@ def test_copy_valida_permissao_do_destino_antes_da_coleta() -> None:
     repo.close()
 
 
-def test_copy_para_em_canal_protegido() -> None:
-    mensagens = [text_message(1, "não deve copiar")]
+def test_copy_canal_protegido_copia_normalmente() -> None:
+    mensagens = [
+        text_message(1, "aula 1"),
+        photo_message(2, "quadro"),
+        document_message(3, "apostila.pdf"),
+    ]
     source, dest = channel(-1001, "Origem protegida"), channel(-2002, "Destino")
     source.noforwards = True
     client = FakeClient(mensagens)
     client.register_entity(source)
     client.register_entity(dest)
     repo = Repository(Path(_TMP) / "protected_source.db")
-    copier = Copier(client, repo=repo, config=RunConfig(workers=1), rich_ok=False)
+    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1), rich_ok=False)
     result = asyncio.run(copier.run(source, dest))
-    check(result["done"] == 0 and result["errors"] == 1,
-          "canal protegido não é copiado")
-    check("protegido" in result["first_error"].lower(),
-          "explica a proteção do canal")
+    check(result["done"] == 3 and result["errors"] == 0,
+          f"canal protegido é copiado por download + reenvio ({result})")
+    check(result["complete"] is True, "auditoria confirma cópia completa do canal protegido")
+    check(len(client.sent) == 3, "todas as mensagens foram reenviadas ao destino")
+    repo.close()
+
+
+def test_copy_canal_protegido_em_modo_forward_faz_fallback_para_reenvio() -> None:
+    mensagens = [
+        text_message(1, "texto protegido"),
+        photo_message(2, "foto protegida"),
+    ]
+    source, dest = channel(-1001, "Origem protegida"), channel(-2002, "Destino")
+    source.noforwards = True
+    client = FakeClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(Path(_TMP) / "protected_forward_fallback.db")
+    copier = Copier(
+        client, repo=repo,
+        config=RunConfig(workers=1, delay=0.1, forward_mode=True),
+        rich_ok=False,
+    )
+    result = asyncio.run(copier.run(source, dest, forward=True))
+    check(result["done"] == 2 and result["errors"] == 0,
+          f"modo forward alterna automaticamente para reenvio em canal protegido ({result})")
+    check(not client.forwarded, "não tenta forward_messages quando origem tem noforwards")
+    check(len(client.sent) == 2, "mensagens enviadas por download + upload")
+    repo.close()
+
+
+def test_forward_restrito_pelo_servidor_faz_fallback_para_reenvio() -> None:
+    class RestrictedForwardClient(FakeClient):
+        async def forward_messages(self, entity, messages, from_peer=None, **kwargs):
+            exc_cls = type("ChatForwardsRestrictedError", (Exception,), {})
+            raise exc_cls("You cannot forward messages from a protected chat")
+
+    mensagens = [
+        text_message(1, "msg 1"),
+        document_message(2, "lista.pdf"),
+    ]
+    source, dest = channel(-1001, "Origem sem flag local"), channel(-2002, "Destino")
+    client = RestrictedForwardClient(mensagens)
+    client.register_entity(source)
+    client.register_entity(dest)
+    repo = Repository(Path(_TMP) / "restricted_server_fallback.db")
+    copier = Copier(
+        client, repo=repo,
+        config=RunConfig(workers=1, delay=0.1, forward_mode=True),
+        rich_ok=False,
+    )
+    result = asyncio.run(copier.run(source, dest, forward=True))
+    check(result["done"] == 2 and result["errors"] == 0,
+          f"ChatForwardsRestrictedError faz fallback para reenvio ({result})")
+    check(len(client.sent) == 2, "mensagens reenviadas após restrição de forward")
     repo.close()
 
 
