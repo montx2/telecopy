@@ -1,6 +1,6 @@
 # Auditoria final WP1/WP2 — PR #7
 
-Auditado em `142ad94`; correções entregues até `f57f469`.
+Auditado em `142ad94`; correções entregues até `643f04c`.
 
 **Veredito da auditoria: NÃO estava tudo ok.** A suíte estava verde (161 passed),
 mas não cobria os caminhos onde o contrato de ordem quebrava. Foram confirmados
@@ -10,8 +10,11 @@ A afirmação anterior de "WP1/WP2 concluído" estava errada nesses pontos: o RE
 e o corpo do PR diziam "transitório nunca avança" e "DONE só com ID confirmado", e
 ambos eram falsificados abaixo.
 
-**Estado atual: os 7 corrigidos**, com testes de regressão. Suíte **179 passed**,
-sondas **11/11 passed**, pyflakes sem achados novos. Ver §6 para o fechamento.
+**Estado atual: os 7 corrigidos**, com testes de regressão. A verificação
+posterior (pergunta "já corrigiu tudo?") sondou caminhos que a auditoria não tinha
+coberto e achou **mais 2 da mesma classe** — espelho (D8) e fila de repetição
+(D9), também corrigidos. Suíte **185 passed**, pyflakes sem achados novos.
+Ver §6 e §7 para o fechamento.
 
 ---
 
@@ -170,7 +173,7 @@ por mensagem (antes repetia o mesmo ID para o lote inteiro).
 
 ### Números finais
 
-- Suíte: **179 passed** (isolada, sem rede). Baseline pré-WP: 143.
+- Suíte: **185 passed** (isolada, sem rede). Baseline pré-WP: 143.
 - Sondas da auditoria: **11/11 passed**.
 - Pyflakes: só `copier.py split_text` e `security.py exc`, ambos confirmados no
   baseline `4e7994f`.
@@ -178,3 +181,36 @@ por mensagem (antes repetia o mesmo ID para o lote inteiro).
   referência, 819200 B evitados, 100 concluídas / 0 erros. Tempo dominado pelo
   delay artificial — segue **não** sendo promessa de velocidade real.
 - Nenhum teste com credenciais ou canal real foi executado.
+
+
+---
+
+## 7. Segunda passada — D8 e D9
+
+A auditoria inicial cobriu cópia, forward, preflight e verificador, mas **não**
+sondou o espelho nem a fila de repetição. Ao responder "já corrigiu tudo?", esses
+dois caminhos foram testados e ambos tinham o mesmo defeito do D3.
+
+| # | Achado | Evidência executada | Correção |
+|---|---|---|---|
+| D8 | Espelho: falha (transitória **ou** permanente) sem marcador e sem checkpoint, handler segue para a próxima mensagem | `sent=['msg 1','msg 3','msg 4']`, `ph.open=0`, `route2={}` | `643f04c` |
+| D9 | Fila de repetição: msg2 falha sem posição e msg3 é entregue | `sent=['msg 3']`, `ph.open=0`, `routes=[{}, done/1001]` | `643f04c` |
+
+Correção: `_apply_failure_policy` compartilhada (reservar / `[r]/[p]/[a]` / parar),
+loop de retentativa com `max_retries` nos dois caminhos, checkpoint `ERROR` no
+erro inesperado da fila (para o `order_pending_before` enxergar a pendência) e
+checkpoint `SKIPPED` no skip de dedup do espelho.
+
+Depois: espelho transitório entrega `[1,2,3,4]` em ordem; permanente reserva o
+marcador na posição 2 e só então segue; aborto para em `[1]`.
+
+Regressões: `tests/test_mirror_ordem.py` (6 testes). Sonda original em
+`audit/probes_3_mirror.py`.
+
+### Limite desta auditoria
+
+Isto é uma auditoria por sondas dirigidas aos invariantes, **não** uma prova de
+ausência de defeitos. O que está verificado são os caminhos sondados; o que segue
+sem verificação é o comportamento contra o Telegram real (aceitação de
+referência, regras de edição, FloodWait de verdade). Suíte verde, isoladamente,
+já se mostrou insuficiente uma vez neste PR.

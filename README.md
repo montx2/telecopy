@@ -404,7 +404,10 @@ Invariantes implementados:
   filtros/skips exigem confirmação e contam como `intentional_skips`;
 - álbuns por referência em blocos de 10 com IDs retornados estritamente crescentes;
   cascata referência → refresh único → upload forte;
-- espelho serializado por tópico (`_mirror_locks`); multi-destino já era sequencial;
+- espelho serializado por tópico (`_mirror_locks`) e fila de repetição seguem a
+  mesma política: retentam o transitório e, na falha definitiva, reservam a
+  posição ou param — nunca entregam o item seguinte sobre uma posição aberta;
+  multi-destino já era sequencial;
 - o modo **encaminhar** (`delivery=forward`, alias legado `forward_mode`) obedece
   ao mesmo contrato: retries, marcador na posição, `on_failure` e `DONE` apenas com
   ID confirmado e estritamente crescente. Resposta ambígua (sem ID utilizável)
@@ -557,14 +560,16 @@ falha parcial com retomada, exclusão apenas do canal criado, foto com falha e
 
 WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
-`tests/test_ordem_preflight.py`. Estado verificado nesta entrega:
-**179 passed** (`pytest -q`, suíte isolada, sem rede).
+`tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
+nesta entrega:
+**185 passed** (`pytest -q`, suíte isolada, sem rede).
 Pyflakes: apenas os achados pré-existentes confirmados no baseline —
 `split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
 
 A auditoria final (`AUDITORIA.md`) encontrou 7 defeitos que a suíte anterior não
-cobria; todos foram corrigidos e viraram testes de regressão. As sondas originais
-estão em `audit/` para reprodução independente.
+cobria. A verificação posterior achou mais 2 da mesma classe no espelho e na fila
+de repetição (D8/D9). Todos os 9 foram corrigidos e viraram testes de regressão.
+As sondas originais estão em `audit/` para reprodução independente.
 
 | Invariante / recurso | Teste representativo |
 |---|---|
@@ -586,6 +591,9 @@ estão em `audit/` para reprodução independente.
 | Forward ambíguo aborta | `test_forward_ambiguo_aborta_sem_reservar` |
 | Preflight não é cegado por filtro | `test_preflight_nao_e_cegado_por_filtro` |
 | Verificador sem falso positivo | `test_tool_order_pendencia_final_nao_e_violacao` |
+| Espelho reserva posição na falha | `test_espelho_falha_permanente_reserva_posicao` |
+| Espelho aborta sem seguir | `test_espelho_abort_nao_segue_adiante` |
+| Fila de repetição sem buraco | `test_fila_de_repeticao_nao_abre_buraco` |
 
 Também é possível rodar sem pytest:
 
