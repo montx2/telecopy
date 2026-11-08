@@ -10,7 +10,7 @@ import pytest
 import config
 import copier as copier_module
 import core
-from config import RunConfig
+from config import WORKERS_HARD_CAP, RunConfig
 from copier import Copier
 from database import Repository
 from i18n import get_lang, set_lang
@@ -47,7 +47,7 @@ def test_runconfig_defaults_sao_upload_sem_reserva_e_ordem_estrita() -> None:
     assert cfg.on_failure == "abort"
     assert cfg.strict_order is True
     assert cfg.to_dict()["strict_order"] is True
-    assert RunConfig(workers=99).workers == 6
+    assert RunConfig(workers=99).workers == WORKERS_HARD_CAP
     assert RunConfig(strict_order=False).strict_order is True
 
 

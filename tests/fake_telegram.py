@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from telethon import types
 from telethon.errors import FloodWaitError
 
 
@@ -146,6 +147,43 @@ class FakeChannel:
 # ── Cliente falso ────────────────────────────────────────────────────────────
 
 
+class FakeSender:
+    """Sender MTProto simulado: send() devolve future, como no Telethon."""
+
+    def __init__(self, client: "FakeClient", dc_id: int) -> None:
+        self.client = client
+        self.dc_id = dc_id
+        self.disconnected = False
+        self.requests: List[Any] = []
+
+    def send(self, request, ordered: bool = False):
+        import asyncio
+
+        self.requests.append(request)
+        return asyncio.create_task(self._run(request))
+
+    async def _run(self, request):
+        import asyncio
+
+        name = type(request).__name__
+        key = getattr(request, "offset", None) if name == "GetFileRequest" else getattr(request, "file_part", None)
+        errors = self.client.part_errors.get((name, key), [])
+        if errors:
+            raise errors.pop(0)
+        delay = self.client.part_delays.get((name, key), 0)
+        self.client.active_parts += 1
+        self.client.peak_parts = max(self.client.peak_parts, self.client.active_parts)
+        try:
+            if delay:
+                await asyncio.sleep(delay)
+            return await self.client._handle_part_request(request, self.dc_id)
+        finally:
+            self.client.active_parts -= 1
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
 class FakeClient:
     """Imita a API do Telethon usada pelo TELECOPY."""
 
@@ -167,6 +205,23 @@ class FakeClient:
         self.handlers: List[Any] = []
         self._random_messages: Dict[int, Any] = {}
         self.requests: List[Any] = []
+        self.upload_attempts: List[str] = []
+        self.upload_delays: Dict[str, float] = {}
+        self.upload_errors: Dict[str, List[Exception]] = {}
+        self.send_errors: Dict[str, List[Exception]] = {}
+        self.upload_media_calls = 0
+        # Transporte de partes (etapa B)
+        self.session = SimpleNamespace(dc_id=1)
+        self._sender = FakeSender(self, 1)
+        self.file_data: Dict[int, bytes] = {}
+        self.part_store: Dict[int, Dict[int, bytes]] = {}
+        self.part_errors: Dict[Any, List[Exception]] = {}
+        self.part_delays: Dict[Any, float] = {}
+        self.part_calls: List[Any] = []
+        self.active_parts = 0
+        self.peak_parts = 0
+        self.created_senders: List[FakeSender] = []
+        self.borrowed_senders: List[FakeSender] = []
 
     # -- downloads/upload ---------------------------------------------------
 
@@ -189,10 +244,53 @@ class FakeClient:
         return str(file)
 
     async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
+        import asyncio
+
+        name = file_name or os.path.basename(str(path))
+        self.upload_attempts.append(name)
+        errors = self.upload_errors.get(name, [])
+        if errors:
+            raise errors.pop(0)
+        delay = self.upload_delays.get(name, 0)
+        if delay:
+            await asyncio.sleep(delay)
         if progress_callback:
             size = os.path.getsize(path) if os.path.exists(path) else 1
             progress_callback(size, size)
         return SimpleNamespace(path=str(path), name=file_name or os.path.basename(str(path)))
+
+    async def _create_exported_sender(self, dc_id: int) -> FakeSender:
+        sender = FakeSender(self, dc_id)
+        self.created_senders.append(sender)
+        return sender
+
+    async def _borrow_exported_sender(self, dc_id: int) -> FakeSender:
+        sender = FakeSender(self, dc_id)
+        self.borrowed_senders.append(sender)
+        return sender
+
+    async def _return_exported_sender(self, sender: FakeSender) -> None:
+        return None
+
+    async def _handle_part_request(self, request, dc_id: int):
+        name = type(request).__name__
+        self.part_calls.append(request)
+        if name == "GetFileRequest":
+            offset = int(request.offset)
+            limit = int(request.limit)
+            assert offset % 4096 == 0
+            assert limit % 4096 == 0 and 1048576 % limit == 0
+            assert offset // 1048576 == (offset + limit - 1) // 1048576
+            data = self.file_data.get(int(request.location.id), b"")
+            return types.upload.File(
+                type=types.storage.FileUnknown(), mtime=0,
+                bytes=data[offset:offset + limit],
+            )
+        if name in {"SaveFilePartRequest", "SaveBigFilePartRequest"}:
+            parts = self.part_store.setdefault(int(request.file_id), {})
+            parts[int(request.file_part)] = bytes(request.bytes)
+            return True
+        raise AssertionError(f"Request de parte inesperado: {name}")
 
     @staticmethod
     def _reply_ids(reply_to):
@@ -306,12 +404,16 @@ class FakeClient:
     async def __call__(self, request):
         self.requests.append(request)
         name = type(request).__name__
+        errors = self.send_errors.get(name, [])
+        if errors:
+            raise errors.pop(0)
         if name == "SendMessageRequest":
             return self._record_send(
                 request.peer, "text", text=request.message, reply_to=request.reply_to,
                 random_id=request.random_id, formatting_entities=request.entities,
             ) and SimpleNamespace()
         if name == "UploadMediaRequest":
+            self.upload_media_calls += 1
             # O cliente real devolve MessageMedia; para o fake, devolver a
             # própria InputMedia permite reutilizar o caminho/atributos.
             return request.media
@@ -326,6 +428,7 @@ class FakeClient:
                 formatting_entities=request.entities, input_media=media,
                 attributes=getattr(media, "attributes", None),
                 mime_type=getattr(media, "mime_type", None),
+                force_document=getattr(media, "force_file", False),
             )
             return SimpleNamespace()
         if name == "SendMultiMediaRequest":

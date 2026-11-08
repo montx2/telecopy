@@ -44,9 +44,12 @@ from config import (
     DATA_DIR,
     EXPORT_DIR,
     LOG_FILE,
+    MAX_CONNECTIONS_PER_FILE,
+    MAX_TOTAL_CONNECTIONS_CAP,
     SESSION_FILE,
     TEMP_DIR,
     VAULT_FILE,
+    WORKERS_HARD_CAP,
     RunConfig,
     ui,
 )
@@ -345,6 +348,11 @@ class App:
         )
         ui.loading_bar(t("init.loading"))
         self.stats.new_session()
+        from copier import sweep_temp
+
+        removed = sweep_temp()
+        if removed:
+            logger.info(f"Temporários antigos removidos na inicialização: {removed}")
         logger.info(f"Sessão iniciada — v{_app.__version__} [{get_lang()}]")
 
         if not self.prefs.get("onboarding_done"):
@@ -512,7 +520,10 @@ class App:
                     app_version=_app.__version__,
                     connection_retries=1,
                     retry_delay=0,
-                    request_retries=1,
+                    request_retries=5,
+                    # timeout do TelegramClient é timeout de conexão no Telethon;
+                    # mantido em 12 s. Requisições de parte do caminho rápido usam
+                    # PART_TIMEOUT=30 s (fasttransfer.py) sem mudar a conexão.
                     timeout=12,
                     auto_reconnect=True,
                 )
@@ -781,11 +792,12 @@ class App:
                 ui.pause()
 
     def _limit_banner(self) -> None:
-        level, count, remaining = daily_limit.status()
+        cap = int(getattr(self.config, "daily_limit", DAILY_LIMIT))
+        level, count, remaining = daily_limit.status(cap)
         if level == "limit":
-            ui.warn(t("limit.reached", count=count, limit=DAILY_LIMIT))
+            ui.warn(t("limit.reached", count=count, limit=cap))
         elif level == "warn":
-            ui.warn(t("limit.warn", count=count, limit=DAILY_LIMIT, remaining=remaining))
+            ui.warn(t("limit.warn", count=count, limit=cap, remaining=remaining))
 
     # ── navegação ───────────────────────────────────────────────────────────
 
@@ -1327,16 +1339,17 @@ class App:
                     raw = ui.ask(t("settings.delay.hint"), required=False)
                     try:
                         if raw:
-                            cfg.delay = max(0.1, float(raw.replace(",", ".")))
+                            cfg.delay = max(0.0, float(raw.replace(",", ".")))
                             ui.ok(t("settings.delay.set", val=f"{cfg.delay:.1f}"))
                     except ValueError:
                         ui.err(t("settings.delay.invalid"))
                 elif choice == "3":
-                    raw = ui.ask(t("settings.workers.title", max=6, current=cfg.workers),
+                    raw = ui.ask(t("settings.workers.title", max=WORKERS_HARD_CAP,
+                                   current=cfg.workers),
                                  required=False)
                     try:
                         if raw:
-                            cfg.workers = max(1, min(6, int(raw)))
+                            cfg.workers = max(1, min(WORKERS_HARD_CAP, int(raw)))
                             ui.ok(t("settings.workers.set", val=cfg.workers))
                     except ValueError:
                         ui.err(t("menu.invalid"))
@@ -2173,11 +2186,14 @@ class App:
         except Exception:
             pass
 
-        level, count, remaining = daily_limit.status()
+        level, count, remaining = daily_limit.status(
+            int(getattr(self.config, "daily_limit", DAILY_LIMIT)))
         color = C.RED if level == "limit" else (C.YELLOW if level == "warn" else C.GREEN)
         ui.box(t("tools.stats.daily"), [
             (t("tools.stats.today"), Fmt.number(count)),
-            (t("tools.stats.limit"), Fmt.number(DAILY_LIMIT)),
+            (t("tools.stats.limit"),
+             Fmt.number(self.config.daily_limit) if self.config.daily_limit
+             else t("settings.off")),
             (t("tools.stats.remaining"), Fmt.number(remaining)),
         ], color=color)
 
@@ -2467,6 +2483,13 @@ class App:
             ui.box(t("settings.status"), [
                 (t("settings.delay"), f"{cfg.delay:.1f}s"),
                 (t("settings.workers"), str(cfg.workers)),
+                (t("settings.fast_transfer"), t("settings.on") if cfg.fast_transfer else t("settings.off")),
+                (t("settings.connections_per_file"), str(cfg.connections_per_file)),
+                (t("settings.lookahead"), str(cfg.lookahead) if cfg.lookahead else "auto"),
+                (t("settings.max_tmp_gb"), f"{cfg.max_tmp_gb:g}"),
+                (t("settings.max_total_connections"), str(cfg.max_total_connections)),
+                (t("settings.daily_limit"),
+                 str(cfg.daily_limit) if cfg.daily_limit else t("settings.off")),
                 (t("settings.dedup"), t("settings.on") if cfg.use_dedup else t("settings.off")),
                 (t("settings.resume"), t("settings.on") if cfg.resume else t("settings.off")),
                 (t("settings.forward"),
@@ -2492,6 +2515,14 @@ class App:
             ui.menu([
                 ("1", t("settings.delay.option"), f"{cfg.delay:.1f}s"),
                 ("2", t("settings.workers.option"), str(cfg.workers)),
+                ("p", t("settings.turbo.option"), t("settings.turbo.desc")),
+                ("t", t("settings.fast_transfer.toggle"), t("settings.on") if cfg.fast_transfer else t("settings.off")),
+                ("n", t("settings.connections_per_file.option"), str(cfg.connections_per_file)),
+                ("l", t("settings.lookahead.option"), str(cfg.lookahead) if cfg.lookahead else "auto"),
+                ("g", t("settings.max_tmp_gb.option"), f"{cfg.max_tmp_gb:g}"),
+                ("j", t("settings.max_total_connections.option"), str(cfg.max_total_connections)),
+                ("q", t("settings.daily_limit.option"),
+                 str(cfg.daily_limit) if cfg.daily_limit else t("settings.off")),
                 ("3", t("settings.dedup.toggle"), ""),
                 ("4", t("settings.resume.toggle"), ""),
                 ("5", t("settings.forward.toggle"), ""),
@@ -2585,6 +2616,31 @@ class App:
                 self._save_config()
                 ui.ok(f"{t('settings.on_failure')}: {t(f'on_failure.{cfg.on_failure}')}")
                 await asyncio.sleep(0.7)
+            elif choice == "p":
+                self._apply_turbo()
+                await asyncio.sleep(1.5)
+            elif choice == "t":
+                cfg.fast_transfer = not cfg.fast_transfer
+                self._save_config()
+                ui.info(t("settings.fast_transfer.hint"))
+                ui.ok(f"{t('settings.fast_transfer')}: "
+                      f"{t('settings.on') if cfg.fast_transfer else t('settings.off')}")
+                await asyncio.sleep(0.7)
+            elif choice == "n":
+                self._set_connection_option("connections_per_file", 1, MAX_CONNECTIONS_PER_FILE)
+                await asyncio.sleep(0.7)
+            elif choice == "l":
+                self._set_connection_option("lookahead", 0, 1000)
+                await asyncio.sleep(0.7)
+            elif choice == "g":
+                self._set_tmp_limit()
+                await asyncio.sleep(0.7)
+            elif choice == "j":
+                self._set_connection_option("max_total_connections", 1, MAX_TOTAL_CONNECTIONS_CAP)
+                await asyncio.sleep(0.7)
+            elif choice == "q":
+                self._set_connection_option("daily_limit", 0, 1_000_000)
+                await asyncio.sleep(0.7)
             elif choice == "m":
                 raw = ui.ask(t("settings.max_retries"), required=False)
                 if raw is not None:
@@ -2651,7 +2707,7 @@ class App:
         if not raw:
             return
         try:
-            value = max(0.1, float(raw.replace(",", ".")))
+            value = max(0.0, float(raw.replace(",", ".")))
         except ValueError:
             ui.err(t("settings.delay.invalid"))
             return
@@ -2659,12 +2715,69 @@ class App:
         self._save_config()
         ui.ok(t("settings.delay.set", val=f"{value:.1f}"))
 
+    def _apply_turbo(self) -> None:
+        """Abre o paralelismo até o limite do hardware, sem tocar em ordem/dedup."""
+        from config import turbo_settings
+
+        values = turbo_settings()
+        for key, value in values.items():
+            setattr(self.config, key, value)
+        self.config.__post_init__()
+        self._save_config()
+        ui.blank()
+        ui.ok(t("settings.turbo.applied",
+                workers=self.config.workers,
+                conn=self.config.connections_per_file,
+                total=self.config.max_total_connections,
+                tmp=f"{self.config.max_tmp_gb:g}",
+                delay=f"{self.config.delay:g}"))
+        ui.warn(t("settings.turbo.warn"))
+
+    def _set_connection_option(self, field: str, minimum: int, maximum: int) -> None:
+        ui.blank()
+        ui.info(t(f"settings.{field}.hint"))
+        current = getattr(self.config, field)
+        raw = ui.ask(t(f"settings.{field}.title", current=current), required=False)
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            ui.err(t("menu.invalid"))
+            return
+        if not minimum <= value <= maximum:
+            ui.err(t("menu.invalid"))
+            return
+        setattr(self.config, field, value)
+        self._save_config()
+        ui.ok(t(f"settings.{field}.set", val=value))
+
+    def _set_tmp_limit(self) -> None:
+        ui.blank()
+        ui.info(t("settings.max_tmp_gb.hint"))
+        raw = ui.ask(t("settings.max_tmp_gb.title", current=f"{self.config.max_tmp_gb:g}"),
+                     required=False)
+        if not raw:
+            return
+        try:
+            value = float(raw.replace(",", "."))
+        except ValueError:
+            ui.err(t("menu.invalid"))
+            return
+        if value <= 0:
+            ui.err(t("menu.invalid"))
+            return
+        self.config.max_tmp_gb = value
+        self._save_config()
+        ui.ok(t("settings.max_tmp_gb.set", val=f"{value:g}"))
+
     def _set_workers(self) -> None:
         from system_analyzer import analyzer
 
         ui.blank()
-        ui.info(t("settings.workers.hint", rec=min(6, analyzer.recommended())))
-        raw = ui.ask(t("settings.workers.title", max=6, current=self.config.workers),
+        ui.info(t("settings.workers.hint", rec=analyzer.recommended()))
+        raw = ui.ask(t("settings.workers.title", max=WORKERS_HARD_CAP,
+                       current=self.config.workers),
                      required=False)
         if not raw:
             return
@@ -2673,7 +2786,7 @@ class App:
         except ValueError:
             ui.err(t("menu.invalid"))
             return
-        if not 1 <= value <= 6:
+        if not 1 <= value <= WORKERS_HARD_CAP:
             ui.err(t("menu.invalid"))
             return
         self.config.workers = value

@@ -204,7 +204,7 @@ escolha o mesmo destino, pressione ENTER para todos os tópicos e mantenha
 `data/telecopy.db`: o mapa de tópicos e os checkpoints retomam sem recriar o que
 já foi associado/enviado.
 
-Antes de iniciar você escolhe delay, número de workers, filtro e se quer
+Antes de iniciar você escolhe delay, número de workers (arquivos em andamento), filtro e se quer
 retomar cópias anteriores. Um resumo aparece antes da confirmação.
 
 ### `[2] Multi-destino` — um conteúdo, vários canais
@@ -301,7 +301,14 @@ e sugere usar um destino existente.
 | Opção | Para que serve |
 |---|---|
 | `1` Intervalo entre envios | Pausa entre uploads (recomendado 0,9 s) |
-| `2` Workers | Downloads simultâneos (o programa recomenda o ideal para seu PC) |
+| `2` Workers | Arquivos em andamento: download + pré-upload (o programa recomenda o ideal para seu PC) |
+| `t` Transferência rápida | Liga/desliga pré-upload nos workers e transporte multi-conexão |
+| `p` **PERFIL TURBO** | Detecta o hardware e abre todo o paralelismo que o PC aguenta |
+| `n` Conexões por arquivo | 1–32 (padrão 8); meça com `bench_transfer.py` |
+| `l` Janela | Lookahead de itens à frente do sender (0 = auto, 2 × workers) |
+| `g` Limite de tmp | Orçamento de disco em GB para temporários em andamento (padrão 16) |
+| `j` Conexões globais | Orçamento compartilhado entre workers (padrão 32, máx. 256) |
+| `q` Teto diário local | Trava do programa (padrão 1000); `0` remove a parede no meio do canal |
 | `3` Deduplicação | Liga/desliga a proteção anti-duplicata |
 | `4` Retomar | Pula automaticamente o que já foi copiado |
 | `5` Modo de envio | Reenviar (cópia limpa) ou Encaminhar (rápido) |
@@ -348,7 +355,7 @@ Para **recomeçar do zero** em um par: Configurações → `b`.
 
 ### 6.1 Reserva de posição em falhas
 
-A reserva vem **ativada por padrão** e pode ser desligada em `[4] Configurações → [h]`.
+A reserva é **opcional e vem desligada por padrão**; pode ser ligada em `[6] Configurações → [h]`.
 Com ela ligada, quando um item falha na cópia/espelho/clone o app cria no destino um
 marcador de texto **na posição sequencial da mensagem original** (e no mesmo tópico,
 quando houver mapa de fórum): `⏳ Conteúdo pendente — mensagem N. Motivo: ...`.
@@ -383,12 +390,12 @@ também apaga as reservas. Com a reserva desligada (`[h]`), o comportamento de f
 
 ### 6.2 Entrega por referência e ordem por tópico
 
-O caminho normal de mídia agora reutiliza referências do servidor
-(`telethon.utils.get_input_media` → `send_file(file=InputMedia)` /
-`SendMediaRequest` / `SendMultiMediaRequest`). Não há `download_media` nem
-`upload_file` nesse caminho. `RunConfig.delivery` aceita `reference|upload|forward`;
-`server_copy` liga/desliga a preferência por referência; `[d]` e `[s]` persistem em
-`prefs`. `[5] Modo de envio` continua sincronizado com `forward`.
+O modo padrão de entrega é `upload` (baixar + reenviar), necessário para origem
+protegida (`noforwards`). `RunConfig.delivery` aceita `reference|upload|forward`;
+`server_copy` liga/desliga a preferência por referência quando a entrega é
+`reference`; `[d]` e `[s]` persistem em `prefs`. `[5] Modo de envio` continua
+sincronizado com `forward`. Os modos `reference` e `forward` não foram alterados
+pela otimização de transferência.
 
 Invariantes implementados:
 
@@ -437,6 +444,159 @@ a cascata cobre isso com refresh/upload. Regras de edição variam por conteúdo
 erros de edição são tratados sem derrubar o lote. Histórico já fora de ordem não é
 reparado por edição — o verificador `[5] → 7` detecta e a reparação exige reconstruir
 o tópico/destino.
+
+### 6.3 Transferência rápida no modo Reenviar (A+B+C)
+
+Objetivo: aumentar MB/s agregado de download + upload sem quebrar ordem estrita,
+checkpoints, dedup, retomada, álbuns, tópicos, replies, assinatura, placeholder,
+`DAILY_LIMIT` nem FloodWait. **Nenhum ganho é afirmado sem medição real.**
+
+- **Pipeline (A):** com `fast_transfer=True`, cada worker baixa e pré-envia o
+  arquivo (`InputFile`/`InputFileBig`) e, em álbuns, também registra
+  `UploadMediaRequest(peer, ...)`. O sender continua sequencial e só monta
+  `SendMediaRequest`/`SendMultiMediaRequest`, preservando `_media_options`
+  (duração, w/h, voice note, spoiler, force_document). Checkpoint/dedup/
+  `mark_processed` só depois do envio confirmado. Se uma parte/arquivo pré-enviado
+  expirar, há **um único re-upload** a partir do temporário.
+- **Transporte (B):** `fasttransfer.py` reimplementa partes paralelas a partir de
+  <https://core.telegram.org/api/files>: blocos de 512 KiB alinhados (offset/limit
+  múltiplos de 4096, limit divide 1 MiB, sem cruzar fronteira de 1 MiB), gravados
+  por offset; upload com `SaveBigFilePart` (>10 MiB) ou `SaveFilePart` + MD5.
+  Trata `FileMigrate`, `FileReferenceExpired` (refresh via `get_messages`),
+  FloodWait, timeout e retry por bloco; valida tamanho final e limite de partes.
+  Qualquer falha cai no `download_media`/`upload_file` padrão com log (CDN redirect
+  também cai no padrão). Senders exportados são reutilizados por DC e fechados no
+  shutdown/Ctrl+C; o DC da sessão compartilha o sender principal com várias
+  requisições em voo. Telethon fixado em `1.45.0` pelo uso de APIs internas de
+  sender/exportação.
+- **Backpressure (C):** janela de índices `[próximo_a_enviar, próximo_a_enviar +
+  lookahead)` e orçamento `max_tmp_gb` validado contra o disco livre (deixa 20%
+  fora). `lookahead=0` usa `2 × workers`. Álbum conta como um item; item maior que
+  o orçamento passa sozinho quando chega ao cabeçote. O cabeçote nunca fica
+  bloqueado pelos demais, evitando deadlock. `MAX_WORKERS_UP` limita pré-uploads
+  simultâneos; `BUFFER_RAM_MAX` limita o orçamento de partes em memória.
+- **Auto-proteção que também acelera de volta:** FloodWait ou 5 timeouts seguidos
+  reduzem as conexões pela metade, mas a capacidade **sobe de novo** (um degrau a
+  cada 48 partes confirmadas) até o valor inicial — antes ficava lenta para o
+  resto da execução. A penalidade de flood decai 1 s a cada 5 envios confirmados
+  (teto 12 s) e zera em `run()`.
+- **Premium / `FLOOD_PREMIUM_WAIT`:** é teto de velocidade **da conta**, não
+  excesso de requisições. O cliente espera o tempo pedido **sem cortar conexões**
+  e sem gastar tentativas do bloco, em vez de abortar para o caminho lento.
+  Contas Premium não recebem esse erro de download
+  (<https://core.telegram.org/api/premium>).
+- **cryptg:** `main.py --check` e o início da cópia avisam se `cryptg` não puder
+  ser importado (AES em Python puro limita a criptografia). `build.bat` inclui
+  `cryptg` no Nuitka.
+- **Timeout:** o `timeout=12` do `TelegramClient` é timeout de conexão no Telethon
+  e foi mantido; as requisições de parte do caminho rápido usam `PART_TIMEOUT=30`
+  sem alterar o timeout de conexão.
+
+Configuração (`RunConfig` / prefs / menu Configurações):
+
+| Campo | Padrão | Faixa | Efeito |
+|---|---:|---|---|
+| `fast_transfer` | `True` | bool | `False` reproduz o caminho legado (upload no sender), mantendo C e D |
+| `connections_per_file` | `8` | 1–32 | senders/requisições em voo por arquivo |
+| `lookahead` | `0` | 0 = auto | itens à frente do sender |
+| `max_tmp_gb` | `16` | >0, limitado pelo disco | orçamento de temporários em andamento |
+| `max_total_connections` | `32` | 1–256 | orçamento global compartilhado |
+| `workers` | auto | 1–16 | arquivos em andamento (I/O-bound: pode passar do nº de CPUs) |
+| `delay` | `0.35` | ≥0 | espera entre envios; `0` = sem espera |
+| `daily_limit` | `1000` | ≥0 | guard **local**; `0` = sem teto |
+
+### 6.3.1 Ordem nunca depende da velocidade (canal de curso em fórum)
+
+O paralelismo é só na **preparação**. O envio é um `for index in range(total)`
+que espera o item daquele índice: nada é enviado porque "ficou pronto primeiro".
+Por isso `workers`, `connections_per_file` e o turbo **não** reordenam aulas.
+
+`tests/test_ordem_curso.py` trava o cenário real: aulas 321→329 em dois tópicos,
+com álbuns no meio, workers terminando **fora de ordem** de propósito e turbo
+ligado. O teste exige:
+
+- destino na sequência exata da origem (Aula 321, 322, 323...);
+- cada aula no tópico correto do destino (`dest_topic` no checkpoint);
+- álbuns contíguos e agrupados via `UploadMedia` + `SendMultiMedia`;
+- `done` só com ID de destino confirmado;
+- retomada após interrupção sem repetir e sem inverter.
+
+**Atenção às prefs salvas:** os defaults novos não sobrescrevem o que já está em
+`prefs.json`. Se o banner ainda mostra `0.9s`, aplique `[6] Configurações → [p]`
+(perfil turbo) ou ajuste `[1]` intervalo e `[2]` workers manualmente.
+
+### 6.3.2 O que fica idêntico e o que não fica (clone de curso)
+
+**Fica idêntico:** ordem das mensagens, texto/legendas e entidades, álbuns
+agrupados, tópicos e o roteamento de cada mensagem, replies, tópicos criados na
+ordem de atividade, ícones/fixado/fechado. Na cópia de fórum o programa
+**desliga dedup e assinatura sozinho** (`core.py`, caminho `setup.faithful or
+plan.forum`): repetições de material entre tópicos são conteúdo legítimo e não
+podem ser descartadas. `tests/test_ordem_curso.py` prova os dois lados — com dedup
+desligado a aula repetida chega; com dedup ligado ela pode sumir.
+
+**Não fica idêntico (limites do Telegram, não do programa):**
+
+| Item | O que acontece |
+|---|---|
+| Legenda > 1024 caracteres | vira a mídia + continuações em mensagens seguintes; o texto chega **integral e na ordem**, mas o destino tem mais mensagens que a origem |
+| Enquete/quiz, dado, localização, contato, mídia paga | não são recriáveis por upload; entram como **não suportado** e a conferência não fecha como completa |
+| Data/hora, visualizações, reações, comentários | não são copiados: a cópia é uma mensagem nova, sua |
+| Autor | é você — é o que significa "cópia limpa, sem encaminhado de" |
+
+**Como conferir em vez de confiar:** ao terminar, o programa imprime
+`Conferência: ...` (`result.complete` / `result.incomplete`) e a
+**CONFERÊNCIA POR TÓPICO** com esperado / enviadas / faltando. A cópia só é
+declarada completa com zero erros, zero não suportados, zero faltando e nenhum
+marcador em aberto. Se não fechar, retome: o checkpoint continua de onde parou.
+
+### 6.4 Perfil turbo: velocidade máxima do PC
+
+`[6] Configurações → [p]` aplica de uma vez o maior paralelismo que o hardware
+comporta, calculado por RAM disponível, CPUs e disco livre:
+
+```
+workers                  = min(16, RAM/0,35 GB, CPUs x 3, disco/2 GB)
+connections_per_file     = min(16, max(4, workers x 2))
+max_total_connections    = min(128, workers x connections_per_file)
+max_tmp_gb               = min(64, max(8, disco livre x 0,5))
+delay                    = 0,2 s
+daily_limit              = 0 (sem parede local)
+```
+
+O turbo **não** toca em ordem estrita, checkpoint, dedup, retomada, álbuns nem na
+política de FloodWait. Gargalos artificiais removidos nesta revisão:
+
+| Antes | Depois | Efeito |
+|---|---|---|
+| pré-upload limitado a `workers // 2` | acompanha os workers | estágio mais lento deixa de serializar |
+| `workers` travado em 6 | até 16, por hardware | mais arquivos em andamento |
+| `delay` mínimo 0,1 s | mínimo 0 s | sem espera artificial entre envios |
+| conexões/arquivo máx. 8 | máx. 32 | mais partes em voo por arquivo |
+| pool global máx. 64 | máx. 256 | orçamento não estrangula os workers |
+| pool só reduzia, nunca recuperava | recupera até o inicial | velocidade volta após o flood |
+| 3 timeouts cortavam conexões | 5 timeouts | menos falso positivo |
+| fallback com partes de 128–256 KiB | 512 KiB | 2–4x menos idas e voltas no plano B |
+| `request_retries=1` | `5` | menos queda precoce para o caminho lento |
+| teto local de 1000 msgs/dia fixo | configurável, `0` = sem teto | não interrompe canal de 1.279 msgs |
+
+Benchmark real (não executado nesta entrega contra o Telegram):
+
+```bash
+python bench_transfer.py --source LINK --msg-id N --connections 1,2,4,8,16
+```
+
+Ele baixa e reenvia o arquivo para as Mensagens Salvas e imprime MB/s padrão vs.
+rápido, recomendando o menor `connections_per_file` dentro de 5% do melhor ponto
+medido. **Valide com ~10 mensagens num canal de teste antes de rodar o canal
+inteiro.** Não foi possível testar contra o Telegram real: FloodWait de upload
+agressivo, expiração de partes pré-enviadas em produção, migração de DC real,
+CDN, throughput em link de 1 Gbps e comportamento de conta Premium/non-Premium.
+
+Licenças: nenhum código foi copiado de FastTelethon/mautrix-telegram. O
+`mautrix/telegram` verificado é AGPL-3.0; o repositório `FastTelethonhelper`
+localizado declara MIT, mas a técnica foi reimplementada do zero pela documentação
+oficial e pela API do Telethon para evitar dependência de código copyleft.
 
 ---
 
@@ -526,7 +686,7 @@ puder ser lido, o programa mostra o caminho e pede as credenciais novamente.
 | “Canal não encontrado” | Confirme que você é **membro** (origem) e **admin** (destino) e que o link/ID está correto. Use Ferramentas → 1 para testar |
 | “Você precisa ser ADMINISTRADOR no destino” | No Telegram: canal → Administradores → adicionar você com permissão *Postar mensagens* |
 | Telegram pede espera (FloodWait) | O programa aguarda sozinho e aumenta o intervalo. Se acontecer muito, aumente o delay para 2–3 s |
-| Cópia muito lenta | Aumente workers (Configurações → 2) ou use **Encaminhar** (Configurações → 5) |
+| Cópia muito lenta no modo Reenviar | Meça `bench_transfer.py`, ajuste `connections_per_file` (Configurações → n) e workers/arquivos em andamento (→ 2). Origem protegida não pode usar Encaminhar/reference |
 | Travou / fechou no meio | Abra de novo e responda **sim** em “retomar” — nada será repetido |
 | “Limite de canais” ao criar destino | O Telegram limita quantos canais/grupos uma conta pode criar. Use um destino existente (Copiar canal → 1) ou apague canais antigos |
 | “Já existe um clone desta origem” | O TELECOPY oferece reutilizar o clone (continuar/sincronizar) ou criar outro. Se a estrutura ficou incompleta, dá para continuar no destino criado ou excluir só ele |
@@ -562,7 +722,7 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**185 passed** (`pytest -q`, suíte isolada, sem rede).
+**241 passed** (`python -m pytest -q`, suíte isolada, sem rede).
 Pyflakes: apenas os achados pré-existentes confirmados no baseline —
 `split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
 
@@ -633,7 +793,9 @@ O instalador sai em `dist\Telecopy_Setup_v4.0.0.exe`. Ele instala em
 main.py            entrada, argumentos, instância única, checagem de ambiente
 core.py            App (login + menus), ChannelPicker, CredentialManager
 channel_clone.py   criação de destino e clonagem da estrutura de fóruns/tópicos
-copier.py          motor: coleta → agrupa álbuns → download paralelo → envio ordenado
+copier.py          motor: coleta → agrupa álbuns → pipeline download/pré-upload → envio ordenado
+fasttransfer.py    transporte multi-conexão por arquivo (partes MTProto) com fallback
+bench_transfer.py  benchmark real padrão vs rápido e recomendação de conexões
 database.py        repositório SQLite (WAL): checkpoints, dedup, sessões, falhas
 dedup.py           LRU + Bloom Filter + hash de conteúdo
 filters.py         filtros combináveis de mensagens
@@ -647,9 +809,11 @@ config.py          caminhos, constantes, cores, UI e RunConfig
 tests/             suíte automatizada + cliente Telegram simulado
 ```
 
-**Desempenho:** download em paralelo (I/O bound) com envio estritamente
-sequencial, para que o destino fique na ordem original. Workers recomendados:
-1 para cada 0,5 GB de RAM livre, limitado pelo número de CPUs (máx. 8).
+**Desempenho:** `workers` significa arquivos em andamento (download + pré-upload
+quando `fast_transfer=True`), com envio estritamente sequencial para manter a
+ordem original. Workers recomendados: 1 para cada 0,5 GB de RAM livre, limitado
+pelo dobro das CPUs (máx. 16). Conexões por arquivo e
+orçamento global são separados de workers; meça antes de aumentar.
 
 ---
 

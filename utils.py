@@ -198,13 +198,22 @@ class DailyLimit:
             self._data = {"date": self._today(), "count": 0}
             self._save()
 
-    def status(self) -> Tuple[str, int, int]:
-        """(nível, enviadas, restantes)."""
+    def status(self, limit: Optional[int] = None,
+               warn: Optional[int] = None) -> Tuple[str, int, int]:
+        """(nível, enviadas, restantes).
+
+        ``limit`` sobrescreve o guard local (0 = sem teto local). É uma trava do
+        programa, não um limite publicado pelo Telegram.
+        """
         n = self.count
-        remaining = max(0, DAILY_LIMIT - n)
-        if n >= DAILY_LIMIT:
+        cap = DAILY_LIMIT if limit is None else int(limit)
+        if cap <= 0:
+            return "ok", n, 0
+        warn_at = int(cap * (DAILY_WARN / DAILY_LIMIT)) if warn is None else int(warn)
+        remaining = max(0, cap - n)
+        if n >= cap:
             return "limit", n, 0
-        if n >= DAILY_WARN:
+        if n >= warn_at:
             return "warn", n, remaining
         return "ok", n, remaining
 

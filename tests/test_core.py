@@ -38,7 +38,7 @@ config.LOG_FILE = config.LOGS_DIR / "telecopy.log"
 config.VAULT_FILE = config.VAULT_DIR / "credentials.enc"
 config.init_dirs()
 
-from config import RunConfig  # noqa: E402
+from config import WORKERS_HARD_CAP, RunConfig  # noqa: E402
 from copier import Copier, add_signature, media_info, split_text  # noqa: E402
 from database import Repository, Status  # noqa: E402
 from dedup import BloomFilter, DedupEngine, hash_message  # noqa: E402
@@ -249,9 +249,9 @@ def test_daily_and_stats() -> None:
 
 
 def test_runconfig() -> None:
-    cfg = RunConfig(delay=0.05, workers=99, memory_profile=1.5)
-    check(cfg.delay == 0.1, "delay mínimo")
-    check(cfg.workers == 6, "workers máximo")
+    cfg = RunConfig(delay=-1, workers=99, memory_profile=1.5)
+    check(cfg.delay == 0.0, "delay mínimo (0 = sem espera)")
+    check(cfg.workers == WORKERS_HARD_CAP, "workers limitado pelo teto de hardware")
     check(cfg.memory_profile == 0.95, "memory_profile limitado")
     clone = RunConfig.from_dict(cfg.to_dict())
     check(clone.to_dict() == cfg.to_dict(), "serialização de RunConfig")

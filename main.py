@@ -42,8 +42,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 REQUIRED = [
-    ("telethon", "telethon>=1.35.0"),
-    ("cryptography", "cryptography>=41.0.0"),
+    ("telethon", "telethon==1.45.0"),
+    ("cryptography", "cryptography>=42.0.0"),
     ("psutil", "psutil>=5.9.0"),
 ]
 OPTIONAL = [("rich", "rich>=13.0.0")]
@@ -71,6 +71,12 @@ def check_dependencies(verbose: bool = False) -> bool:
                 __import__(module)
             except ImportError:
                 print(f"  [opcional] {package} — a interface fica mais simples sem ele")
+        try:
+            import cryptg  # noqa: F401
+        except Exception:
+            from i18n import t
+
+            print(f"  [opcional] {t('cryptg.missing')}")
 
     # valida suporte a scripts SQLite modernos
     import sqlite3

@@ -415,6 +415,13 @@ def test_falha_de_envio_sem_id_confirmado_reserva(env) -> None:
         async def send_file(self, *args, **kwargs):
             raise OSError("upload falhou")
 
+        async def __call__(self, request):
+            # O caminho com pré-upload monta SendMediaRequest diretamente;
+            # a falha simulada continua cobrindo a mesma fronteira de envio.
+            if type(request).__name__ == "SendMediaRequest":
+                raise OSError("upload falhou")
+            return await super().__call__(request)
+
     messages = [document_message(1, "aula.pdf")]
     setup = make_copier(env, messages, client=BrokenSendClient(messages))
     with fast_sleep():

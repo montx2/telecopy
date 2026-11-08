@@ -8,6 +8,7 @@ do executável.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -225,8 +226,18 @@ SYSTEM = detect_system()
 
 # Valores de performance (recalculados em runtime por RunConfig)
 CHUNK_SIZE = 512 * 1024
-MAX_WORKERS_DL = max(1, min(SYSTEM.cpu_logical, 8))
-MAX_WORKERS_UP = max(1, MAX_WORKERS_DL // 2)
+
+# Tetos de paralelismo. Transferência é I/O-bound (rede), não CPU-bound: o número
+# de arquivos em andamento pode passar do número de CPUs. Quem manda no limite
+# real é RAM, disco livre e o orçamento global de conexões.
+WORKERS_HARD_CAP = 16
+MAX_CONNECTIONS_PER_FILE = 32
+MAX_TOTAL_CONNECTIONS_CAP = 256
+
+MAX_WORKERS_DL = max(1, min(SYSTEM.cpu_logical * 2, WORKERS_HARD_CAP))
+# Pré-upload não é mais limitado à metade dos workers: isso serializava o
+# estágio mais lento do pipeline. O pool global continua limitando as partes.
+MAX_WORKERS_UP = MAX_WORKERS_DL
 BUFFER_RAM_MAX = int(SYSTEM.ram_available_gb * 0.6 * 1024**3)
 
 
@@ -239,8 +250,36 @@ def recommended_workers(ram_available_gb: float | None = None,
     ram = SYSTEM.ram_available_gb if ram_available_gb is None else ram_available_gb
     free_after_buffer = max(0.25, ram * (1.0 - memory_profile))
     by_ram = int(free_after_buffer / 0.5)
-    by_cpu = max(1, SYSTEM.cpu_logical)
-    return max(1, min(by_ram, by_cpu, 8))
+    by_cpu = max(1, SYSTEM.cpu_logical * 2)
+    return max(1, min(by_ram, by_cpu, WORKERS_HARD_CAP))
+
+
+def turbo_settings() -> dict:
+    """Perfil de velocidade máxima dentro do que o hardware aguenta.
+
+    Não mexe em ordem, checkpoint, dedup nem na política de flood: só abre o
+    paralelismo que o PC comporta. O orçamento de partes continua limitado por
+    RAM (BUFFER_RAM_MAX) e o disco continua protegido por temp_budget_bytes.
+    """
+    p = SYSTEM
+    workers = max(2, min(
+        WORKERS_HARD_CAP,
+        int(p.ram_available_gb / 0.35),
+        p.cpu_logical * 3,
+        max(2, int(p.disk_free_gb / 2.0)),
+    ))
+    per_file = max(4, min(16, workers * 2))
+    return {
+        "fast_transfer": True,
+        "workers": workers,
+        "connections_per_file": per_file,
+        "max_total_connections": max(16, min(128, workers * per_file)),
+        "lookahead": 0,                       # auto = 2 x workers
+        "max_tmp_gb": max(8.0, min(64.0, round(p.disk_free_gb * 0.5, 1))),
+        "delay": 0.2,
+        "memory_profile": 0.75,
+        "daily_limit": 0,                     # sem parede local no meio do canal
+    }
 
 
 # ── Diretórios ────────────────────────────────────────────────────────────────
@@ -700,7 +739,7 @@ ui = UI()
 class RunConfig:
     """Parâmetros que controlam o motor de cópia."""
 
-    delay: float = 0.9
+    delay: float = 0.35
     workers: int = field(default_factory=lambda: recommended_workers())
     memory_profile: float = 0.60
     resume: bool = True
@@ -716,11 +755,17 @@ class RunConfig:
     on_failure: str = "abort"  # abort | placeholder
     strict_order: bool = True
     max_retries: int = MAX_RETRIES
+    fast_transfer: bool = True
+    connections_per_file: int = 8
+    lookahead: int = 0          # 0 = auto (2 x workers)
+    max_tmp_gb: float = 16.0
+    max_total_connections: int = 32
+    daily_limit: int = DAILY_LIMIT   # guard local; 0 = sem teto local
 
     def __post_init__(self) -> None:
-        self.delay = max(0.1, float(self.delay))
+        self.delay = max(0.0, float(self.delay))
         self.memory_profile = max(0.10, min(0.95, float(self.memory_profile)))
-        self.workers = max(1, min(int(self.workers), 6))
+        self.workers = max(1, min(int(self.workers), WORKERS_HARD_CAP))
         if self.delivery not in {"reference", "upload", "forward"}:
             self.delivery = "upload"
         # `forward_mode` é alias legado: os dois campos nunca podem divergir,
@@ -736,6 +781,30 @@ class RunConfig:
         # Ordem estrita é um invariante, não uma opção que possa abrir lacunas.
         self.strict_order = True
         self.max_retries = max(0, min(int(self.max_retries), 10))
+        self.fast_transfer = bool(self.fast_transfer)
+        try:
+            self.connections_per_file = max(
+                1, min(int(self.connections_per_file), MAX_CONNECTIONS_PER_FILE))
+        except (TypeError, ValueError):
+            self.connections_per_file = 8
+        try:
+            self.lookahead = max(0, min(int(self.lookahead), 1000))
+        except (TypeError, ValueError):
+            self.lookahead = 0
+        try:
+            tmp_gb = float(self.max_tmp_gb)
+        except (TypeError, ValueError):
+            tmp_gb = 16.0
+        self.max_tmp_gb = tmp_gb if math.isfinite(tmp_gb) and tmp_gb > 0 else 16.0
+        try:
+            self.max_total_connections = max(
+                1, min(int(self.max_total_connections), MAX_TOTAL_CONNECTIONS_CAP))
+        except (TypeError, ValueError):
+            self.max_total_connections = 32
+        try:
+            self.daily_limit = max(0, min(int(self.daily_limit), 1_000_000))
+        except (TypeError, ValueError):
+            self.daily_limit = DAILY_LIMIT
 
     def to_dict(self) -> dict:
         return {
@@ -754,6 +823,12 @@ class RunConfig:
             "on_failure": self.on_failure,
             "strict_order": self.strict_order,
             "max_retries": self.max_retries,
+            "fast_transfer": self.fast_transfer,
+            "connections_per_file": self.connections_per_file,
+            "lookahead": self.lookahead,
+            "max_tmp_gb": self.max_tmp_gb,
+            "max_total_connections": self.max_total_connections,
+            "daily_limit": self.daily_limit,
         }
 
     @classmethod
