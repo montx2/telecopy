@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from config import RunConfig
+from tests import test_ordem as _ordem
 from tests.fake_telegram import FakeClient, text_message
-from tests.test_ordem import env, fast_sleep, make_copier, tl_video  # noqa: F401
 from tests.test_audit_probe import ContinuationFailsOnce
 
+env = _ordem.env
+fast_sleep = _ordem.fast_sleep
+make_copier = _ordem.make_copier
+tl_video = _ordem.tl_video
 
-def test_probe7_upload_path_tambem_duplica(env) -> None:  # noqa: F811
+
+def test_probe7_upload_path_tambem_duplica(env) -> None:
     msg = tl_video(1, "x" * 1500)
     client = ContinuationFailsOnce([msg])
     setup = make_copier(env, [msg], client=client, max_retries=2, server_copy=False)
@@ -22,7 +26,7 @@ def test_probe7_upload_path_tambem_duplica(env) -> None:  # noqa: F811
     assert len(client.downloads) == 1, "DUPLICATA no caminho upload: mídia reenviada no retry"
 
 
-def test_probe8_limite_diario_conta_envios_reais(env) -> None:  # noqa: F811
+def test_probe8_limite_diario_conta_envios_reais(env) -> None:
     import copier as cm
     msg = tl_video(1, "x" * 1500)
     client = ContinuationFailsOnce([msg])
@@ -45,7 +49,7 @@ class ForwardRawClient(FakeClient):
         return await super().__call__(request)
 
 
-def test_probe4b_forward_done_sem_id_confirmado(env) -> None:  # noqa: F811
+def test_probe4b_forward_done_sem_id_confirmado(env) -> None:
     messages = [text_message(1, "msg 1")]
     client = ForwardRawClient(messages)
     setup = make_copier(env, messages, client=client, forward_mode=True)
@@ -58,7 +62,7 @@ def test_probe4b_forward_done_sem_id_confirmado(env) -> None:  # noqa: F811
         "DONE gravado SEM ID de destino confirmado (forward)")
 
 
-def test_probe9_delivery_forward_e_honrado(env) -> None:  # noqa: F811
+def test_probe9_delivery_forward_e_honrado(env) -> None:
     messages = [text_message(1, "msg 1")]
     setup = make_copier(env, messages, delivery="forward")
     with fast_sleep():
@@ -69,7 +73,7 @@ def test_probe9_delivery_forward_e_honrado(env) -> None:  # noqa: F811
         "delivery='forward' ignorado pelo motor: fez cópia em vez de encaminhar")
 
 
-def test_probe10_slots_contam_no_limite(env) -> None:  # noqa: F811
+def test_probe10_slots_contam_no_limite(env) -> None:
     import copier as cm
     msg = tl_video(1, "x" * 3000)
     client = FakeClient([msg], fail_ids={1})

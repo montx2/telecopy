@@ -6,15 +6,16 @@ Arquivo temporário de auditoria; não faz parte da suíte entregue.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
-import pytest
-
-import copier as cm
 import core
 from database import Status
+from tests import test_ordem as _ordem
 from tests.fake_telegram import FakeClient, text_message
-from tests.test_ordem import env, fast_sleep, make_copier, tl_video  # noqa: F401
+
+env = _ordem.env
+fast_sleep = _ordem.fast_sleep
+make_copier = _ordem.make_copier
+tl_video = _ordem.tl_video
 
 
 class ContinuationFailsOnce(FakeClient):
@@ -31,7 +32,7 @@ class ContinuationFailsOnce(FakeClient):
         return await super().send_message(entity, text, reply_to=reply_to, **kwargs)
 
 
-def test_probe1_retry_nao_reenvia_midia_ja_confirmada(env) -> None:  # noqa: F811
+def test_probe1_retry_nao_reenvia_midia_ja_confirmada(env) -> None:
     msg = tl_video(1, "x" * 1500)
     client = ContinuationFailsOnce([msg])
     setup = make_copier(env, [msg], client=client, max_retries=2)
@@ -58,7 +59,7 @@ class SecondAlbumChunkFailsOnce(FakeClient):
         return await super().__call__(request)
 
 
-def test_probe2_retry_album_nao_reenvia_bloco_confirmado(env) -> None:  # noqa: F811
+def test_probe2_retry_album_nao_reenvia_bloco_confirmado(env) -> None:
     messages = [tl_video(i, f"p{i}", grouped_id=500) for i in range(1, 13)]
     client = SecondAlbumChunkFailsOnce(messages)
     setup = make_copier(env, messages, client=client, max_retries=2)
@@ -85,7 +86,7 @@ class ForwardFailsOnce(FakeClient):
         return await super().forward_messages(entity, messages, from_peer=from_peer, **kwargs)
 
 
-def test_probe3_forward_nao_avanca_sem_reservar_posicao(env) -> None:  # noqa: F811
+def test_probe3_forward_nao_avanca_sem_reservar_posicao(env) -> None:
     messages = [text_message(i, f"msg {i}") for i in range(1, 5)]
     client = ForwardFailsOnce(messages)
     setup = make_copier(env, messages, client=client, forward_mode=True)
@@ -104,7 +105,7 @@ def test_probe3_forward_nao_avanca_sem_reservar_posicao(env) -> None:  # noqa: F
         f"ORDEM VIOLADA: forwarded={forwarded} marcadores={ph} routes={routes}")
 
 
-def test_probe4_forward_done_exige_id_confirmado(env) -> None:  # noqa: F811
+def test_probe4_forward_done_exige_id_confirmado(env) -> None:
     messages = [text_message(1, "msg 1")]
     setup = make_copier(env, messages, forward_mode=True)
     # Resposta não parseável (parser ausente) -> _forward_item devolve [None]
@@ -136,7 +137,7 @@ def test_probe5_verificador_sem_falso_positivo(tmp_path, monkeypatch) -> None:
         "FALSO POSITIVO: pendência no fim da sequência reportada como violação")
 
 
-def test_probe6_preflight_detecta_buraco_fora_do_filtro(env) -> None:  # noqa: F811
+def test_probe6_preflight_detecta_buraco_fora_do_filtro(env) -> None:
     """msg2 (texto) falhou sem marcador; reexecutar com filtro 'videos' não pode ignorá-la."""
     messages = [tl_video(1), text_message(2, "falhou"), tl_video(3)]
     setup = make_copier(env, messages)
