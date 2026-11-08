@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import copier as cm
+
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -326,6 +328,23 @@ def test_espelho_dez_mensagens_em_ordem(env) -> None:
     with fast_sleep():
         asyncio.run(setup.copier.mirror(setup.source, setup.dest))
     assert [s["text"] for s in client.sent] == [f"msg {i}" for i in range(1, 11)]
+
+
+def test_abort_prompt_retoma_no_mesmo_ponto(env) -> None:
+    messages = [text_message(i, f"msg {i}") for i in range(1, 4)]
+    client = TransientTextClient(messages, fail_once={2})
+    setup = make_copier(env, messages, client=client, max_retries=0, on_failure="abort")
+    with patch.object(cm.ui, "ask", return_value="r"), \
+         patch.object(cm.ui, "menu", lambda *a, **k: None), \
+         patch.object(cm.ui, "warn", lambda *a, **k: None), \
+         patch.object(cm.ui, "blank", lambda *a, **k: None), \
+         fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 3 and result["errors"] == 0 and result["placeholders"] == 0
+    assert [s["text"] for s in client.sent] == ["msg 1", "msg 2", "msg 3"]
+    first = client.attempts.index("msg 2")
+    second = client.attempts.index("msg 2", first + 1)
+    assert "msg 3" not in client.attempts[:second]
 
 
 def test_config_delivery_server_copy_roundtrip(env) -> None:

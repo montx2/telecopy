@@ -1184,6 +1184,9 @@ class App:
             )
 
         filter_code = await self._pick_filter() or "all"
+        if filter_code != "all" and not ui.confirm(t("copy.filter_warning"), default=False):
+            self._pop()
+            return
         config = self._copy_options()
         if getattr(source, "noforwards", False) and config.forward_mode:
             config.forward_mode = False
@@ -1434,6 +1437,9 @@ class App:
             return
 
         filter_code = await self._pick_filter() or "all"
+        if filter_code != "all" and not ui.confirm(t("copy.filter_warning"), default=False):
+            self._pop()
+            return
         if not ui.confirm(t("multi.confirm", n=len(targets))):
             self._pop()
             return
@@ -1484,7 +1490,8 @@ class App:
             return
 
         totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0,
-                  "placeholders": 0}
+                  "placeholders": 0, "server_copies": 0, "bytes_saved": 0,
+                  "intentional_skips": 0}
         for index, setup in enumerate(ready, start=1):
             dest = setup.dest
             ui.section(f"{t('multi.dest_label', i=index, total=len(ready))}: "
@@ -1591,6 +1598,9 @@ class App:
             self._show_entity(setup.dest, t("entity.dest"))
 
         filter_code = await self._pick_filter() or "all"
+        if filter_code != "all" and not ui.confirm(t("copy.filter_warning"), default=False):
+            self._pop()
+            return
         ui.blank()
         ui.info(t("mirror.stop"))
         if not ui.confirm(t("copy.confirm")):
@@ -1946,6 +1956,7 @@ class App:
                     if getattr(setup.dest, "broadcast", False)
                     else t("copy.clone.kind.group"))
         config = RunConfig(**self.config.to_dict())
+        config.use_dedup = False
         if getattr(source, "noforwards", False) and config.forward_mode:
             config.forward_mode = False
             ui.info(t("copy.source_protected"))
@@ -2073,6 +2084,7 @@ class App:
                 ("4", t("tools.dedup"), t("tools.dedup.desc")),
                 ("5", t("tools.maint"), t("tools.maint.desc")),
                 ("6", t("tools.recover"), t("tools.recover.desc")),
+                ("7", t("tools.order"), t("tools.order.desc")),
                 ("0", t("menu.back"), ""),
             ])
             choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
@@ -2092,6 +2104,8 @@ class App:
                     await self._tool_maintenance()
                 elif choice == "6":
                     await self._tool_recover()
+                elif choice == "7":
+                    self._tool_order()
                 elif choice:
                     ui.warn(t("menu.invalid"))
             except Exception as exc:
@@ -2229,7 +2243,8 @@ class App:
 
         ui.info(t("queue.retry_start"))
         totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0,
-                  "placeholders": 0}
+                  "placeholders": 0, "server_copies": 0, "bytes_saved": 0,
+                  "intentional_skips": 0}
         for (source_id, dest_id), msg_ids in groups.items():
             try:
                 source = await self.client.get_entity(source_id)
@@ -2252,6 +2267,50 @@ class App:
             for key in totals:
                 totals[key] += int(result.get(key, 0) or 0)
         return totals
+
+    def _tool_order(self) -> None:
+        ui.clear()
+        ui.header(t("tools.order.title"))
+        pairs = db.order_pairs()
+        if not pairs:
+            ui.info(t("tools.order.empty"))
+            ui.pause()
+            return
+        violations = 0
+        unknown = 0
+        details = []
+        for pair in pairs:
+            rows = db.order_rows(pair["source_id"], pair["dest_id"])
+            last_by_topic = {}
+            pending_topics = set()
+            for row in rows:
+                topic = row.get("dest_topic")
+                dest_msg_id = row.get("dest_msg_id")
+                msg_id = row.get("msg_id")
+                if dest_msg_id is None:
+                    unknown += 1
+                    pending_topics.add(topic)
+                    continue
+                if topic in pending_topics:
+                    violations += 1
+                    details.append(f"{pair['source_id']}->{pair['dest_id']} "
+                                   f"tópico {topic}: {msg_id} após posição não resolvida")
+                    pending_topics.discard(topic)
+                last = last_by_topic.get(topic)
+                if last is not None and msg_id < last:
+                    violations += 1
+                    details.append(f"{pair['source_id']}->{pair['dest_id']} "
+                                   f"tópico {topic}: {msg_id} após {last}")
+                last_by_topic[topic] = msg_id
+        rows_box = [(t("tools.order.violations"), str(violations)),
+                    (t("tools.order.unknown"), str(unknown))]
+        ui.box(t("tools.order.title"), rows_box,
+               color=C.GREEN if violations == 0 else C.RED)
+        for detail in details[:20]:
+            ui.warn(detail)
+        if violations == 0:
+            ui.ok(t("tools.order.ok"))
+        ui.pause()
 
     async def _tool_recover(self) -> None:
         ui.clear()
@@ -2410,6 +2469,11 @@ class App:
                  t("copy.mode.forward") if cfg.forward_mode else t("copy.mode.copy")),
                 (t("settings.placeholder"),
                  t("settings.on") if cfg.placeholder else t("settings.off")),
+                (t("settings.delivery"), t(f"delivery.{cfg.delivery}")),
+                (t("settings.server_copy"),
+                 t("settings.on") if cfg.server_copy else t("settings.off")),
+                (t("settings.on_failure"), t(f"on_failure.{cfg.on_failure}")),
+                (t("settings.max_retries"), str(cfg.max_retries)),
                 (t("settings.signature"), cfg.signature or "—"),
                 (t("clone.suffix"), self.prefs.clone_suffix or "—"),
                 (t("clone.photo"),
@@ -2433,6 +2497,10 @@ class App:
                 ("f", t("settings.clone_photo.toggle"), ""),
                 ("k", t("settings.clone_start.toggle"), ""),
                 ("h", t("settings.placeholder.toggle"), ""),
+                ("d", t("settings.delivery.toggle"), t(f"delivery.{cfg.delivery}")),
+                ("s", t("settings.server_copy.toggle"), ""),
+                ("o", t("settings.on_failure.toggle"), t(f"on_failure.{cfg.on_failure}")),
+                ("m", t("settings.max_retries.option"), str(cfg.max_retries)),
                 ("b", t("settings.data_reset"), t("settings.data_reset.desc")),
                 ("c", t("settings.creds.reset"), t("settings.creds.desc")),
                 ("0", t("menu.back"), ""),
@@ -2447,6 +2515,9 @@ class App:
             elif choice == "2":
                 self._set_workers()
             elif choice == "3":
+                if not cfg.use_dedup and not ui.confirm(t("settings.dedup.warning"), default=False):
+                    await asyncio.sleep(0.2)
+                    continue
                 cfg.use_dedup = not cfg.use_dedup
                 self._save_config()
                 ui.ok(f"{t('settings.dedup')}: "
@@ -2460,6 +2531,7 @@ class App:
                 await asyncio.sleep(0.7)
             elif choice == "5":
                 cfg.forward_mode = not cfg.forward_mode
+                cfg.delivery = "forward" if cfg.forward_mode else "reference"
                 self._save_config()
                 ui.ok(f"{t('settings.forward')}: "
                       f"{t('copy.mode.forward') if cfg.forward_mode else t('copy.mode.copy')}")
@@ -2486,6 +2558,34 @@ class App:
                 message = (f"{t('settings.placeholder')}: "
                            f"{t('settings.on') if cfg.placeholder else t('settings.off')}")
                 (ui.ok if cfg.placeholder else ui.warn)(message)
+                await asyncio.sleep(0.7)
+            elif choice == "d":
+                order = {"reference": "upload", "upload": "forward", "forward": "reference"}
+                cfg.delivery = order.get(cfg.delivery, "reference")
+                cfg.forward_mode = cfg.delivery == "forward"
+                self._save_config()
+                ui.ok(f"{t('settings.delivery')}: {t(f'delivery.{cfg.delivery}')}")
+                await asyncio.sleep(0.7)
+            elif choice == "s":
+                cfg.server_copy = not cfg.server_copy
+                self._save_config()
+                ui.ok(f"{t('settings.server_copy')}: "
+                      f"{t('settings.on') if cfg.server_copy else t('settings.off')}")
+                await asyncio.sleep(0.7)
+            elif choice == "o":
+                cfg.on_failure = "abort" if cfg.on_failure == "placeholder" else "placeholder"
+                self._save_config()
+                ui.ok(f"{t('settings.on_failure')}: {t(f'on_failure.{cfg.on_failure}')}")
+                await asyncio.sleep(0.7)
+            elif choice == "m":
+                raw = ui.ask(t("settings.max_retries"), required=False)
+                if raw is not None:
+                    try:
+                        cfg.max_retries = max(0, min(10, int(raw)))
+                        self._save_config()
+                        ui.ok(f"{t('settings.max_retries')}: {cfg.max_retries}")
+                    except ValueError:
+                        ui.err(t("menu.invalid"))
                 await asyncio.sleep(0.7)
             elif choice == "b":
                 if ui.confirm(t("settings.data_reset.confirm")):
@@ -2680,6 +2780,12 @@ class App:
             rows.append((t("result.bytes"), Fmt.size(result["bytes"])))
         if result.get("speed"):
             rows.append((t("result.speed"), str(result["speed"])))
+        if result.get("server_copies"):
+            rows.append((t("result.server_copies"), Fmt.number(result["server_copies"])))
+        if result.get("bytes_saved"):
+            rows.append((t("result.bytes_saved"), Fmt.size(result["bytes_saved"])))
+        if result.get("intentional_skips"):
+            rows.append((t("result.intentional_skips"), Fmt.number(result["intentional_skips"])))
         if result.get("placeholders"):
             rows.append((t("result.placeholders"),
                          f"{Fmt.number(result['placeholders'])} ({t('result.placeholders.hint')})"))

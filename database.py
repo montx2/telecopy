@@ -861,13 +861,26 @@ class Repository:
             ).fetchone()
         return row is not None
 
+    def order_pairs(self) -> List[Dict[str, int]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_id, dest_id FROM checkpoints
+                UNION
+                SELECT source_id, dest_id FROM placeholders
+                 ORDER BY source_id, dest_id
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def order_rows(self, source_id: int, dest_id: int) -> List[Dict[str, Any]]:
         with self._db() as conn:
             rows = conn.execute(
                 """
                 SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'content' AS kind
                   FROM checkpoints
-                 WHERE source_id=? AND dest_id=? AND status='done' AND dest_msg_id IS NOT NULL
+                 WHERE source_id=? AND dest_id=?
+                   AND (status='done' OR (status='error' AND dest_msg_id IS NULL))
                 UNION ALL
                 SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'marker' AS kind
                   FROM placeholders WHERE source_id=? AND dest_id=?

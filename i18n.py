@@ -306,6 +306,40 @@ _s("order.reserve_failed", "Não foi possível reservar a posição; a cópia fo
    "Could not reserve the position; the copy stopped without advancing.")
 _s("order.pending", "Há item anterior não resolvido neste tópico; envio bloqueado para preservar a ordem.",
    "There is an earlier unresolved item in this topic; send blocked to preserve order.")
+_s("failure.resume", "Retomar tentativa neste ponto", "Retry at this point")
+_s("failure.placeholder", "Reservar posição e continuar", "Reserve position and continue")
+_s("failure.abort", "Abortar cópia", "Abort copy")
+_s("settings.delivery", "Entrega de mídia", "Media delivery")
+_s("settings.delivery.toggle", "Alternar entrega (referência/upload/forward)",
+   "Cycle delivery (reference/upload/forward)")
+_s("settings.server_copy", "Cópia no servidor", "Server-side copy")
+_s("settings.server_copy.toggle", "Alternar cópia no servidor sem download",
+   "Toggle server-side copy without download")
+_s("settings.on_failure", "Política de falha", "Failure policy")
+_s("settings.on_failure.toggle", "Alternar falha (marcador/abortar)",
+   "Cycle failure policy (placeholder/abort)")
+_s("settings.max_retries", "Retentativas por item", "Retries per item")
+_s("settings.max_retries.option", "Definir retentativas por item", "Set retries per item")
+_s("delivery.reference", "Referência (sem download/upload)", "Reference (no download/upload)")
+_s("delivery.upload", "Upload (baixar e reenviar)", "Upload (download and re-send)")
+_s("delivery.forward", "Encaminhar", "Forward")
+_s("on_failure.placeholder", "Reservar posição", "Reserve position")
+_s("on_failure.abort", "Abortar/perguntar", "Abort/ask")
+_s("settings.dedup.warning", "Deduplicação pode abrir buracos na ordem; use apenas com confirmação.",
+   "Deduplication can open order holes; use only with confirmation.")
+_s("copy.filter_warning", "Filtros descartam mensagens e criam buracos intencionais. Continuar?",
+   "Filters discard messages and create intentional holes. Continue?")
+_s("tools.order", "Verificar ordem", "Check order")
+_s("tools.order.desc", "Compara msg_id × dest_msg_id por tópico (offline)",
+   "Compare msg_id × dest_msg_id per topic (offline)")
+_s("tools.order.title", "VERIFICAR ORDEM", "CHECK ORDER")
+_s("tools.order.empty", "Nenhum par com histórico para verificar.", "No pair with history to check.")
+_s("tools.order.ok", "0 violações de ordem.", "0 order violations.")
+_s("tools.order.violations", "Violações de ordem", "Order violations")
+_s("tools.order.unknown", "Itens sem ID de destino (não verificável)", "Items without destination ID (not verifiable)")
+_s("result.server_copies", "Copiadas no servidor", "Copied on server")
+_s("result.bytes_saved", "Tráfego evitado", "Traffic avoided")
+_s("result.intentional_skips", "Buracos intencionais", "Intentional holes")
 _s("placeholder.pending", "⚠️ Conteúdo em recuperação (mensagem {id}). Motivo: {reason}",
    "⚠️ Content being recovered (message {id}). Reason: {reason}")
 _s("placeholder.unrecoverable", "❌ Conteúdo indisponível (mensagem {id}). Motivo: {reason}",

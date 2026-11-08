@@ -51,6 +51,7 @@ from config import (
     MESSAGE_LIMIT,
     TEMP_DIR,
     RunConfig,
+    ui,
 )
 from database import Repository, Status
 from dedup import DedupEngine, hash_message
@@ -718,6 +719,17 @@ class Copier:
                 pending.setdefault(topic, int(msg.id))
         return violations
 
+    def _prompt_failure(self, reason: str) -> str:
+        ui.blank()
+        ui.warn(reason)
+        ui.menu([
+            ("r", t("failure.resume"), ""),
+            ("p", t("failure.placeholder"), ""),
+            ("a", t("failure.abort"), ""),
+        ])
+        choice = (ui.ask(t("menu.option"), required=False) or "a").strip().lower()
+        return choice if choice in {"r", "p", "a"} else "a"
+
     def _audit(self, stats: TransferStats, messages: List[Any], source_id: int,
                dest_id: int, topic_map: Optional[Dict[int, int]],
                topic_titles: Optional[Dict[int, str]], topic_roots: set) -> None:
@@ -1265,37 +1277,69 @@ class Copier:
                                                       dest_topic=payload.get("dest_topic"))
                                     self._stop = True
                             else:
-                                self._mark_failed(unreserved, source_id, dest_id, stats, error,
-                                                  dest_topic=payload.get("dest_topic"))
-                                if self.cfg.on_failure == "abort":
+                                action = (self._prompt_failure(self._explain(error))
+                                          if self.cfg.on_failure == "abort" else "a")
+                                if action == "p" and self.cfg.placeholder:
+                                    try:
+                                        for entry in payload.get("plan", []):
+                                            if entry["msg"].id in reserved or entry.get("dest_msg_id"):
+                                                continue
+                                            entry["failed"] = True
+                                            entry["reason"] = self._explain(error)
+                                            await self._record_failed_entry(
+                                                entry, source_id, dest_id, dest,
+                                                payload.get("dest_topic"), payload.get("reply_to"),
+                                                stats, payload, self._explain(error),
+                                            )
+                                    except Exception as reserve_exc:
+                                        logger.error(f"Reserva após escolha msg {index}: {reserve_exc}")
+                                        self._mark_failed(unreserved, source_id, dest_id, stats, reserve_exc,
+                                                          dest_topic=payload.get("dest_topic"))
+                                        self._stop = True
+                                elif action == "r":
+                                    try:
+                                        self._check_limit()
+                                        await self._send(payload, source_id, dest_id, stats, progress)
+                                        error = None
+                                    except DailyLimitReached:
+                                        raise
+                                    except Exception as retry_exc:
+                                        logger.error(f"Retomada manual msg {index}: {retry_exc}")
+                                        self._mark_failed(unreserved, source_id, dest_id, stats, retry_exc,
+                                                          dest_topic=payload.get("dest_topic"))
+                                        self._stop = True
+                                else:
+                                    self._mark_failed(unreserved, source_id, dest_id, stats, error,
+                                                      dest_topic=payload.get("dest_topic"))
                                     self._stop = True
-                        reserved_now = payload.get("reserved_ids", set())
-                        all_reserved = all(m.id in reserved_now or m.id in confirmed
-                                           for m in payload["messages"])
-                        reason = self._explain(error)
-                        if stats.first_error is None:
-                            stats.first_error = reason
-                        if not first_failure_shown:
-                            print(f"\n  {C.RED}✗{C.RST}  "
-                                  f"{t('copy.first_failure', reason=reason)}", flush=True)
-                            first_failure_shown = True
+                        if error is not None:
+                            reserved_now = payload.get("reserved_ids", set())
+                            all_reserved = all(m.id in reserved_now or m.id in confirmed
+                                               for m in payload["messages"])
+                            reason = self._explain(error)
+                            if stats.first_error is None:
+                                stats.first_error = reason
+                            if not first_failure_shown:
+                                print(f"\n  {C.RED}✗{C.RST}  "
+                                      f"{t('copy.first_failure', reason=reason)}", flush=True)
+                                first_failure_shown = True
 
-                        error_key = (type(error).__name__, reason)
-                        if error_key == last_error_key:
-                            consecutive_errors += 1
-                        else:
-                            last_error_key = error_key
-                            consecutive_errors = 1
+                            error_key = (type(error).__name__, reason)
+                            if error_key == last_error_key:
+                                consecutive_errors += 1
+                            else:
+                                last_error_key = error_key
+                                consecutive_errors = 1
 
-                        if isinstance(error, FloodWaitError):
-                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
-                            self._stop = True
-                        elif self._is_fatal_send_error(error) or reason == t("order.reserve_failed"):
-                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
-                            self._stop = True
-                        elif consecutive_errors >= 3 and not all_reserved:
-                            print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
-                            self._stop = True
+                            if isinstance(error, FloodWaitError):
+                                print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
+                                self._stop = True
+                            elif self._is_fatal_send_error(error) or reason == t("order.reserve_failed"):
+                                print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
+                                self._stop = True
+                            elif consecutive_errors >= 3 and not all_reserved:
+                                print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
+                                self._stop = True
                     else:
                         last_error_key = None
                         consecutive_errors = 0
@@ -2171,6 +2215,37 @@ class Copier:
         self.repo.clear_failure(source_id, dest_id, msg_id)
         return "unrecoverable"
 
+    async def _edit_placeholder_media(self, row, dest, entry, source, text, entities,
+                                      progress: ProgressDisplay):
+        file = entry.get("path")
+        if not file and entry.get("reference"):
+            file = tl_utils.get_input_media(entry["msg"].media,
+                                            is_photo=entry["media_type"] == "photo")
+        try:
+            await self._edit_placeholder_message(row, dest, text, entities, entry=entry, file=file)
+            return file
+        except (FileReferenceExpiredError, FileReferenceInvalidError) as exc:
+            logger.warning(f"Referência expirada na edição msg {row.get('msg_id')}: {exc}")
+        if await self._refresh_reference(entry, source):
+            file = tl_utils.get_input_media(entry["msg"].media,
+                                            is_photo=entry["media_type"] == "photo")
+            try:
+                await self._edit_placeholder_message(row, dest, text, entities, entry=entry, file=file)
+                return file
+            except (FileReferenceExpiredError, FileReferenceInvalidError):
+                pass
+        payload = await self._prepare(0, entry["msg"], progress, source=source,
+                                      strong=True, force_upload=True)
+        try:
+            prepared = payload["plan"][0]
+            if prepared.get("failed") or not prepared.get("path"):
+                raise RuntimeError(prepared.get("reason") or t("copy.download_unavailable"))
+            await self._edit_placeholder_message(row, dest, text, entities,
+                                                 entry=prepared, file=prepared["path"])
+            return prepared["path"]
+        finally:
+            self._cleanup(payload.get("plan", []))
+
     async def _deliver_placeholder(
         self, source, dest, row: Dict[str, Any], stats: TransferStats,
         quiet: Optional[ProgressDisplay] = None,
@@ -2196,15 +2271,13 @@ class Copier:
             if caption is None:
                 caption = self._placeholder_caption(message)[0]
             entities = _decode_entities(row.get("entities"))
-            file = entry.get("path")
-            if not file and entry.get("reference"):
-                file = tl_utils.get_input_media(message.media, is_photo=entry["media_type"] == "photo")
-            limit = CAPTION_LIMIT if file else MESSAGE_LIMIT
+            has_media = bool(entry.get("path") or entry.get("reference"))
+            limit = CAPTION_LIMIT if has_media else MESSAGE_LIMIT
             parts = text_chunks(caption, entities, limit) or [("", [])]
             text, first_entities = parts[0]
             try:
-                await self._edit_placeholder_message(
-                    row, dest, text, first_entities, entry=entry, file=file
+                file = await self._edit_placeholder_media(
+                    row, dest, entry, source, text, first_entities, quiet
                 )
                 slots = {int(p["part_index"]): p for p in
                          self.repo.placeholder_parts(source_id, dest_id, msg_id)}
