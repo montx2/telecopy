@@ -299,6 +299,80 @@ _s("settings.clone_start.toggle", "Iniciar cópia após criar", "Start copying a
 _s("copy.topic_unmapped", "A mensagem pertence ao tópico de origem {topic}, que não está no mapa do destino. Atualize a estrutura antes de copiar.", "The message belongs to source topic {topic}, which is not mapped in the destination. Refresh the structure before copying.")
 _s("copy.unsupported_media", "Tipo de mensagem não reproduzível pela API ({kind}); registrado como falha, não como cópia concluída.", "Message type cannot be reproduced by the API ({kind}); recorded as a failure, not as a completed copy.")
 _s("copy.download_unavailable", "Download da mídia indisponível ou expirado.", "Media download unavailable or expired.")
+_s("copy.download_failed", "Não foi possível baixar a mídia: {reason}", "Could not download the media: {reason}")
+_s("order.violation", "Violação de ordem detectada; refaça o tópico/destino afetado.",
+   "Order violation detected; rebuild the affected topic/destination.")
+_s("order.reserve_failed", "Não foi possível reservar a posição; a cópia foi interrompida sem avançar.",
+   "Could not reserve the position; the copy stopped without advancing.")
+_s("order.pending", "Há item anterior não resolvido neste tópico; envio bloqueado para preservar a ordem.",
+   "There is an earlier unresolved item in this topic; send blocked to preserve order.")
+_s("failure.resume", "Retomar tentativa neste ponto", "Retry at this point")
+_s("failure.placeholder", "Reservar posição e continuar", "Reserve position and continue")
+_s("failure.abort", "Abortar cópia", "Abort copy")
+_s("settings.delivery", "Entrega de mídia", "Media delivery")
+_s("settings.delivery.toggle", "Alternar entrega (referência/upload/forward)",
+   "Cycle delivery (reference/upload/forward)")
+_s("settings.server_copy", "Cópia no servidor", "Server-side copy")
+_s("settings.server_copy.toggle", "Alternar cópia no servidor sem download",
+   "Toggle server-side copy without download")
+_s("settings.on_failure", "Política de falha", "Failure policy")
+_s("settings.on_failure.toggle", "Alternar falha (marcador/abortar)",
+   "Cycle failure policy (placeholder/abort)")
+_s("settings.max_retries", "Retentativas por item", "Retries per item")
+_s("settings.max_retries.option", "Definir retentativas por item", "Set retries per item")
+_s("delivery.reference", "Referência (sem download/upload)", "Reference (no download/upload)")
+_s("delivery.upload", "Upload (baixar e reenviar)", "Upload (download and re-send)")
+_s("delivery.forward", "Encaminhar", "Forward")
+_s("on_failure.placeholder", "Reservar posição", "Reserve position")
+_s("on_failure.abort", "Abortar/perguntar", "Abort/ask")
+_s("settings.dedup.warning", "Deduplicação pode abrir buracos na ordem; use apenas com confirmação.",
+   "Deduplication can open order holes; use only with confirmation.")
+_s("copy.filter_warning", "Filtros descartam mensagens e criam buracos intencionais. Continuar?",
+   "Filters discard messages and create intentional holes. Continue?")
+_s("tools.order", "Verificar ordem", "Check order")
+_s("tools.order.desc", "Compara msg_id × dest_msg_id por tópico (offline)",
+   "Compare msg_id × dest_msg_id per topic (offline)")
+_s("tools.order.title", "VERIFICAR ORDEM", "CHECK ORDER")
+_s("tools.order.empty", "Nenhum par com histórico para verificar.", "No pair with history to check.")
+_s("tools.order.ok", "0 violações de ordem.", "0 order violations.")
+_s("tools.order.violations", "Violações de ordem", "Order violations")
+_s("tools.order.unknown", "Itens sem ID de destino (não verificável)", "Items without destination ID (not verifiable)")
+_s("result.server_copies", "Copiadas no servidor", "Copied on server")
+_s("result.bytes_saved", "Tráfego evitado", "Traffic avoided")
+_s("result.intentional_skips", "Buracos intencionais", "Intentional holes")
+_s("placeholder.pending", "⚠️ Conteúdo em recuperação (mensagem {id}). Motivo: {reason}",
+   "⚠️ Content being recovered (message {id}). Reason: {reason}")
+_s("placeholder.unrecoverable", "❌ Conteúdo indisponível (mensagem {id}). Motivo: {reason}",
+   "❌ Content unavailable (message {id}). Reason: {reason}")
+_s("placeholder.missing", "A mensagem original não está mais disponível na origem.",
+   "The original message is no longer available in the source.")
+_s("placeholder.continuation", "⚠️ Continuação pendente da mensagem {id} (parte {part}).",
+   "⚠️ Pending continuation of message {id} (part {part}).")
+_s("settings.placeholder", "Reservar posição em falhas", "Reserve position on failures")
+_s("settings.placeholder.toggle", "Reservar posição em falhas (recomendado)",
+   "Reserve position on failures (recommended)")
+_s("tools.recover", "Recuperar lacunas", "Recover gaps")
+_s("tools.recover.desc", "Preenche marcadores por edição, mantendo a ordem",
+   "Fill placeholders by editing, keeping the order")
+_s("tools.recover.title", "RECUPERAR LACUNAS", "RECOVER GAPS")
+_s("tools.recover.empty", "Nenhuma reserva aberta para recuperar.",
+   "No open placeholders to recover.")
+_s("tools.recover.confirm", "Recuperar agora as reservas abertas?",
+   "Recover the open placeholders now?")
+_s("tools.recover.done", "Recuperação concluída.", "Recovery finished.")
+_s("tools.recover.columns", "Par origem→destino: abertas / recuperadas / irrecuperáveis",
+   "Source→destination pair: open / recovered / unrecoverable")
+_s("tools.recover.pair", "Origem {source} → destino {dest}",
+   "Source {source} → destination {dest}")
+_s("tools.recover.failed", "Falhas na recuperação", "Recovery failures")
+_s("copy.placeholders", "Reservas de posição: {count} (recupere em [5]→6)",
+   "Position placeholders: {count} (recover in [5]→6)")
+_s("result.placeholders", "Reservas de posição", "Position placeholders")
+_s("result.placeholders.hint", "recupere em [5]→6", "recover in [5]→6")
+_s("result.unrecoverable", "Irrecuperáveis", "Unrecoverable")
+_s("result.pending_placeholders",
+   "Conferência: há reservas de posição pendentes; a cópia NÃO está completa. Use [5]→6.",
+   "Check: there are pending position placeholders; the copy is NOT complete. Use [5]→6.")
 _s("copy.send_unconfirmed", "O Telegram não confirmou o ID da mensagem enviada; o item não foi marcado como concluído.", "Telegram did not confirm the sent message ID; the item was not marked as completed.")
 _s("result.complete", "Conferência: todas as mensagens selecionadas foram concluídas.", "Check: all selected messages were completed.")
 _s("result.incomplete", "Conferência: a cópia NÃO está completa. Veja erros/tópicos abaixo e retome.", "Check: the copy is NOT complete. See errors/topics below and resume.")

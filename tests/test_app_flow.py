@@ -335,7 +335,6 @@ def test_fluxo_ferramentas() -> None:
     asyncio.run(_guard(app._tool_dedup()))
     feed("n", "n", "n", "n")
     asyncio.run(_guard(app._tool_maintenance()))
-    await_marker = True
     check(True, "ferramentas executam sem exceção")
 
 
@@ -349,7 +348,7 @@ def test_fluxo_configuracoes() -> None:
 
 
 def test_fluxo_idioma_ingles() -> None:
-    from i18n import get_lang, set_lang, t
+    from i18n import set_lang, t
 
     set_lang("en")
     check(t("menu.copy") == "Copy channel", "tradução EN do menu")

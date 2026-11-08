@@ -9,6 +9,7 @@ Tabelas
     sessions     metadados de cada execução
     stats        contadores agregados por sessão
     kv           preferências / estado interno
+    placeholders posições reservadas para conteúdo ainda não entregue
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import DB_FILE
+
+
+PLACEHOLDER_STATES = frozenset({"open", "recovered", "unrecoverable"})
 
 
 class Status(str, Enum):
@@ -133,6 +137,36 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS placeholders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id    INTEGER NOT NULL,
+    dest_id      INTEGER NOT NULL,
+    msg_id       INTEGER NOT NULL,
+    dest_msg_id  INTEGER NOT NULL,
+    dest_topic   INTEGER,
+    caption      TEXT,
+    entities     TEXT,
+    reason       TEXT,
+    state        TEXT NOT NULL DEFAULT 'open',
+    created_at   REAL NOT NULL DEFAULT 0,
+    updated_at   REAL NOT NULL DEFAULT 0,
+    UNIQUE (source_id, dest_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ph_pair ON placeholders (source_id, dest_id, state);
+
+CREATE TABLE IF NOT EXISTS placeholder_parts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id    INTEGER NOT NULL,
+    dest_id      INTEGER NOT NULL,
+    msg_id       INTEGER NOT NULL,
+    part_index   INTEGER NOT NULL,
+    dest_msg_id  INTEGER NOT NULL,
+    dest_topic   INTEGER,
+    created_at   REAL NOT NULL DEFAULT 0,
+    UNIQUE (source_id, dest_id, msg_id, part_index)
+);
+CREATE INDEX IF NOT EXISTS idx_ph_parts_msg ON placeholder_parts (source_id, dest_id, msg_id);
 """
 
 
@@ -228,7 +262,7 @@ class Repository:
             except sqlite3.Error as exc:  # pragma: no cover
                 ok = f"erro: {exc}"
             counts = {}
-            for table in ("checkpoints", "dedup", "processed", "sessions", "failures"):
+            for table in ("checkpoints", "dedup", "processed", "sessions", "failures", "placeholders"):
                 try:
                     counts[table] = conn.execute(
                         f"SELECT COUNT(*) FROM {table}"  # noqa: S608 - nomes fixos
@@ -379,7 +413,7 @@ class Repository:
         """Zera checkpoints/falhas/marcas apenas deste par origem→destino."""
         removed = 0
         with self._db() as conn:
-            for table in ("checkpoints", "failures", "processed"):
+            for table in ("checkpoints", "failures", "processed", "placeholders"):
                 cur = conn.execute(
                     f"DELETE FROM {table} WHERE source_id=? AND dest_id=?",
                     (source_id, dest_id),
@@ -627,6 +661,241 @@ class Repository:
             cur = conn.execute("DELETE FROM failures")
             return cur.rowcount or 0
 
+    # ── reservas de posição ───────────────────────────────────────────────────
+
+    def add_placeholder(
+        self,
+        source_id: int,
+        dest_id: int,
+        msg_id: int,
+        dest_msg_id: int,
+        dest_topic: Optional[int] = None,
+        caption: Optional[str] = None,
+        entities: Optional[str] = None,
+        reason: str = "",
+        state: str = "open",
+    ) -> int:
+        """Vincula uma posição reservada; não sobrescreve vínculo existente."""
+        if state not in PLACEHOLDER_STATES:
+            raise ValueError(f"invalid placeholder state: {state}")
+        now = time.time()
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO placeholders
+                    (source_id, dest_id, msg_id, dest_msg_id, dest_topic,
+                     caption, entities, reason, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_id, dest_id, msg_id) DO NOTHING
+                """,
+                (source_id, dest_id, msg_id, dest_msg_id, dest_topic,
+                 caption, entities, str(reason)[:300], state, now, now),
+            )
+            row = conn.execute(
+                "SELECT id FROM placeholders WHERE source_id=? AND dest_id=? AND msg_id=?",
+                (source_id, dest_id, msg_id),
+            ).fetchone()
+        return int(row["id"])
+
+    def get_placeholder(
+        self, source_id: int, dest_id: int, msg_id: int
+    ) -> Optional[Dict[str, Any]]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM placeholders WHERE source_id=? AND dest_id=? AND msg_id=?",
+                (source_id, dest_id, msg_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def open_placeholders(
+        self, source_id: Optional[int] = None, dest_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM placeholders WHERE state='open'"
+        params: List[Any] = []
+        if source_id is not None:
+            query += " AND source_id=?"
+            params.append(source_id)
+        if dest_id is not None:
+            query += " AND dest_id=?"
+            params.append(dest_id)
+        query += " ORDER BY source_id, dest_id, msg_id"
+        with self._db() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    def set_placeholder_state(
+        self, source_id: int, dest_id: int, msg_id: int,
+        state: str, reason: Optional[str] = None,
+    ) -> bool:
+        if state not in PLACEHOLDER_STATES:
+            raise ValueError(f"invalid placeholder state: {state}")
+        with self._db() as conn:
+            cur = conn.execute(
+                """
+                UPDATE placeholders
+                   SET state=?, reason=COALESCE(?, reason), updated_at=?
+                 WHERE source_id=? AND dest_id=? AND msg_id=?
+                """,
+                (state, str(reason)[:300] if reason is not None else None,
+                 time.time(), source_id, dest_id, msg_id),
+            )
+        return (cur.rowcount or 0) > 0
+
+    def placeholder_stats(
+        self, source_id: Optional[int] = None, dest_id: Optional[int] = None
+    ) -> Dict[str, int]:
+        query = """
+            SELECT COALESCE(SUM(state='open'), 0)          AS open,
+                   COALESCE(SUM(state='recovered'), 0)     AS recovered,
+                   COALESCE(SUM(state='unrecoverable'), 0) AS unrecoverable
+              FROM placeholders
+        """
+        params: List[Any] = []
+        conditions = []
+        if source_id is not None:
+            conditions.append("source_id=?")
+            params.append(source_id)
+        if dest_id is not None:
+            conditions.append("dest_id=?")
+            params.append(dest_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        with self._db() as conn:
+            row = conn.execute(query, params).fetchone()
+        return {key: int(row[key] or 0) for key in ("open", "recovered", "unrecoverable")}
+
+    def placeholder_pairs(self) -> List[Dict[str, Any]]:
+        """Resumo por par, incluindo pares que já não têm reservas abertas."""
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_id, dest_id,
+                       COALESCE(SUM(state='open'), 0)          AS open,
+                       COALESCE(SUM(state='recovered'), 0)     AS recovered,
+                       COALESCE(SUM(state='unrecoverable'), 0) AS unrecoverable
+                  FROM placeholders
+                 GROUP BY source_id, dest_id
+                 ORDER BY source_id, dest_id
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_placeholder_part(
+        self, source_id: int, dest_id: int, msg_id: int, part_index: int,
+        dest_msg_id: int, dest_topic: Optional[int] = None,
+    ) -> int:
+        now = time.time()
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO placeholder_parts
+                    (source_id, dest_id, msg_id, part_index, dest_msg_id, dest_topic, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_id, dest_id, msg_id, part_index) DO NOTHING
+                """,
+                (source_id, dest_id, msg_id, int(part_index), int(dest_msg_id), dest_topic, now),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM placeholder_parts
+                 WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=?
+                """,
+                (source_id, dest_id, msg_id, int(part_index)),
+            ).fetchone()
+        return int(row["id"])
+
+    def placeholder_parts(
+        self, source_id: int, dest_id: int, msg_id: int
+    ) -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM placeholder_parts
+                 WHERE source_id=? AND dest_id=? AND msg_id=?
+                 ORDER BY part_index
+                """,
+                (source_id, dest_id, msg_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def placeholder_msg_ids(self, source_id: int, dest_id: int) -> Set[int]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT msg_id FROM placeholders WHERE source_id=? AND dest_id=?",
+                (source_id, dest_id),
+            ).fetchall()
+        return {int(row["msg_id"]) for row in rows}
+
+    def order_pending_before(
+        self, source_id: int, dest_id: int, dest_topic: Optional[int], msg_id: int
+    ) -> bool:
+        with self._db() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM checkpoints c
+                  LEFT JOIN placeholders p
+                    ON p.source_id=c.source_id AND p.dest_id=c.dest_id AND p.msg_id=c.msg_id
+                 WHERE c.source_id=? AND c.dest_id=? AND c.msg_id<?
+                   AND (c.dest_topic=? OR (c.dest_topic IS NULL AND ? IS NULL))
+                   AND NOT (c.status IN ('done','skipped') OR p.dest_msg_id IS NOT NULL)
+                 LIMIT 1
+                """,
+                (source_id, dest_id, int(msg_id), dest_topic, dest_topic),
+            ).fetchone()
+        return row is not None
+
+    def order_terminal_after(
+        self, source_id: int, dest_id: int, dest_topic: Optional[int], msg_id: int
+    ) -> bool:
+        with self._db() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM checkpoints c
+                  LEFT JOIN placeholders p
+                    ON p.source_id=c.source_id AND p.dest_id=c.dest_id AND p.msg_id=c.msg_id
+                 WHERE c.source_id=? AND c.dest_id=? AND c.msg_id>?
+                   AND (c.dest_topic=? OR (c.dest_topic IS NULL AND ? IS NULL))
+                   AND (c.status IN ('done','skipped') OR p.dest_msg_id IS NOT NULL)
+                 LIMIT 1
+                """,
+                (source_id, dest_id, int(msg_id), dest_topic, dest_topic),
+            ).fetchone()
+        return row is not None
+
+    def order_pairs(self) -> List[Dict[str, int]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_id, dest_id FROM checkpoints
+                UNION
+                SELECT source_id, dest_id FROM placeholders
+                 ORDER BY source_id, dest_id
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def order_rows(self, source_id: int, dest_id: int) -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'content' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
+                  FROM checkpoints
+                 WHERE source_id=? AND dest_id=?
+                   AND (status='done' OR (status='error' AND dest_msg_id IS NULL))
+                UNION ALL
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'marker' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
+                  FROM placeholders WHERE source_id=? AND dest_id=?
+                UNION ALL
+                SELECT msg_id, dest_msg_id, dest_topic, part_index, 'continuation' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
+                  FROM placeholder_parts WHERE source_id=? AND dest_id=?
+                 ORDER BY dest_topic, pending_pos, dest_msg_id, part_index
+                """,
+                (source_id, dest_id, source_id, dest_id, source_id, dest_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── chave/valor ───────────────────────────────────────────────────────────
 
     def set_kv(self, key: str, value: str) -> None:
@@ -682,7 +951,8 @@ class Repository:
     def reset_all(self) -> None:
         """Apaga o histórico de cópias (mantém apenas as preferências)."""
         with self._db() as conn:
-            for table in ("checkpoints", "dedup", "processed", "failures"):
+            for table in ("checkpoints", "dedup", "processed", "failures", "placeholders",
+                          "placeholder_parts"):
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608
             # Mapas de tópicos são estado de cópia; sem isso, "recomeçar do
             # zero" ainda reutilizaria associações antigas.
