@@ -132,7 +132,11 @@ def make_copier(env, messages, *, client=None, **options):
     client = client if client is not None else FakeClient(messages)
     client.register_entity(source)
     client.register_entity(dest)
-    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False}
+    # The placeholder suite tests the opt-in legacy mode; production defaults
+    # are covered separately by test_motor_upload.py.
+    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False,
+                "delivery": "upload", "server_copy": False,
+                "placeholder": True, "on_failure": "placeholder"}
     defaults.update(options)
     copier = Copier(client, repo=env.repo, config=RunConfig(**defaults), rich_ok=False)
     return SimpleNamespace(copier=copier, client=client, source=source, dest=dest)
@@ -254,7 +258,9 @@ def test_forum_reserva_no_topico_mapeado(env) -> None:
     client.register_entity(source)
     client.register_entity(dest)
     copier = Copier(client, repo=env.repo,
-                    config=RunConfig(workers=1, delay=0.1, use_dedup=False), rich_ok=False)
+                    config=RunConfig(workers=1, delay=0.1, use_dedup=False, delivery="upload",
+                                     server_copy=False, placeholder=True,
+                                     on_failure="placeholder"), rich_ok=False)
     topic_map = {1: 1, 11: 911}
     with fast_sleep():
         asyncio.run(copier.run(source, dest, topic_map=topic_map))
@@ -534,7 +540,9 @@ def test_forum_recupera_marcador_sem_mexer_no_mapa(env) -> None:
     client.register_entity(source)
     client.register_entity(dest)
     copier = Copier(client, repo=env.repo,
-                    config=RunConfig(workers=1, delay=0.1, use_dedup=False), rich_ok=False)
+                    config=RunConfig(workers=1, delay=0.1, use_dedup=False, delivery="upload",
+                                     server_copy=False, placeholder=True,
+                                     on_failure="placeholder"), rich_ok=False)
     topic_map = {1: 1, 11: 911}
     with fast_sleep():
         asyncio.run(copier.run(source, dest, topic_map=topic_map))

@@ -1320,6 +1320,7 @@ class App:
                     break
                 if choice == "1":
                     cfg.forward_mode = not cfg.forward_mode
+                    cfg.delivery = "forward" if cfg.forward_mode else "upload"
                     ui.ok(f"{t('copy.mode')}: "
                           f"{t('copy.mode.forward') if cfg.forward_mode else t('copy.mode.copy')}")
                 elif choice == "2":
@@ -1331,11 +1332,11 @@ class App:
                     except ValueError:
                         ui.err(t("settings.delay.invalid"))
                 elif choice == "3":
-                    raw = ui.ask(t("settings.workers.title", max=8, current=cfg.workers),
+                    raw = ui.ask(t("settings.workers.title", max=6, current=cfg.workers),
                                  required=False)
                     try:
                         if raw:
-                            cfg.workers = max(1, min(8, int(raw)))
+                            cfg.workers = max(1, min(6, int(raw)))
                             ui.ok(t("settings.workers.set", val=cfg.workers))
                     except ValueError:
                         ui.err(t("menu.invalid"))
@@ -2476,6 +2477,7 @@ class App:
                 (t("settings.server_copy"),
                  t("settings.on") if cfg.server_copy else t("settings.off")),
                 (t("settings.on_failure"), t(f"on_failure.{cfg.on_failure}")),
+                (t("settings.strict_order"), t("settings.on") if cfg.strict_order else t("settings.off")),
                 (t("settings.max_retries"), str(cfg.max_retries)),
                 (t("settings.signature"), cfg.signature or "—"),
                 (t("clone.suffix"), self.prefs.clone_suffix or "—"),
@@ -2485,6 +2487,7 @@ class App:
                  t("settings.on") if self.prefs.clone_start_copy else t("settings.off")),
                 (t("settings.lang"), get_lang().upper()),
             ], color=C.INDIGO)
+            ui.warn(t("settings.fidelity.warning"))
 
             ui.menu([
                 ("1", t("settings.delay.option"), f"{cfg.delay:.1f}s"),
@@ -2534,7 +2537,7 @@ class App:
                 await asyncio.sleep(0.7)
             elif choice == "5":
                 cfg.forward_mode = not cfg.forward_mode
-                cfg.delivery = "forward" if cfg.forward_mode else "reference"
+                cfg.delivery = "forward" if cfg.forward_mode else "upload"
                 self._save_config()
                 ui.ok(f"{t('settings.forward')}: "
                       f"{t('copy.mode.forward') if cfg.forward_mode else t('copy.mode.copy')}")
@@ -2563,9 +2566,11 @@ class App:
                 (ui.ok if cfg.placeholder else ui.warn)(message)
                 await asyncio.sleep(0.7)
             elif choice == "d":
-                order = {"reference": "upload", "upload": "forward", "forward": "reference"}
-                cfg.delivery = order.get(cfg.delivery, "reference")
+                order = {"upload": "reference", "reference": "forward", "forward": "upload"}
+                cfg.delivery = order.get(cfg.delivery, "upload")
                 cfg.forward_mode = cfg.delivery == "forward"
+                if cfg.delivery == "reference":
+                    cfg.server_copy = True
                 self._save_config()
                 ui.ok(f"{t('settings.delivery')}: {t(f'delivery.{cfg.delivery}')}")
                 await asyncio.sleep(0.7)
@@ -2658,8 +2663,8 @@ class App:
         from system_analyzer import analyzer
 
         ui.blank()
-        ui.info(t("settings.workers.hint", rec=analyzer.recommended()))
-        raw = ui.ask(t("settings.workers.title", max=8, current=self.config.workers),
+        ui.info(t("settings.workers.hint", rec=min(6, analyzer.recommended())))
+        raw = ui.ask(t("settings.workers.title", max=6, current=self.config.workers),
                      required=False)
         if not raw:
             return
@@ -2668,7 +2673,7 @@ class App:
         except ValueError:
             ui.err(t("menu.invalid"))
             return
-        if not 1 <= value <= 8:
+        if not 1 <= value <= 6:
             ui.err(t("menu.invalid"))
             return
         self.config.workers = value

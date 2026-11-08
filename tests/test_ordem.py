@@ -6,13 +6,12 @@ import asyncio
 import random
 import sys
 import tempfile
+import copier as cm
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import copier as cm
 
 import pytest
 
@@ -88,7 +87,11 @@ def make_copier(env, messages, *, client=None, **options):
     client = client if client is not None else FakeClient(messages)
     client.register_entity(source)
     client.register_entity(dest)
-    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False}
+    # These legacy-route tests opt in explicitly; RunConfig's production defaults
+    # are covered by tests/test_motor_upload.py.
+    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False,
+                "delivery": "reference", "server_copy": True,
+                "placeholder": True, "on_failure": "placeholder"}
     defaults.update(options)
     copier = Copier(client, repo=env.repo, config=RunConfig(**defaults), rich_ok=False)
     return SimpleNamespace(copier=copier, client=client, source=source, dest=dest)
@@ -333,7 +336,8 @@ def test_espelho_dez_mensagens_em_ordem(env) -> None:
 def test_abort_prompt_retoma_no_mesmo_ponto(env) -> None:
     messages = [text_message(i, f"msg {i}") for i in range(1, 4)]
     client = TransientTextClient(messages, fail_once={2})
-    setup = make_copier(env, messages, client=client, max_retries=0, on_failure="abort")
+    setup = make_copier(env, messages, client=client, max_retries=0,
+                        on_failure="abort")
     with patch.object(cm.ui, "ask", return_value="r"), \
          patch.object(cm.ui, "menu", lambda *a, **k: None), \
          patch.object(cm.ui, "warn", lambda *a, **k: None), \
@@ -359,4 +363,4 @@ def test_config_delivery_server_copy_roundtrip(env) -> None:
     assert loaded.config.server_copy is False
     assert loaded.get("delivery") == "upload"
     assert loaded.get("server_copy") is False
-    assert RunConfig.from_dict({"delivery": "inválido"}).delivery == "reference"
+    assert RunConfig.from_dict({"delivery": "inválido"}).delivery == "upload"

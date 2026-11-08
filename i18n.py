@@ -310,8 +310,12 @@ _s("failure.resume", "Retomar tentativa neste ponto", "Retry at this point")
 _s("failure.placeholder", "Reservar posição e continuar", "Reserve position and continue")
 _s("failure.abort", "Abortar cópia", "Abort copy")
 _s("settings.delivery", "Entrega de mídia", "Media delivery")
-_s("settings.delivery.toggle", "Alternar entrega (referência/upload/forward)",
-   "Cycle delivery (reference/upload/forward)")
+_s("settings.delivery.toggle", "Alternar entrega (upload/referência/forward)",
+   "Cycle delivery (upload/reference/forward)")
+_s("settings.fidelity.warning",
+   "Referência/placeholder = cópia sem fidelidade de download; use só se precisar.",
+   "Reference/placeholder = copy without download fidelity; use only when needed.")
+_s("settings.strict_order", "Ordem estrita por tópico", "Strict order per topic")
 _s("settings.server_copy", "Cópia no servidor", "Server-side copy")
 _s("settings.server_copy.toggle", "Alternar cópia no servidor sem download",
    "Toggle server-side copy without download")
@@ -349,8 +353,8 @@ _s("placeholder.missing", "A mensagem original não está mais disponível na or
 _s("placeholder.continuation", "⚠️ Continuação pendente da mensagem {id} (parte {part}).",
    "⚠️ Pending continuation of message {id} (part {part}).")
 _s("settings.placeholder", "Reservar posição em falhas", "Reserve position on failures")
-_s("settings.placeholder.toggle", "Reservar posição em falhas (recomendado)",
-   "Reserve position on failures (recommended)")
+_s("settings.placeholder.toggle", "Alternar reserva de posição em falhas (opcional)",
+   "Toggle failure placeholders (optional)")
 _s("tools.recover", "Recuperar lacunas", "Recover gaps")
 _s("tools.recover.desc", "Preenche marcadores por edição, mantendo a ordem",
    "Fill placeholders by editing, keeping the order")
