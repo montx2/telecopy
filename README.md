@@ -525,6 +525,31 @@ ligado. O teste exige:
 `prefs.json`. Se o banner ainda mostra `0.9s`, aplique `[6] Configurações → [p]`
 (perfil turbo) ou ajuste `[1]` intervalo e `[2]` workers manualmente.
 
+### 6.3.2 O que fica idêntico e o que não fica (clone de curso)
+
+**Fica idêntico:** ordem das mensagens, texto/legendas e entidades, álbuns
+agrupados, tópicos e o roteamento de cada mensagem, replies, tópicos criados na
+ordem de atividade, ícones/fixado/fechado. Na cópia de fórum o programa
+**desliga dedup e assinatura sozinho** (`core.py`, caminho `setup.faithful or
+plan.forum`): repetições de material entre tópicos são conteúdo legítimo e não
+podem ser descartadas. `tests/test_ordem_curso.py` prova os dois lados — com dedup
+desligado a aula repetida chega; com dedup ligado ela pode sumir.
+
+**Não fica idêntico (limites do Telegram, não do programa):**
+
+| Item | O que acontece |
+|---|---|
+| Legenda > 1024 caracteres | vira a mídia + continuações em mensagens seguintes; o texto chega **integral e na ordem**, mas o destino tem mais mensagens que a origem |
+| Enquete/quiz, dado, localização, contato, mídia paga | não são recriáveis por upload; entram como **não suportado** e a conferência não fecha como completa |
+| Data/hora, visualizações, reações, comentários | não são copiados: a cópia é uma mensagem nova, sua |
+| Autor | é você — é o que significa "cópia limpa, sem encaminhado de" |
+
+**Como conferir em vez de confiar:** ao terminar, o programa imprime
+`Conferência: ...` (`result.complete` / `result.incomplete`) e a
+**CONFERÊNCIA POR TÓPICO** com esperado / enviadas / faltando. A cópia só é
+declarada completa com zero erros, zero não suportados, zero faltando e nenhum
+marcador em aberto. Se não fechar, retome: o checkpoint continua de onde parou.
+
 ### 6.4 Perfil turbo: velocidade máxima do PC
 
 `[6] Configurações → [p]` aplica de uma vez o maior paralelismo que o hardware
@@ -697,7 +722,7 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**239 passed** (`python -m pytest -q`, suíte isolada, sem rede).
+**241 passed** (`python -m pytest -q`, suíte isolada, sem rede).
 Pyflakes: apenas os achados pré-existentes confirmados no baseline —
 `split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
 

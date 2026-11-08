@@ -182,3 +182,60 @@ def test_retomada_apos_interrupt_nao_repete_nem_inverte(env) -> None:
     assert primeira + retomadas == [m.message for m in messages]
     assert not (env.root / "tmp").exists() or not list((env.root / "tmp").glob("m*_*_*_*")), \
         "não pode sobrar temporário órfão depois da interrupção"
+
+
+def test_aula_repetida_com_mesmo_arquivo_nao_e_descartada_no_modo_fiel(env) -> None:
+    """Curso real repete material: a 2ª ocorrência TEM que ir para o destino.
+
+    Com dedup ligado o hash (mesmo doc + mesma legenda) descartaria a segunda
+    aula. É por isso que a cópia de fórum desliga dedup e assinatura.
+    """
+    repetido = tl_video(1, "Aula 321 - material", size=PART_SIZE + 64)
+    messages = [
+        aula(1, 321, TOPIC_A),
+        aula(2, 322, TOPIC_A),
+    ]
+    # mesmo documento e mesma legenda da Aula 321, reaproveitada em outro tópico
+    clone = aula(3, 321, TOPIC_B)
+    clone.media = messages[0].media
+    messages.append(clone)
+
+    ctx = montar(env, messages, use_dedup=False, signature="")
+    result = asyncio.run(ctx.copier.run(ctx.source, ctx.dest,
+                                        topic_map={TOPIC_A: DEST_A, TOPIC_B: DEST_B}))
+    assert result["done"] == 3
+    assert [r["caption"] for r in ctx.client.sent] == ["Aula 321", "Aula 322", "Aula 321"]
+    assert ctx.client.sent[2]["top_msg_id"] == DEST_B
+
+    # Contraste: com dedup ligado a repetição some — não serve para clone fiel.
+    # Banco novo para não confundir com a retomada por checkpoint.
+    # workers=1 torna a detecção determinística: com vários workers o dedup é
+    # checado na preparação, antes de a 1ª ocorrência ser confirmada, e pode
+    # pular ou não — mais um motivo para não usar dedup em clone fiel.
+    outro = montar(env, messages, use_dedup=True, workers=1)
+    repo2 = Repository(env.root / "dedup.db")
+    try:
+        com_dedup = Copier(outro.client, repo=repo2, config=outro.copier.cfg, rich_ok=False)
+        asyncio.run(com_dedup.run(outro.source, outro.dest,
+                                  topic_map={TOPIC_A: DEST_A, TOPIC_B: DEST_B}))
+    finally:
+        repo2.close()
+    assert [r["caption"] for r in outro.client.sent] == ["Aula 321", "Aula 322"]
+
+
+def test_legenda_longa_preserva_texto_integral_mas_vira_mais_de_uma_mensagem(env) -> None:
+    """Limite do Telegram (1024 na legenda): o texto inteiro chega, em partes."""
+    from config import CAPTION_LIMIT
+
+    longa = "Conteúdo da aula. " * 120        # > 1024 caracteres
+    msg = aula(1, 321, TOPIC_A)
+    msg.message = longa
+    ctx = montar(env, [msg], use_dedup=False, signature="")
+    result = asyncio.run(ctx.copier.run(ctx.source, ctx.dest,
+                                        topic_map={TOPIC_A: DEST_A, TOPIC_B: DEST_B}))
+    assert result["done"] == 1 and result["errors"] == 0
+    textos = [(r["caption"] or r["text"] or "") for r in ctx.client.sent]
+    assert len(textos) > 1, "legenda acima do limite precisa de continuação"
+    assert "".join(textos) == longa, "o texto tem que chegar integral e na ordem"
+    assert all(len(x) <= CAPTION_LIMIT for x in textos[:1])
+    assert all(r["top_msg_id"] == DEST_A for r in ctx.client.sent)
