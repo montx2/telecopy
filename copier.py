@@ -519,6 +519,8 @@ class Copier:
         self._stop = False
         self._flood_penalty = 0.0
         self._mirror_locks: Dict[Any, asyncio.Lock] = {}
+        # Origem protegida derruba o forward para referência sem mexer nas prefs.
+        self._force_reference = False
 
     # -- controle -----------------------------------------------------------
 
@@ -572,10 +574,11 @@ class Copier:
         topic_titles: Optional[Dict[int, str]] = None,
     ) -> Dict[str, Any]:
         self._stop = False
+        self._force_reference = False
         source_id = int(getattr(source, "id", 0) or 0)
         dest_id = int(getattr(dest, "id", 0) or 0)
         resume = self.cfg.resume if resume is None else resume
-        forward = self.cfg.forward_mode if forward is None else forward
+        forward = (self.cfg.delivery == "forward") if forward is None else forward
         sess = session_id or f"{source_id}:{dest_id}:{int(time.time())}"
         topic_roots = set(topic_map or {})
         if source_topic:
@@ -583,6 +586,7 @@ class Copier:
 
         if getattr(source, "noforwards", False) and forward:
             forward = False
+            self._force_reference = True
             print(f"\n  {C.CYAN}·{C.RST}  {t('copy.source_protected')}", flush=True)
 
         destination_error = await self._destination_error(dest)
@@ -984,11 +988,43 @@ class Copier:
         finally:
             self._cleanup(payload.get("plan", []))
 
+    async def _reserve_forward_positions(
+        self, messages, source_id: int, dest_id: int, dest,
+        item_topic: Optional[int], reply_to: Optional[int],
+        stats: TransferStats, reason: str,
+    ) -> bool:
+        """Reserva um marcador por mensagem, na ordem. False = não avançar."""
+        payload: Dict[str, Any] = {"reserved_ids": set()}
+        for msg in messages:
+            _has_media, media_type, size = media_info(msg)
+            entry = {"msg": msg, "media_type": media_type, "size": size,
+                     "path": None, "failed": True, "reason": reason}
+            try:
+                await self._record_failed_entry(
+                    entry, source_id, dest_id, dest, item_topic, reply_to,
+                    stats, payload, reason,
+                )
+            except Exception as exc:
+                logger.error(f"Reserva de posição no forward msg {msg.id}: {exc}")
+                stats.first_error = t("order.reserve_failed")
+                remaining = [m for m in messages if m.id not in payload["reserved_ids"]]
+                self._mark_failed(remaining, source_id, dest_id, stats, exc,
+                                  dest_topic=item_topic)
+                return False
+        return True
+
+    @staticmethod
+    def _forward_ids_valid(sent_ids, messages) -> Optional[str]:
+        """DONE exige ID confirmado e estritamente crescente dentro do item."""
+        if len(sent_ids) != len(messages) or any(i is None for i in sent_ids):
+            return t("copy.send_unconfirmed")
+        if any(int(a) >= int(b) for a, b in zip(sent_ids, sent_ids[1:])):
+            return t("order.violation")
+        return None
+
     async def _forward_loop(self, items, source, dest, source_id, dest_id,
                             dest_topic, topic_map, stats: TransferStats,
                             progress: ProgressDisplay) -> None:
-        last_error_key = None
-        consecutive_errors = 0
         first_failure_shown = False
         force_copy_fallback = bool(getattr(source, "noforwards", False))
 
@@ -1007,16 +1043,15 @@ class Copier:
                 break
 
             error: Optional[Exception] = None
-            item_topic = None
+            item_topic = self._destination_topic(item, dest_topic, topic_map)
+            reply_to = self._reply_target(messages[0], source_id, dest_id, topic_map)
             copied_via_fallback = False
             errors_before_item = stats.errors
-            for retry in range(3):
+            sent_ids: List[Optional[int]] = []
+            attempts = self.cfg.max_retries + 1
+
+            for attempt in range(attempts):
                 try:
-                    # A lista de IDs preserva o agrupamento reconhecido pelo
-                    # Telegram. `as_album` não tem mais efeito no Telethon;
-                    # sem `drop_author`, o rótulo de encaminhamento é mantido.
-                    item_topic = self._destination_topic(item, dest_topic, topic_map)
-                    reply_to = self._reply_target(messages[0], source_id, dest_id, topic_map)
                     if force_copy_fallback or any(getattr(m, "noforwards", False) for m in messages):
                         copied_via_fallback = True
                         await self._copy_single_item(
@@ -1025,13 +1060,20 @@ class Copier:
                         )
                     else:
                         sent_ids = await self._forward_item(source, dest, ids, item_topic, reply_to)
+                        invalid = self._forward_ids_valid(sent_ids, messages)
+                        if invalid:
+                            raise RuntimeError(invalid)
+                    error = None
                     break
+                except DailyLimitReached:
+                    raise
                 except FloodWaitError as exc:
-                    if retry < 2:
-                        await self._handle_flood(exc)
-                        continue
                     error = exc
+                    await self._handle_flood(exc)
+                    if attempt < attempts - 1:
+                        continue
                 except Exception as exc:
+                    error = exc
                     if type(exc).__name__ == "ChatForwardsRestrictedError":
                         force_copy_fallback = True
                         copied_via_fallback = True
@@ -1044,55 +1086,76 @@ class Copier:
                         except Exception as copy_exc:
                             error = copy_exc
                         break
-                    error = exc
-                break
+                    if self._is_transient(exc) and attempt < attempts - 1:
+                        await asyncio.sleep(2 ** (attempt + 1))
+                        continue
+                    break
 
             should_stop = False
             if error is None:
                 if not copied_via_fallback:
                     for offset, msg in enumerate(messages):
-                        dest_msg_id = sent_ids[offset] if offset < len(sent_ids) else None
                         self._mark_done(msg, source_id, dest_id, stats,
-                                        dest_msg_id=dest_msg_id, dest_topic=item_topic)
+                                        dest_msg_id=int(sent_ids[offset]), dest_topic=item_topic)
                     if isinstance(item, list):
                         stats.albums += 1
                 elif stats.errors > errors_before_item and not first_failure_shown:
                     print(f"\n  {C.RED}✗{C.RST}  "
-                          f"{t('copy.first_failure', reason=stats.first_error)}",
-                          flush=True)
+                          f"{t('copy.first_failure', reason=stats.first_error)}", flush=True)
                     first_failure_shown = True
-                last_error_key = None
-                consecutive_errors = 0
             else:
-                self._mark_failed(messages, source_id, dest_id, stats, error,
-                                  dest_topic=item_topic)
+                # Mesmo contrato do caminho de cópia: nunca avançar sem posição.
                 reason = self._explain(error)
+                if stats.first_error is None:
+                    stats.first_error = reason
+                logger.error(f"Falha no forward item {index}: {error}")
                 if not first_failure_shown:
                     print(f"\n  {C.RED}✗{C.RST}  "
                           f"{t('copy.first_failure', reason=reason)}", flush=True)
                     first_failure_shown = True
 
-                error_key = (type(error).__name__, reason)
-                if error_key == last_error_key:
-                    consecutive_errors += 1
+                action = ("p" if self.cfg.placeholder and self.cfg.on_failure == "placeholder"
+                          else "a")
+                if self.cfg.on_failure == "abort":
+                    action = self._prompt_failure(reason)
+
+                if action == "r":
+                    try:
+                        self._check_limit()
+                        sent_ids = await self._forward_item(source, dest, ids, item_topic, reply_to)
+                        invalid = self._forward_ids_valid(sent_ids, messages)
+                        if invalid:
+                            raise RuntimeError(invalid)
+                        for offset, msg in enumerate(messages):
+                            self._mark_done(msg, source_id, dest_id, stats,
+                                            dest_msg_id=int(sent_ids[offset]), dest_topic=item_topic)
+                        if isinstance(item, list):
+                            stats.albums += 1
+                    except DailyLimitReached:
+                        raise
+                    except Exception as retry_exc:
+                        logger.error(f"Retomada manual no forward msg {ids}: {retry_exc}")
+                        self._mark_failed(messages, source_id, dest_id, stats, retry_exc,
+                                          dest_topic=item_topic)
+                        should_stop = True
+                elif action == "p" and self.cfg.placeholder:
+                    should_stop = not await self._reserve_forward_positions(
+                        messages, source_id, dest_id, dest, item_topic, reply_to, stats, reason
+                    )
                 else:
-                    last_error_key = error_key
-                    consecutive_errors = 1
+                    self._mark_failed(messages, source_id, dest_id, stats, error,
+                                      dest_topic=item_topic)
+                    should_stop = True
 
                 if isinstance(error, FloodWaitError):
                     print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
                     should_stop = True
-                elif self._is_fatal_send_error(error):
+                elif self._is_fatal_send_error(error) or stats.first_error == t("order.reserve_failed"):
                     print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
                     should_stop = True
-                elif consecutive_errors >= 3:
-                    print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
-                    should_stop = True
 
-            progress.update(
-                stats.done + stats.skipped + stats.errors,
-                self._progress_status(stats),
-            )
+            progress.update(stats.done + stats.skipped + stats.errors,
+                            self._progress_status(stats))
             if should_stop:
                 break
             await asyncio.sleep(self.delay)
@@ -1409,7 +1472,8 @@ class Copier:
                 "native": native,
             }
             if (has_media and not native and not unsupported and not force_upload
-                    and self.cfg.server_copy and self.cfg.delivery == "reference"):
+                    and self.cfg.server_copy
+                    and (self.cfg.delivery == "reference" or self._force_reference)):
                 try:
                     tl_utils.get_input_media(raw_media, is_photo=media_type == "photo")
                 except (TypeError, AttributeError, ValueError) as exc:
@@ -2561,6 +2625,9 @@ class Copier:
     def _mark_done(self, msg, source_id: int, dest_id: int, stats: TransferStats,
                    dest_msg_id: Optional[int] = None,
                    dest_topic: Optional[int] = None) -> None:
+        if dest_msg_id is None:
+            # Invariante: DONE só existe com ID de destino confirmado.
+            raise RuntimeError(t("copy.send_unconfirmed"))
         content_hash = hash_message(msg)
         self.repo.mark_done(source_id, dest_id, msg.id, content_hash,
                             dest_msg_id=dest_msg_id, dest_topic=dest_topic)

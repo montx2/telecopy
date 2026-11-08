@@ -347,14 +347,18 @@ class FakeClient:
 
     async def forward_messages(self, entity, messages, from_peer=None, **kwargs):
         ids = messages if isinstance(messages, list) else [messages]
-        self._ids += 1
+        created = []
+        for _ in ids:
+            self._ids += 1
+            created.append(FakeMessage(id=self._ids))
         self.forwarded.append({
             "dest": getattr(entity, "id", entity),
             "ids": ids,
             "as_album": len(ids) > 1,
             "kwargs": dict(kwargs),
+            "created_ids": [m.id for m in created],
         })
-        return [FakeMessage(id=self._ids) for _ in ids]
+        return created
 
     # -- leitura ------------------------------------------------------------
 

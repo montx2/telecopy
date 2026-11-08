@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -479,7 +480,12 @@ def test_forward_em_forum_usa_o_topico_destino() -> None:
         async def __call__(self, request):
             if type(request).__name__ == "ForwardMessagesRequest":
                 self.topic_forwards.append(request)
-                return None
+                # Resposta fiel: o Telegram confirma um ID por random_id. Sem
+                # isso o item não pode virar DONE (invariante de ID confirmado).
+                for random_id in request.random_id:
+                    self._ids += 1
+                    self._random_messages[int(random_id)] = FakeMessage(id=self._ids)
+                return SimpleNamespace()
             raise AssertionError(f"request inesperado: {type(request).__name__}")
 
     client = TopicForwardClient(mensagens)

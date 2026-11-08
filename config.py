@@ -722,6 +722,12 @@ class RunConfig:
         self.workers = max(1, min(int(self.workers), 8))
         if self.delivery not in {"reference", "upload", "forward"}:
             self.delivery = "reference"
+        # `forward_mode` é alias legado: os dois campos nunca podem divergir,
+        # senão RunConfig(delivery="forward") copiaria em vez de encaminhar.
+        if self.forward_mode:
+            self.delivery = "forward"
+        elif self.delivery == "forward":
+            self.forward_mode = True
         if self.on_failure not in {"placeholder", "abort"}:
             self.on_failure = "placeholder"
         self.server_copy = bool(self.server_copy)
