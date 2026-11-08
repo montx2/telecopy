@@ -338,6 +338,7 @@ class TransferStats:
     errors: int = 0
     skipped: int = 0
     duplicates: int = 0
+    intentional_skips: int = 0
     bytes_uploaded: int = 0
     albums: int = 0
     planned: int = 0
@@ -364,6 +365,7 @@ class TransferStats:
             "skipped": self.skipped,
             "errors": self.errors,
             "duplicates": self.duplicates,
+            "intentional_skips": self.intentional_skips,
             "albums": self.albums,
             "bytes": self.bytes_uploaded,
             "indexed": self.indexed,
@@ -515,6 +517,7 @@ class Copier:
         self.dedup = DedupEngine(repo, enabled=self.cfg.use_dedup)
         self._stop = False
         self._flood_penalty = 0.0
+        self._mirror_locks: Dict[Any, asyncio.Lock] = {}
 
     # -- controle -----------------------------------------------------------
 
@@ -598,11 +601,19 @@ class Copier:
             print(f"  {C.YELLOW}!{C.RST}  {t('copy.none')}")
             return TransferStats(complete=True).as_result()
 
+        violations = self._preflight_order(messages, source_id, dest_id, topic_map, dest_topic)
+        if violations:
+            topic = violations[0]["topic"]
+            reason = f"{t('order.violation')} ({t('result.topics')}: {topic})"
+            logger.error(f"Ordem violada source={source_id} dest={dest_id}: {violations}")
+            return TransferStats(indexed=len(messages), errors=1, first_error=reason).as_result()
+
         items = self._group(messages, topic_roots)
         # Com deduplicação desativada (cópia fiel), um 'skipped' antigo pode
         # ter sido uma repetição legítima descartada pela versão anterior.
         completed_before = (self.repo.completed_ids(source_id, dest_id)
                             if self.cfg.use_dedup else self.repo.done_ids(source_id, dest_id))
+        completed_before = set(completed_before) | self.repo.placeholder_msg_ids(source_id, dest_id)
         previously_done = sum(1 for msg in messages if msg.id in completed_before)
 
         if resume and completed_before:
@@ -655,6 +666,57 @@ class Copier:
         )
         self.repo.finish_session(sess, state="interrupted" if stats.interrupted else "finished")
         return stats.as_result()
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        if isinstance(exc, (FloodWaitError, ValueError, OSError, asyncio.TimeoutError)):
+            return True
+        return type(exc).__name__ in {"ServerError", "RpcCallFailError", "TimedOutError"}
+
+    @staticmethod
+    def _position_resolved(row: Optional[Dict[str, Any]]) -> bool:
+        if not row:
+            return False
+        return row.get("status") in {"done", "skipped"} or row.get("ph_dest_msg_id") is not None
+
+    def _preflight_order(self, messages: List[Any], source_id: int, dest_id: int,
+                         topic_map: Optional[Dict[int, int]],
+                         dest_topic: Optional[int]) -> List[Dict[str, Any]]:
+        with self.repo._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.msg_id, c.status, c.dest_msg_id, c.dest_topic,
+                       p.state AS ph_state, p.dest_msg_id AS ph_dest_msg_id
+                  FROM checkpoints c
+                  LEFT JOIN placeholders p
+                    ON p.source_id=c.source_id AND p.dest_id=c.dest_id AND p.msg_id=c.msg_id
+                 WHERE c.source_id=? AND c.dest_id=?
+                """,
+                (source_id, dest_id),
+            ).fetchall()
+        snapshot = {int(row["msg_id"]): dict(row) for row in rows}
+        for row in self.repo.open_placeholders(source_id, dest_id):
+            snapshot.setdefault(int(row["msg_id"]), {})
+            snapshot[int(row["msg_id"])].update({
+                "ph_state": row["state"], "ph_dest_msg_id": row["dest_msg_id"],
+                "dest_topic": row.get("dest_topic"),
+            })
+        roots = set(topic_map or {})
+        pending: Dict[Any, int] = {}
+        violations: List[Dict[str, Any]] = []
+        for msg in sorted(messages, key=lambda m: int(m.id)):
+            if topic_map:
+                source_topic = self._source_topic_id(msg, roots) or 1
+                topic = topic_map.get(source_topic)
+            else:
+                topic = dest_topic
+            row = snapshot.get(int(msg.id))
+            if self._position_resolved(row):
+                if topic in pending:
+                    violations.append({"topic": topic, "pending": pending[topic], "terminal": int(msg.id)})
+            else:
+                pending.setdefault(topic, int(msg.id))
+        return violations
 
     def _audit(self, stats: TransferStats, messages: List[Any], source_id: int,
                dest_id: int, topic_map: Optional[Dict[int, int]],
@@ -1085,12 +1147,7 @@ class Copier:
                     if self._stop:
                         payload = None
                     elif self._is_duplicate(messages, dest_id):
-                        stats.duplicates += len(messages)
-                        stats.skipped += len(messages)
-                        for msg in messages:
-                            self.repo.mark_processed(source_id, msg.id, None, dest_id)
-                            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED)
-                        payload = {"skip": True}
+                        payload = {"skip": True, "dedup": True}
                     else:
                         payload = await self._prepare(index, item, progress, source=source)
                 except asyncio.CancelledError:
@@ -1130,42 +1187,27 @@ class Copier:
                 if self._stop:
                     break
                 async with cond:
-                    if index not in ready:
-                        try:
-                            await asyncio.wait_for(cond.wait_for(lambda: index in ready),
-                                                   timeout=600)
-                        except asyncio.TimeoutError:
-                            logger.error(f"Timeout aguardando preparação do item {index}")
+                    await cond.wait_for(lambda: index in ready or self._stop)
+                    if self._stop and index not in ready:
+                        break
                     payload = ready.pop(index, None)
 
                 if payload is None:
-                    item = items[index]
-                    messages = item if isinstance(item, list) else [item]
-                    stats.errors += len(messages)
-                    if stats.first_error is None:
-                        stats.first_error = t("copy.prepare_failure")
-                    try:
-                        failed_topic = self._destination_topic(items[index], dest_topic, topic_map)
-                    except Exception:
-                        failed_topic = dest_topic
-                    for msg in messages:
-                        self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.ERROR,
-                                                    dest_topic=failed_topic)
-                        self.repo.add_failure(source_id, dest_id, msg.id, "preparação falhou")
-                    if not first_failure_shown:
-                        print(f"\n  {C.RED}✗{C.RST}  "
-                              f"{t('copy.first_failure', reason=stats.first_error)}",
-                              flush=True)
-                        first_failure_shown = True
-                    progress.update(stats.done + stats.skipped + stats.errors,
-                                    self._progress_status(stats))
-                    continue
-                if payload.get("skip"):
-                    progress.update(stats.done + stats.skipped + stats.errors,
-                                    self._progress_status(stats))
-                    continue
-
+                    break
                 item_messages = items[index] if isinstance(items[index], list) else [items[index]]
+                if payload.get("skip"):
+                    if payload.get("dedup"):
+                        skip_topic = self._destination_topic(items[index], dest_topic, topic_map)
+                        stats.duplicates += len(item_messages)
+                        stats.skipped += len(item_messages)
+                        stats.intentional_skips += len(item_messages)
+                        for msg in item_messages:
+                            self.repo.mark_processed(source_id, msg.id, None, dest_id)
+                            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED,
+                                                        dest_topic=skip_topic)
+                    progress.update(stats.done + stats.skipped + stats.errors,
+                                    self._progress_status(stats))
+                    continue
                 payload.update({
                     "dest": dest,
                     "source": source,
@@ -1175,28 +1217,64 @@ class Copier:
                 errors_before_send = stats.errors
                 error: Optional[Exception] = None
                 try:
-                    for retry in range(3):
+                    attempts = self.cfg.max_retries + 1
+                    for attempt in range(attempts):
                         try:
                             self._check_limit()
                             await self._send(payload, source_id, dest_id, stats, progress)
+                            error = None
                             break
-                        except FloodWaitError as exc:
-                            if retry < 2:
-                                await self._handle_flood(exc)
-                                continue
-                            error = exc
                         except DailyLimitReached:
                             raise
+                        except FloodWaitError as exc:
+                            error = exc
+                            await self._handle_flood(exc)
+                            if attempt < attempts - 1:
+                                continue
                         except Exception as exc:
                             error = exc
-                        break
+                            if self._is_transient(exc) and attempt < attempts - 1:
+                                await asyncio.sleep(2 ** (attempt + 1))
+                                continue
+                            break
 
                     if error is not None:
                         logger.error(f"Erro no envio do item {index}: {error}")
-                        self._mark_failed(payload["messages"], source_id, dest_id, stats, error,
-                                          dest_topic=payload.get("dest_topic"),
-                                          skip_ids=payload.get("reserved_ids"))
+                        reserved = payload.get("reserved_ids", set())
+                        confirmed = {e["msg"].id for e in payload.get("plan", [])
+                                     if e.get("dest_msg_id")}
+                        unreserved = [m for m in payload["messages"]
+                                      if m.id not in reserved and m.id not in confirmed]
+                        if unreserved:
+                            if self.cfg.placeholder and self.cfg.on_failure == "placeholder":
+                                try:
+                                    for entry in payload.get("plan", []):
+                                        if entry["msg"].id in reserved or entry.get("dest_msg_id"):
+                                            continue
+                                        entry["failed"] = True
+                                        entry["reason"] = self._explain(error)
+                                        await self._record_failed_entry(
+                                            entry, source_id, dest_id, dest,
+                                            payload.get("dest_topic"), payload.get("reply_to"),
+                                            stats, payload, self._explain(error),
+                                        )
+                                except Exception as reserve_exc:
+                                    logger.error(f"Reserva após falha msg {index}: {reserve_exc}")
+                                    stats.first_error = t("order.reserve_failed")
+                                    self._mark_failed(unreserved, source_id, dest_id, stats, reserve_exc,
+                                                      dest_topic=payload.get("dest_topic"))
+                                    self._stop = True
+                            else:
+                                self._mark_failed(unreserved, source_id, dest_id, stats, error,
+                                                  dest_topic=payload.get("dest_topic"))
+                                if self.cfg.on_failure == "abort":
+                                    self._stop = True
+                        reserved_now = payload.get("reserved_ids", set())
+                        all_reserved = all(m.id in reserved_now or m.id in confirmed
+                                           for m in payload["messages"])
                         reason = self._explain(error)
+                        if stats.first_error is None:
+                            stats.first_error = reason
                         if not first_failure_shown:
                             print(f"\n  {C.RED}✗{C.RST}  "
                                   f"{t('copy.first_failure', reason=reason)}", flush=True)
@@ -1212,10 +1290,10 @@ class Copier:
                         if isinstance(error, FloodWaitError):
                             print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
                             self._stop = True
-                        elif self._is_fatal_send_error(error):
+                        elif self._is_fatal_send_error(error) or reason == t("order.reserve_failed"):
                             print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_fatal')}", flush=True)
                             self._stop = True
-                        elif consecutive_errors >= 3:
+                        elif consecutive_errors >= 3 and not all_reserved:
                             print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_repeated')}", flush=True)
                             self._stop = True
                     else:
@@ -1389,8 +1467,9 @@ class Copier:
     ) -> Optional[int]:
         """Cria uma reserva na posição atual; nunca registra conteúdo no dedup."""
         msg = entry["msg"]
-        if self.repo.get_placeholder(source_id, dest_id, msg.id) is not None:
-            return None
+        existing = self.repo.get_placeholder(source_id, dest_id, msg.id)
+        if existing is not None:
+            return int(existing["dest_msg_id"])
         caption, entities_json = self._placeholder_caption(msg)
         unsupported = bool(entry.get("unsupported"))
         key = "placeholder.unrecoverable" if unsupported else "placeholder.pending"
@@ -1463,6 +1542,8 @@ class Copier:
             dest_msg_id = await self._reserve_placeholder(
                 entry, source_id, dest_id, dest, dest_topic, reply_to, stats, reason
             )
+            if dest_msg_id is None:
+                raise RuntimeError(t("order.reserve_failed"))
         stats.errors += 1
         if entry.get("unsupported"):
             stats.unsupported += 1
@@ -1573,9 +1654,9 @@ class Copier:
         except DailyLimitReached:
             raise
         except Exception as exc:
-            # Só reserva quem ainda não tem ID confirmado. A exceção original
-            # continua governando FloodWait/parada fatal no sender.
-            if self.cfg.placeholder:
+            # Falha transitória não reserva ainda: o sender retenta no mesmo ponto.
+            # Só reserva quem ainda não tem ID confirmado em falha definitiva.
+            if self.cfg.placeholder and not self._is_transient(exc):
                 reason = self._explain(exc)
                 for entry in plan:
                     msg = entry["msg"]
@@ -2210,7 +2291,7 @@ class Copier:
         self.dedup.warm_up(dest_id, limit=200_000)
         quiet = ProgressDisplay(0, "", False)
 
-        for msg_id in msg_ids:
+        for msg_id in sorted(int(m) for m in msg_ids):
             try:
                 placeholder = self.repo.get_placeholder(source_id, dest_id, msg_id)
                 if placeholder is not None:
@@ -2233,6 +2314,17 @@ class Copier:
                 target_topic = dest_topic if dest_topic is not None else route.get("dest_topic")
                 roots = {self._source_topic_id(message, set()) or 1}
                 reply_to = self._reply_target(message, source_id, dest_id, {root: root for root in roots})
+                if self.repo.order_pending_before(source_id, dest_id, target_topic, msg_id):
+                    self.repo.add_failure(source_id, dest_id, msg_id, t("order.pending"))
+                    stats.skipped += 1
+                    if stats.first_error is None:
+                        stats.first_error = t("order.pending")
+                    await asyncio.sleep(self.delay)
+                    continue
+                if self.repo.order_terminal_after(source_id, dest_id, target_topic, msg_id):
+                    stats.errors += 1
+                    stats.first_error = t("order.violation")
+                    break
                 payload = await self._prepare(0, message, quiet, source=source)
                 payload.update({"dest": dest, "source": source, "dest_topic": target_topic,
                                 "reply_to": reply_to})
@@ -2315,31 +2407,33 @@ class Copier:
                 if is_service(msg) or not filter_apply(filter_code, msg):
                     return
 
-                content_hash = hash_message(msg)
-                if self.cfg.use_dedup and self.dedup.check(content_hash, dest_id):
-                    stats.skipped += 1
-                    return
+                target_topic = await self._mirror_topic(msg, dest_topic, topic_map, ensure_topic)
+                lock = self._mirror_locks.setdefault(target_topic, asyncio.Lock())
+                async with lock:
+                    content_hash = hash_message(msg)
+                    if self.cfg.use_dedup and self.dedup.check(content_hash, dest_id):
+                        stats.skipped += 1
+                        stats.intentional_skips += 1
+                        return
 
-                silent = ProgressDisplay(0, "", False)
-                payload = await self._prepare(0, msg, silent, source=source)
-                route_roots = set(topic_map or {})
-                if source_topic:
-                    route_roots.add(int(source_topic))
-                payload.update({
-                    "dest": dest,
-                    "source": source,
-                    "dest_topic": await self._mirror_topic(
-                        msg, dest_topic, topic_map, ensure_topic
-                    ),
-                    "reply_to": self._reply_target(
-                        msg, source_id, dest_id,
-                        {root: root for root in route_roots},
-                    ),
-                })
-                try:
-                    await self._send(payload, source_id, dest_id, stats, silent)
-                finally:
-                    self._cleanup(payload.get("plan", []))
+                    silent = ProgressDisplay(0, "", False)
+                    payload = await self._prepare(0, msg, silent, source=source)
+                    route_roots = set(topic_map or {})
+                    if source_topic:
+                        route_roots.add(int(source_topic))
+                    payload.update({
+                        "dest": dest,
+                        "source": source,
+                        "dest_topic": target_topic,
+                        "reply_to": self._reply_target(
+                            msg, source_id, dest_id,
+                            {root: root for root in route_roots},
+                        ),
+                    })
+                    try:
+                        await self._send(payload, source_id, dest_id, stats, silent)
+                    finally:
+                        self._cleanup(payload.get("plan", []))
 
                 print(f"  {C.GREEN}›{C.RST} {t('mirror.new_msg', id=msg.id)}  "
                       f"{C.GRAY}({stats.done} {t('mirror.sent')}){C.RST}")

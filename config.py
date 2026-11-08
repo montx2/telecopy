@@ -142,7 +142,7 @@ LOG_FILE = LOGS_DIR / "telecopy.log"
 
 DAILY_LIMIT = 1000
 DAILY_WARN = 800
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 # Telegram rejeita legendas acima de 1024 caracteres e mensagens acima de 4096.
 CAPTION_LIMIT = 1024
@@ -713,6 +713,8 @@ class RunConfig:
     placeholder: bool = True
     delivery: str = "reference"   # reference | upload | forward
     server_copy: bool = True
+    on_failure: str = "placeholder"  # placeholder | abort
+    max_retries: int = MAX_RETRIES
 
     def __post_init__(self) -> None:
         self.delay = max(0.1, float(self.delay))
@@ -720,7 +722,10 @@ class RunConfig:
         self.workers = max(1, min(int(self.workers), 8))
         if self.delivery not in {"reference", "upload", "forward"}:
             self.delivery = "reference"
+        if self.on_failure not in {"placeholder", "abort"}:
+            self.on_failure = "placeholder"
         self.server_copy = bool(self.server_copy)
+        self.max_retries = max(0, min(int(self.max_retries), 10))
 
     def to_dict(self) -> dict:
         return {
@@ -736,6 +741,8 @@ class RunConfig:
             "placeholder": self.placeholder,
             "delivery": self.delivery,
             "server_copy": self.server_copy,
+            "on_failure": self.on_failure,
+            "max_retries": self.max_retries,
         }
 
     @classmethod

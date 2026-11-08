@@ -388,7 +388,7 @@ def test_limite_atingido_nao_cria_reserva_nem_falha(env) -> None:
     assert env.repo.placeholder_stats()["open"] == 0
 
 
-def test_falha_do_marcador_degrada_para_fila(env) -> None:
+def test_falha_do_marcador_interrompe_sem_avancar(env) -> None:
     class BrokenMarkerClient(FakeClient):
         async def send_message(self, *args, **kwargs):
             raise OSError("marcador indisponível")
@@ -398,6 +398,7 @@ def test_falha_do_marcador_degrada_para_fila(env) -> None:
     with fast_sleep():
         result = asyncio.run(setup.copier.run(setup.source, setup.dest))
     assert result["errors"] == 1 and result["placeholders"] == 0
+    assert result["interrupted"] and result["done"] == 0
     assert len(env.repo.failures()) == 1
     assert env.repo.placeholder_stats()["open"] == 0
 
@@ -640,7 +641,7 @@ def test_recuperacao_de_texto_sem_midia(env) -> None:
             return await super().send_message(*args, **kwargs)
 
     message = text_message(5, "texto original")
-    setup = make_copier(env, [message], client=FailFirstTextClient([message]))
+    setup = make_copier(env, [message], client=FailFirstTextClient([message]), max_retries=0)
     with fast_sleep():
         first = asyncio.run(setup.copier.run(setup.source, setup.dest))
     assert first["placeholders"] == 1

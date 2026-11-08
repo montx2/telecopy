@@ -817,6 +817,69 @@ class Repository:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def placeholder_msg_ids(self, source_id: int, dest_id: int) -> Set[int]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT msg_id FROM placeholders WHERE source_id=? AND dest_id=?",
+                (source_id, dest_id),
+            ).fetchall()
+        return {int(row["msg_id"]) for row in rows}
+
+    def order_pending_before(
+        self, source_id: int, dest_id: int, dest_topic: Optional[int], msg_id: int
+    ) -> bool:
+        with self._db() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM checkpoints c
+                  LEFT JOIN placeholders p
+                    ON p.source_id=c.source_id AND p.dest_id=c.dest_id AND p.msg_id=c.msg_id
+                 WHERE c.source_id=? AND c.dest_id=? AND c.msg_id<?
+                   AND (c.dest_topic=? OR (c.dest_topic IS NULL AND ? IS NULL))
+                   AND NOT (c.status IN ('done','skipped') OR p.dest_msg_id IS NOT NULL)
+                 LIMIT 1
+                """,
+                (source_id, dest_id, int(msg_id), dest_topic, dest_topic),
+            ).fetchone()
+        return row is not None
+
+    def order_terminal_after(
+        self, source_id: int, dest_id: int, dest_topic: Optional[int], msg_id: int
+    ) -> bool:
+        with self._db() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM checkpoints c
+                  LEFT JOIN placeholders p
+                    ON p.source_id=c.source_id AND p.dest_id=c.dest_id AND p.msg_id=c.msg_id
+                 WHERE c.source_id=? AND c.dest_id=? AND c.msg_id>?
+                   AND (c.dest_topic=? OR (c.dest_topic IS NULL AND ? IS NULL))
+                   AND (c.status IN ('done','skipped') OR p.dest_msg_id IS NOT NULL)
+                 LIMIT 1
+                """,
+                (source_id, dest_id, int(msg_id), dest_topic, dest_topic),
+            ).fetchone()
+        return row is not None
+
+    def order_rows(self, source_id: int, dest_id: int) -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'content' AS kind
+                  FROM checkpoints
+                 WHERE source_id=? AND dest_id=? AND status='done' AND dest_msg_id IS NOT NULL
+                UNION ALL
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'marker' AS kind
+                  FROM placeholders WHERE source_id=? AND dest_id=?
+                UNION ALL
+                SELECT msg_id, dest_msg_id, dest_topic, part_index, 'continuation' AS kind
+                  FROM placeholder_parts WHERE source_id=? AND dest_id=?
+                 ORDER BY dest_topic, dest_msg_id, part_index
+                """,
+                (source_id, dest_id, source_id, dest_id, source_id, dest_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── chave/valor ───────────────────────────────────────────────────────────
 
     def set_kv(self, key: str, value: str) -> None:
