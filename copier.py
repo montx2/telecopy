@@ -707,6 +707,17 @@ class Copier:
                 "dest_topic": row.get("dest_topic"),
             })
         roots = set(topic_map or {})
+        collected = {int(m.id) for m in messages}
+        # Pendências que ficaram FORA da coleta atual (filtro diferente, mensagem
+        # removida da origem). Elas não serão enviadas nesta execução, então
+        # qualquer item posterior do mesmo tópico abriria um buraco.
+        hidden: Dict[Any, int] = {}
+        for mid, row in snapshot.items():
+            if mid in collected or self._position_resolved(row):
+                continue
+            key = row.get("dest_topic")
+            if key not in hidden or mid < hidden[key]:
+                hidden[key] = mid
         pending: Dict[Any, int] = {}
         violations: List[Dict[str, Any]] = []
         for msg in sorted(messages, key=lambda m: int(m.id)):
@@ -715,6 +726,10 @@ class Copier:
                 topic = topic_map.get(source_topic)
             else:
                 topic = dest_topic
+            unseen = hidden.get(topic)
+            if unseen is not None and unseen < int(msg.id):
+                violations.append({"topic": topic, "pending": unseen, "terminal": int(msg.id)})
+                continue
             row = snapshot.get(int(msg.id))
             if self._position_resolved(row):
                 if topic in pending:
@@ -2470,11 +2485,16 @@ class Copier:
                     await asyncio.sleep(self.delay)
                     continue
                 message = await self.client.get_messages(source, ids=msg_id)
-                if message is None:
-                    self.repo.clear_failure(source_id, dest_id, msg_id)
-                    stats.skipped += 1
-                    continue
                 route = self.repo.checkpoint_route(source_id, dest_id, msg_id)
+                if message is None:
+                    # Não há o que entregar: resolve a posição como skip em vez de
+                    # deixar uma pendência eterna bloqueando o preflight.
+                    self.repo.clear_failure(source_id, dest_id, msg_id)
+                    self.repo.upsert_checkpoint(source_id, dest_id, msg_id, Status.SKIPPED,
+                                                dest_topic=route.get("dest_topic"))
+                    stats.skipped += 1
+                    stats.intentional_skips += 1
+                    continue
                 target_topic = dest_topic if dest_topic is not None else route.get("dest_topic")
                 roots = {self._source_topic_id(message, set()) or 1}
                 reply_to = self._reply_target(message, source_id, dest_id, {root: root for root in roots})

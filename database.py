@@ -877,17 +877,20 @@ class Repository:
         with self._db() as conn:
             rows = conn.execute(
                 """
-                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'content' AS kind
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'content' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
                   FROM checkpoints
                  WHERE source_id=? AND dest_id=?
                    AND (status='done' OR (status='error' AND dest_msg_id IS NULL))
                 UNION ALL
-                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'marker' AS kind
+                SELECT msg_id, dest_msg_id, dest_topic, 0 AS part_index, 'marker' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
                   FROM placeholders WHERE source_id=? AND dest_id=?
                 UNION ALL
-                SELECT msg_id, dest_msg_id, dest_topic, part_index, 'continuation' AS kind
+                SELECT msg_id, dest_msg_id, dest_topic, part_index, 'continuation' AS kind,
+                       (dest_msg_id IS NULL) AS pending_pos
                   FROM placeholder_parts WHERE source_id=? AND dest_id=?
-                 ORDER BY dest_topic, dest_msg_id, part_index
+                 ORDER BY dest_topic, pending_pos, dest_msg_id, part_index
                 """,
                 (source_id, dest_id, source_id, dest_id, source_id, dest_id),
             ).fetchall()

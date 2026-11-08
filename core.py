@@ -2280,28 +2280,31 @@ class App:
         unknown = 0
         details = []
         for pair in pairs:
-            rows = db.order_rows(pair["source_id"], pair["dest_id"])
-            last_by_topic = {}
-            pending_topics = set()
-            for row in rows:
-                topic = row.get("dest_topic")
-                dest_msg_id = row.get("dest_msg_id")
-                msg_id = row.get("msg_id")
-                if dest_msg_id is None:
-                    unknown += 1
-                    pending_topics.add(topic)
-                    continue
-                if topic in pending_topics:
-                    violations += 1
-                    details.append(f"{pair['source_id']}->{pair['dest_id']} "
-                                   f"tópico {topic}: {msg_id} após posição não resolvida")
-                    pending_topics.discard(topic)
-                last = last_by_topic.get(topic)
-                if last is not None and msg_id < last:
-                    violations += 1
-                    details.append(f"{pair['source_id']}->{pair['dest_id']} "
-                                   f"tópico {topic}: {msg_id} após {last}")
-                last_by_topic[topic] = msg_id
+            by_topic: Dict[Any, Dict[str, list]] = {}
+            for row in db.order_rows(pair["source_id"], pair["dest_id"]):
+                bucket = by_topic.setdefault(row.get("dest_topic"),
+                                             {"resolved": [], "unresolved": []})
+                if row.get("dest_msg_id") is None:
+                    bucket["unresolved"].append(int(row["msg_id"]))
+                else:
+                    bucket["resolved"].append((int(row["dest_msg_id"]), int(row["msg_id"])))
+            for topic, bucket in by_topic.items():
+                unknown += len(bucket["unresolved"])
+                resolved = sorted(bucket["resolved"])
+                last_msg_id = None
+                for _dest_msg_id, msg_id in resolved:
+                    if last_msg_id is not None and msg_id < last_msg_id:
+                        violations += 1
+                        details.append(f"{pair['source_id']}->{pair['dest_id']} "
+                                       f"tópico {topic}: {msg_id} após {last_msg_id}")
+                    last_msg_id = msg_id
+                # Posição resolvida ocupando o lugar de uma pendência anterior.
+                # Pendência DEPOIS de tudo é estado normal, não violação.
+                if bucket["unresolved"] and resolved:
+                    if min(bucket["unresolved"]) < max(m for _d, m in resolved):
+                        violations += 1
+                        details.append(f"{pair['source_id']}->{pair['dest_id']} "
+                                       f"tópico {topic}: resolvido após posição não resolvida")
         rows_box = [(t("tools.order.violations"), str(violations)),
                     (t("tools.order.unknown"), str(unknown))]
         ui.box(t("tools.order.title"), rows_box,
