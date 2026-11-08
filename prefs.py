@@ -15,16 +15,19 @@ from utils import read_json, write_json
 
 PREFS_FILE = DATA_DIR / "prefs.json"
 
+_PREFS_VERSION = 2
+
 _DEFAULTS: Dict[str, Any] = {
+    "prefs_version": _PREFS_VERSION,
     "language": None,          # None = perguntar na primeira execução
     "onboarding_done": False,
     "last_filter": "all",
     "last_source_id": None,
     "last_dest_id": None,
     "check_updates": True,
-    "placeholder": True,
-    "delivery": "reference",
-    "server_copy": True,
+    "placeholder": False,
+    "delivery": "upload",
+    "server_copy": False,
     "config": RunConfig().to_dict(),
     # Clone automático
     "clone_suffix": " (Clone)",
@@ -47,21 +50,41 @@ class Preferences:
             merged = {**_DEFAULTS, **saved}
             saved_config = saved.get("config") or {}
             cfg_data = {**RunConfig().to_dict(), **saved_config}
-            if "placeholder" in saved:
-                cfg_data["placeholder"] = bool(saved["placeholder"])
-            if "delivery" in saved:
-                cfg_data["delivery"] = saved["delivery"]
-            if "server_copy" in saved:
-                cfg_data["server_copy"] = bool(saved["server_copy"])
+            for key in ("placeholder", "delivery", "server_copy"):
+                if key in saved:
+                    cfg_data[key] = saved[key]
+
+            try:
+                old_version = int(saved.get("prefs_version", 1))
+            except (TypeError, ValueError):
+                old_version = 1
+            if old_version < _PREFS_VERSION:
+                # Valores iguais aos defaults antigos são tratados como herdados.
+                # Preferências antigas não registravam se o usuário escolheu
+                # explicitamente o próprio default; essa ambiguidade foi aprovada.
+                inherited_defaults = {
+                    "delivery": ("reference", "upload"),
+                    "server_copy": (True, False),
+                    "placeholder": (True, False),
+                    "on_failure": ("placeholder", "abort"),
+                }
+                for key, (old_default, new_default) in inherited_defaults.items():
+                    if cfg_data.get(key, old_default) == old_default:
+                        cfg_data[key] = new_default
+
             cfg = RunConfig.from_dict(cfg_data)
+            merged["prefs_version"] = _PREFS_VERSION
             merged["config"] = cfg.to_dict()
             merged["placeholder"] = cfg.placeholder
             merged["delivery"] = cfg.delivery
             merged["server_copy"] = cfg.server_copy
             self.data = merged
+            if saved and old_version < _PREFS_VERSION:
+                self.save()
         return self.data
 
     def save(self) -> bool:
+        self.data["prefs_version"] = _PREFS_VERSION
         return write_json(self.path, self.data)
 
     def get(self, key: str, default: Any = None) -> Any:

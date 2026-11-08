@@ -251,7 +251,7 @@ def test_daily_and_stats() -> None:
 def test_runconfig() -> None:
     cfg = RunConfig(delay=0.05, workers=99, memory_profile=1.5)
     check(cfg.delay == 0.1, "delay mínimo")
-    check(cfg.workers == 8, "workers máximo")
+    check(cfg.workers == 6, "workers máximo")
     check(cfg.memory_profile == 0.95, "memory_profile limitado")
     clone = RunConfig.from_dict(cfg.to_dict())
     check(clone.to_dict() == cfg.to_dict(), "serialização de RunConfig")
@@ -380,9 +380,13 @@ def test_copy_retomada() -> None:
 
 def test_copy_erro_recuperavel() -> None:
     mensagens = [document_message(i, f"arq{i}.pdf") for i in range(1, 6)]
-    resultado, client, repo = asyncio.run(_run_copy(mensagens, fail_ids={3}))
+    legacy = RunConfig(workers=2, delay=0.1, delivery="upload", server_copy=False,
+                       placeholder=True, on_failure="placeholder")
+    resultado, client, repo = asyncio.run(
+        _run_copy(mensagens, fail_ids={3}, config=legacy)
+    )
     check(resultado["errors"] == 1, "mensagem com falha conta como erro")
-    check(resultado["done"] == 4, "as demais são copiadas")
+    check(resultado["done"] == 4, "modo placeholder explícito preserva comportamento legado")
     falhas = repo.failures()
     check(len(falhas) == 1 and falhas[0]["msg_id"] == 3, "falha entra na fila de repetição")
     repo.close()
@@ -673,11 +677,15 @@ def test_copy_arquivo_grande_e_nome_estranho() -> None:
 
 
 def test_copy_album_com_falha() -> None:
-    """Se um item do álbum falhar, o restante continua e o erro é registrado."""
+    """Placeholder opt-in mantém o teste do fluxo de reserva do álbum."""
     mensagens = album_messages(300, 2) + [text_message(310, "depois")]
-    resultado, client, repo = asyncio.run(_run_copy(mensagens, fail_ids={301}))
+    legacy = RunConfig(workers=2, delay=0.1, delivery="upload", server_copy=False,
+                       placeholder=True, on_failure="placeholder", use_dedup=False)
+    resultado, client, repo = asyncio.run(
+        _run_copy(mensagens, fail_ids={301}, config=legacy)
+    )
     check(resultado["errors"] >= 1, "falha no álbum é contabilizada")
-    check(resultado["done"] >= 1, "mensagens saudáveis continuam sendo copiadas")
+    check(resultado["done"] >= 1, "placeholder opt-in mantém o restante do histórico")
     check(len(repo.failures()) >= 1, "falha entra na fila de repetição")
     repo.close()
 
@@ -707,8 +715,10 @@ def test_prefs_roundtrip() -> None:
 
 def test_retry_messages() -> None:
     mensagens = [document_message(i, f"arq{i}.pdf") for i in range(1, 4)]
+    legacy = RunConfig(workers=2, delay=0.1, delivery="upload", server_copy=False,
+                       placeholder=True, on_failure="placeholder", use_dedup=False)
     resultado, client, repo = asyncio.run(
-        _run_copy(mensagens, fail_ids={2})
+        _run_copy(mensagens, fail_ids={2}, config=legacy)
     )
     check(resultado["errors"] == 1, "falha inicial registrada")
 
@@ -782,9 +792,12 @@ def test_forum_repeticoes_nao_sao_descartadas() -> None:
 def test_midia_nao_suportada_nao_conclui() -> None:
     dice = type("MessageMediaDice", (), {})()
     messages = [FakeMessage(id=1, media=dice)]
-    result, client, repo = asyncio.run(_run_copy(
-        messages, config=RunConfig(use_dedup=False, placeholder=False)
-    ))
+    from unittest.mock import patch
+
+    with patch.object(Copier, "_prompt_failure", return_value="a"):
+        result, client, repo = asyncio.run(_run_copy(
+            messages, config=RunConfig(use_dedup=False, placeholder=False)
+        ))
     check(result["errors"] == 1 and result["unsupported"] == 1, "mídia não reproduzível é erro")
     check(not result["complete"], "cópia incompleta não é marcada como completa")
     check(not client.sent, "nada é enviado fingindo sucesso")

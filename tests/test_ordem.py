@@ -6,13 +6,12 @@ import asyncio
 import random
 import sys
 import tempfile
+import copier as cm
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import copier as cm
 
 import pytest
 
@@ -88,7 +87,11 @@ def make_copier(env, messages, *, client=None, **options):
     client = client if client is not None else FakeClient(messages)
     client.register_entity(source)
     client.register_entity(dest)
-    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False}
+    # These legacy-route tests opt in explicitly; RunConfig's production defaults
+    # are covered by tests/test_motor_upload.py.
+    defaults = {"workers": 1, "delay": 0.1, "use_dedup": False,
+                "delivery": "reference", "server_copy": True,
+                "placeholder": True, "on_failure": "placeholder"}
     defaults.update(options)
     copier = Copier(client, repo=env.repo, config=RunConfig(**defaults), rich_ok=False)
     return SimpleNamespace(copier=copier, client=client, source=source, dest=dest)
@@ -180,6 +183,68 @@ def test_referencia_em_forum_usa_topico(env) -> None:
     assert setup.client.sent[0]["top_msg_id"] == 911
     assert setup.client.sent[0]["reply_to"] == 911
     assert setup.client.downloads == []
+
+
+def test_midia_nao_suportada_bloqueia_mensagens_posteriores(env) -> None:
+    unsupported = type("MessageMediaDice", (), {})()
+    messages = [FakeMessage(id=1, media=unsupported), text_message(2, "posterior")]
+    setup = make_copier(env, messages, placeholder=False, on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["errors"] == 1 and result["unsupported"] == 1
+    assert result["interrupted"] and not setup.client.sent
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 1)["status"] == "error"
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2) == {}
+
+
+def test_album_com_falha_de_preparacao_e_atomico_no_padrao(env) -> None:
+    messages = album_messages(10, 3)
+    client = FakeClient(messages, fail_ids={11})
+    setup = make_copier(env, messages, client=client, placeholder=False,
+                        on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 0 and result["errors"] == 3
+    assert result["interrupted"] and not client.sent
+    assert all(env.repo.checkpoint_route(setup.source.id, setup.dest.id, i)["status"] == "error"
+               for i in (10, 11, 12))
+    assert "ordem bloqueada" in result["first_error"].lower()
+
+
+def test_album_precarrega_todos_os_uploads_antes_do_primeiro_envio(env) -> None:
+    messages = album_messages(20, 10)
+
+    class UploadFailClient(FakeClient):
+        def __init__(self, items):
+            super().__init__(items)
+            self.upload_calls = 0
+
+        async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
+            self.upload_calls += 1
+            if self.upload_calls == 10:
+                raise OSError("falha simulada no décimo upload")
+            return await super().upload_file(path, file_name, progress_callback, **kwargs)
+
+    client = UploadFailClient(messages)
+    setup = make_copier(env, messages, client=client, server_copy=False,
+                        placeholder=False, on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert client.upload_calls == 10
+    assert not client.sent
+    assert result["errors"] == len(messages) and result["interrupted"]
+
+
+def test_album_maior_que_limite_atomico_e_bloqueado(env) -> None:
+    messages = album_messages(40, 12)
+    setup = make_copier(env, messages, server_copy=False, placeholder=False,
+                        on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["errors"] == len(messages) and result["interrupted"]
+    assert not setup.client.sent
+    assert all(env.repo.checkpoint_route(setup.source.id, setup.dest.id, msg.id)["status"] == "error"
+               for msg in messages)
 
 
 def test_album_parcial_reserva_marcador_na_posicao(env) -> None:
@@ -333,7 +398,8 @@ def test_espelho_dez_mensagens_em_ordem(env) -> None:
 def test_abort_prompt_retoma_no_mesmo_ponto(env) -> None:
     messages = [text_message(i, f"msg {i}") for i in range(1, 4)]
     client = TransientTextClient(messages, fail_once={2})
-    setup = make_copier(env, messages, client=client, max_retries=0, on_failure="abort")
+    setup = make_copier(env, messages, client=client, max_retries=0,
+                        on_failure="abort")
     with patch.object(cm.ui, "ask", return_value="r"), \
          patch.object(cm.ui, "menu", lambda *a, **k: None), \
          patch.object(cm.ui, "warn", lambda *a, **k: None), \
@@ -359,4 +425,4 @@ def test_config_delivery_server_copy_roundtrip(env) -> None:
     assert loaded.config.server_copy is False
     assert loaded.get("delivery") == "upload"
     assert loaded.get("server_copy") is False
-    assert RunConfig.from_dict({"delivery": "inválido"}).delivery == "reference"
+    assert RunConfig.from_dict({"delivery": "inválido"}).delivery == "upload"

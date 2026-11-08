@@ -302,6 +302,12 @@ _s("copy.download_unavailable", "Download da mídia indisponível ou expirado.",
 _s("copy.download_failed", "Não foi possível baixar a mídia: {reason}", "Could not download the media: {reason}")
 _s("order.violation", "Violação de ordem detectada; refaça o tópico/destino afetado.",
    "Order violation detected; rebuild the affected topic/destination.")
+_s("order.violation.detail", "tópico {topic}: pendente msg_id={pending} antes de terminal msg_id={terminal}",
+   "topic {topic}: pending msg_id={pending} before terminal msg_id={terminal}")
+_s("order.blocked", "Ordem bloqueada no tópico {topic}, msg_id={msg_id}: {reason}",
+   "Order blocked in topic {topic}, msg_id={msg_id}: {reason}")
+_s("copy.album_too_large", "Álbum com {count} partes excede o limite atômico de 10; envio bloqueado.",
+   "Album with {count} parts exceeds the atomic limit of 10; sending blocked.")
 _s("order.reserve_failed", "Não foi possível reservar a posição; a cópia foi interrompida sem avançar.",
    "Could not reserve the position; the copy stopped without advancing.")
 _s("order.pending", "Há item anterior não resolvido neste tópico; envio bloqueado para preservar a ordem.",
@@ -310,8 +316,12 @@ _s("failure.resume", "Retomar tentativa neste ponto", "Retry at this point")
 _s("failure.placeholder", "Reservar posição e continuar", "Reserve position and continue")
 _s("failure.abort", "Abortar cópia", "Abort copy")
 _s("settings.delivery", "Entrega de mídia", "Media delivery")
-_s("settings.delivery.toggle", "Alternar entrega (referência/upload/forward)",
-   "Cycle delivery (reference/upload/forward)")
+_s("settings.delivery.toggle", "Alternar entrega (upload/referência/forward)",
+   "Cycle delivery (upload/reference/forward)")
+_s("settings.fidelity.warning",
+   "Referência/placeholder = cópia sem fidelidade de download; use só se precisar.",
+   "Reference/placeholder = copy without download fidelity; use only when needed.")
+_s("settings.strict_order", "Ordem estrita por tópico", "Strict order per topic")
 _s("settings.server_copy", "Cópia no servidor", "Server-side copy")
 _s("settings.server_copy.toggle", "Alternar cópia no servidor sem download",
    "Toggle server-side copy without download")
@@ -349,8 +359,8 @@ _s("placeholder.missing", "A mensagem original não está mais disponível na or
 _s("placeholder.continuation", "⚠️ Continuação pendente da mensagem {id} (parte {part}).",
    "⚠️ Pending continuation of message {id} (part {part}).")
 _s("settings.placeholder", "Reservar posição em falhas", "Reserve position on failures")
-_s("settings.placeholder.toggle", "Reservar posição em falhas (recomendado)",
-   "Reserve position on failures (recommended)")
+_s("settings.placeholder.toggle", "Alternar reserva de posição em falhas (opcional)",
+   "Toggle failure placeholders (optional)")
 _s("tools.recover", "Recuperar lacunas", "Recover gaps")
 _s("tools.recover.desc", "Preenche marcadores por edição, mantendo a ordem",
    "Fill placeholders by editing, keeping the order")

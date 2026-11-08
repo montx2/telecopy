@@ -35,6 +35,20 @@ class ContinuationFailsOnce(FakeClient):
         return await super().send_message(entity, text, reply_to=reply_to, **kwargs)
 
 
+class SecondContinuationFailsOnce(FakeClient):
+    """Retoma após reinício pelo ponto salvo, sem baixar/enviar a mídia de novo."""
+
+    def __init__(self, messages):
+        super().__init__(messages)
+        self.text_calls = 0
+
+    async def send_message(self, entity, text, reply_to=None, **kwargs):
+        self.text_calls += 1
+        if self.text_calls == 2:
+            raise OSError("falha depois da primeira continuação confirmada")
+        return await super().send_message(entity, text, reply_to=reply_to, **kwargs)
+
+
 class SecondAlbumChunkFailsOnce(FakeClient):
     def __init__(self, messages):
         super().__init__(messages)
@@ -91,6 +105,34 @@ def test_retry_upload_nao_reenvia_midia_confirmada(env) -> None:
     assert result["done"] == 1
     assert len(client.downloads) == 1
     assert len([s for s in client.sent if s.get("path")]) == 1
+
+
+def test_retry_reabre_checkpoint_parcial_sem_baixar_ou_reenviar_media(env) -> None:
+    from unittest.mock import patch
+
+    msg = tl_video(1, "z" * 5000)
+    client = SecondContinuationFailsOnce([msg])
+    setup = make_copier(env, [msg], client=client, max_retries=0,
+                        server_copy=False, placeholder=False, on_failure="abort")
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        first = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    route = env.repo.checkpoint_route(setup.source.id, setup.dest.id, 1)
+    assert first["errors"] == 1 and route["status"] == "error"
+    assert route["dest_msg_id"] and route["continuation_parts_sent"] == 1
+
+    resumed_copier = cm.Copier(
+        client, repo=env.repo, config=setup.copier.cfg, rich_ok=False,
+    )
+    with fast_sleep():
+        resumed = asyncio.run(resumed_copier.retry_messages(setup.source, setup.dest, [1]))
+    assert resumed["done"] == 1 and resumed["errors"] == 0
+    assert client.downloads == [1]
+    assert len([s for s in client.sent if s.get("kind") == "file"]) == 1
+    parts = resumed_copier._parts(msg, cm.CAPTION_LIMIT)
+    assert len([s for s in client.sent if s.get("kind") == "text"]) == len(parts) - 1
+    final_route = env.repo.checkpoint_route(setup.source.id, setup.dest.id, 1)
+    assert final_route["status"] == "done"
+    assert final_route["continuation_parts_sent"] == len(parts) - 1
 
 
 def test_cada_envio_confirmado_conta_no_limite_diario(env) -> None:

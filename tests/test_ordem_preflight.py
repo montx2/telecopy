@@ -55,6 +55,33 @@ def test_pendencia_posterior_nao_bloqueia(env) -> None:
     assert result["errors"] == 0 and result["done"] == 2
 
 
+def test_retry_de_falha_para_antes_de_mensagens_posteriores(env) -> None:
+    from tests.test_ordem import TransientTextClient
+
+    messages = [text_message(i, f"msg {i}") for i in (1, 2, 3)]
+    client = TransientTextClient(messages, fail_always={2})
+    setup = make_copier(env, messages, client=client, placeholder=False,
+                        on_failure="abort", max_retries=0)
+    env.repo.add_failure(setup.source.id, setup.dest.id, 2, "falhou antes")
+    env.repo.add_failure(setup.source.id, setup.dest.id, 3, "falhou antes")
+    with _ordem.patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.retry_messages(setup.source, setup.dest, [2, 3]))
+    assert result["errors"] == 1 and result["interrupted"]
+    assert client.sent == []
+    assert "ordem bloqueada" in result["first_error"].lower()
+
+
+def test_retry_de_mensagem_anterior_a_conteudo_terminal_e_bloqueado(env) -> None:
+    messages = [text_message(i, f"msg {i}") for i in (1, 2, 3)]
+    setup = make_copier(env, messages, placeholder=False, on_failure="abort")
+    env.repo.upsert_checkpoint(setup.source.id, setup.dest.id, 2, Status.ERROR)
+    env.repo.upsert_checkpoint(setup.source.id, setup.dest.id, 3, Status.DONE, dest_msg_id=9003)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.retry_messages(setup.source, setup.dest, [2]))
+    assert result["errors"] == 1 and not setup.client.sent
+    assert "ordem bloqueada" in result["first_error"].lower()
+
+
 def test_mensagem_apagada_da_origem_resolve_posicao(env) -> None:
     """Sem isso, uma pendência de mensagem inexistente travaria o preflight para sempre."""
     messages = [text_message(1, "msg 1")]
