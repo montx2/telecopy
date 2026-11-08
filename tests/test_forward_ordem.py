@@ -126,3 +126,26 @@ def test_delivery_forward_e_honrado_pelo_motor(env) -> None:
         result = asyncio.run(setup.copier.run(setup.source, setup.dest))
     assert setup.client.forwarded, "delivery='forward' ignorado pelo motor"
     assert result["done"] == 1
+
+
+def test_forward_ambiguo_aborta_sem_reservar(env) -> None:
+    """Resposta sem ID utilizável: pode ter sido aceita. Detecta e aborta."""
+    class Unconfirmed(FakeClient):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.calls = 0
+
+        async def forward_messages(self, entity, messages, from_peer=None, **kwargs):
+            self.calls += 1
+            ids = messages if isinstance(messages, list) else [messages]
+            return [SimpleNamespace(id=None) for _ in ids]
+
+    messages = [text_message(i, f"msg {i}") for i in range(1, 4)]
+    client = Unconfirmed(messages)
+    setup = make_copier(env, messages, client=client, forward_mode=True, max_retries=2)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 0
+    assert result["placeholders"] == 0, "reservou posição sobre estado ambíguo"
+    assert result["interrupted"], "estado ambíguo deve abortar"
+    assert client.calls == 1, f"reenviou sobre estado ambíguo: {client.calls} tentativas"

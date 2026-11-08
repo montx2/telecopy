@@ -1061,6 +1061,7 @@ class Copier:
             item_topic = self._destination_topic(item, dest_topic, topic_map)
             reply_to = self._reply_target(messages[0], source_id, dest_id, topic_map)
             copied_via_fallback = False
+            ambiguous = False
             errors_before_item = stats.errors
             sent_ids: List[Optional[int]] = []
             attempts = self.cfg.max_retries + 1
@@ -1077,6 +1078,7 @@ class Copier:
                         sent_ids = await self._forward_item(source, dest, ids, item_topic, reply_to)
                         invalid = self._forward_ids_valid(sent_ids, messages)
                         if invalid:
+                            ambiguous = True
                             raise RuntimeError(invalid)
                     error = None
                     break
@@ -1131,7 +1133,13 @@ class Copier:
 
                 action = ("p" if self.cfg.placeholder and self.cfg.on_failure == "placeholder"
                           else "a")
-                if self.cfg.on_failure == "abort":
+                if ambiguous:
+                    # O Telegram pode ter aceitado o envio sem devolver ID
+                    # utilizável. Reservar ou reenviar criaria duplicata: o
+                    # contrato é detectar e abortar.
+                    action = "a"
+                    stats.first_error = reason
+                elif self.cfg.on_failure == "abort":
                     action = self._prompt_failure(reason)
 
                 if action == "r":
@@ -1172,6 +1180,9 @@ class Copier:
             progress.update(stats.done + stats.skipped + stats.errors,
                             self._progress_status(stats))
             if should_stop:
+                # run() deriva `interrupted` de _stop; parar cedo sem sinalizar
+                # reportaria uma cópia completa que não foi.
+                self._stop = True
                 break
             await asyncio.sleep(self.delay)
 
@@ -1718,7 +1729,9 @@ class Copier:
                     stats.bytes_saved += sum(int(e.get("size") or 0) for e in group)
                 else:
                     ids = await self._send_album(group, dest, dest_topic, progress, stats, reply_to)
-                stats.albums += 1
+                if not payload.get("album_counted"):
+                    payload["album_counted"] = True
+                    stats.albums += 1
                 return ids
             entry = group[0]
             if entry.get("reference") and not entry.get("path"):
