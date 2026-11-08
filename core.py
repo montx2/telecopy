@@ -345,6 +345,11 @@ class App:
         )
         ui.loading_bar(t("init.loading"))
         self.stats.new_session()
+        from copier import sweep_temp
+
+        removed = sweep_temp()
+        if removed:
+            logger.info(f"Temporários antigos removidos na inicialização: {removed}")
         logger.info(f"Sessão iniciada — v{_app.__version__} [{get_lang()}]")
 
         if not self.prefs.get("onboarding_done"):

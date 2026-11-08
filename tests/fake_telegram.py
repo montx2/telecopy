@@ -167,6 +167,11 @@ class FakeClient:
         self.handlers: List[Any] = []
         self._random_messages: Dict[int, Any] = {}
         self.requests: List[Any] = []
+        self.upload_attempts: List[str] = []
+        self.upload_delays: Dict[str, float] = {}
+        self.upload_errors: Dict[str, List[Exception]] = {}
+        self.send_errors: Dict[str, List[Exception]] = {}
+        self.upload_media_calls = 0
 
     # -- downloads/upload ---------------------------------------------------
 
@@ -189,6 +194,16 @@ class FakeClient:
         return str(file)
 
     async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
+        import asyncio
+
+        name = file_name or os.path.basename(str(path))
+        self.upload_attempts.append(name)
+        errors = self.upload_errors.get(name, [])
+        if errors:
+            raise errors.pop(0)
+        delay = self.upload_delays.get(name, 0)
+        if delay:
+            await asyncio.sleep(delay)
         if progress_callback:
             size = os.path.getsize(path) if os.path.exists(path) else 1
             progress_callback(size, size)
@@ -306,12 +321,16 @@ class FakeClient:
     async def __call__(self, request):
         self.requests.append(request)
         name = type(request).__name__
+        errors = self.send_errors.get(name, [])
+        if errors:
+            raise errors.pop(0)
         if name == "SendMessageRequest":
             return self._record_send(
                 request.peer, "text", text=request.message, reply_to=request.reply_to,
                 random_id=request.random_id, formatting_entities=request.entities,
             ) and SimpleNamespace()
         if name == "UploadMediaRequest":
+            self.upload_media_calls += 1
             # O cliente real devolve MessageMedia; para o fake, devolver a
             # própria InputMedia permite reutilizar o caminho/atributos.
             return request.media
@@ -326,6 +345,7 @@ class FakeClient:
                 formatting_entities=request.entities, input_media=media,
                 attributes=getattr(media, "attributes", None),
                 mime_type=getattr(media, "mime_type", None),
+                force_document=getattr(media, "force_file", False),
             )
             return SimpleNamespace()
         if name == "SendMultiMediaRequest":
