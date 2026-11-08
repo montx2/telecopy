@@ -308,6 +308,8 @@ _s("placeholder.unrecoverable", "❌ Conteúdo indisponível (mensagem {id}). Mo
    "❌ Content unavailable (message {id}). Reason: {reason}")
 _s("placeholder.missing", "A mensagem original não está mais disponível na origem.",
    "The original message is no longer available in the source.")
+_s("placeholder.continuation", "⚠️ Continuação pendente da mensagem {id} (parte {part}).",
+   "⚠️ Pending continuation of message {id} (part {part}).")
 _s("settings.placeholder", "Reservar posição em falhas", "Reserve position on failures")
 _s("settings.placeholder.toggle", "Reservar posição em falhas (recomendado)",
    "Reserve position on failures (recommended)")

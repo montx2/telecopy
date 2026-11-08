@@ -34,7 +34,7 @@ from i18n import get_lang, set_lang  # noqa: E402
 from telethon.errors import FileReferenceExpiredError  # noqa: E402
 from telethon.tl import types as tl  # noqa: E402
 from utils import DailyLimit  # noqa: E402
-from tests.fake_telegram import FakeClient, FakeMessage, channel  # noqa: E402
+from tests.fake_telegram import FakeClient, FakeMessage, album_messages, channel  # noqa: E402
 
 
 @contextmanager
@@ -177,6 +177,21 @@ def test_referencia_em_forum_usa_topico(env) -> None:
     assert setup.client.sent[0]["top_msg_id"] == 911
     assert setup.client.sent[0]["reply_to"] == 911
     assert setup.client.downloads == []
+
+
+def test_album_parcial_reserva_marcador_na_posicao(env) -> None:
+    messages = album_messages(1, 4, grouped_id=99)
+    client = FakeClient(messages, fail_ids={2})
+    setup = make_copier(env, messages, client=client, server_copy=False)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["placeholders"] == 1
+    routes = [env.repo.checkpoint_route(setup.source.id, setup.dest.id, i)["dest_msg_id"] for i in (1, 2, 3, 4)]
+    assert all(routes) and routes == sorted(routes)
+    kinds = [item["kind"] for item in setup.client.sent]
+    assert kinds[0] == "file" and kinds[1] == "text"
+    assert setup.client.sent[1]["text"] and "mensagem 2" in setup.client.sent[1]["text"]
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "open"
 
 
 def test_config_delivery_server_copy_roundtrip(env) -> None:

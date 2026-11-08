@@ -154,6 +154,19 @@ CREATE TABLE IF NOT EXISTS placeholders (
     UNIQUE (source_id, dest_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ph_pair ON placeholders (source_id, dest_id, state);
+
+CREATE TABLE IF NOT EXISTS placeholder_parts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id    INTEGER NOT NULL,
+    dest_id      INTEGER NOT NULL,
+    msg_id       INTEGER NOT NULL,
+    part_index   INTEGER NOT NULL,
+    dest_msg_id  INTEGER NOT NULL,
+    dest_topic   INTEGER,
+    created_at   REAL NOT NULL DEFAULT 0,
+    UNIQUE (source_id, dest_id, msg_id, part_index)
+);
+CREATE INDEX IF NOT EXISTS idx_ph_parts_msg ON placeholder_parts (source_id, dest_id, msg_id);
 """
 
 
@@ -766,6 +779,44 @@ class Repository:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def add_placeholder_part(
+        self, source_id: int, dest_id: int, msg_id: int, part_index: int,
+        dest_msg_id: int, dest_topic: Optional[int] = None,
+    ) -> int:
+        now = time.time()
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO placeholder_parts
+                    (source_id, dest_id, msg_id, part_index, dest_msg_id, dest_topic, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_id, dest_id, msg_id, part_index) DO NOTHING
+                """,
+                (source_id, dest_id, msg_id, int(part_index), int(dest_msg_id), dest_topic, now),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM placeholder_parts
+                 WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=?
+                """,
+                (source_id, dest_id, msg_id, int(part_index)),
+            ).fetchone()
+        return int(row["id"])
+
+    def placeholder_parts(
+        self, source_id: int, dest_id: int, msg_id: int
+    ) -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM placeholder_parts
+                 WHERE source_id=? AND dest_id=? AND msg_id=?
+                 ORDER BY part_index
+                """,
+                (source_id, dest_id, msg_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── chave/valor ───────────────────────────────────────────────────────────
 
     def set_kv(self, key: str, value: str) -> None:
@@ -821,7 +872,8 @@ class Repository:
     def reset_all(self) -> None:
         """Apaga o histórico de cópias (mantém apenas as preferências)."""
         with self._db() as conn:
-            for table in ("checkpoints", "dedup", "processed", "failures", "placeholders"):
+            for table in ("checkpoints", "dedup", "processed", "failures", "placeholders",
+                          "placeholder_parts"):
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608
             # Mapas de tópicos são estado de cópia; sem isso, "recomeçar do
             # zero" ainda reutilizaria associações antigas.

@@ -493,15 +493,18 @@ def test_legenda_longa_recuperada_com_continuacoes(env) -> None:
     stored = row["caption"]
     setup.client.fail_ids.clear()
     before_daily = env.limit.count
+    before_sent = len(setup.client.sent)
+    slots = env.repo.placeholder_parts(setup.source.id, setup.dest.id, 1)
+    assert slots, "continuações devem ser pré-reservadas na criação do marcador"
     with fast_sleep():
         result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
     assert result["recovered"] == 1
-    edit = setup.client.edits[0]
-    assert edit["path"]
-    continuations = [item["text"] for item in setup.client.sent if item["kind"] == "text"]
-    assert edit["text"] + "".join(continuations) == stored
-    assert edit["formatting_entities"][0].length == 10
-    assert env.limit.count == before_daily + len(continuations)
+    assert len(setup.client.sent) == before_sent, "recuperação não cria mensagem nova"
+    assert env.limit.count == before_daily, "edições não consomem limite diário"
+    assert setup.client.edits[0]["path"]
+    assert "".join(edit["text"] for edit in setup.client.edits) == stored
+    assert setup.client.edits[0]["formatting_entities"][0].length == 10
+    assert len(setup.client.edits) == 1 + len(slots)
     assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 1)["state"] == "recovered"
     assert not list(env.temp.glob("*"))
 

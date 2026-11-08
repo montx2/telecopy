@@ -1422,6 +1422,27 @@ class Copier:
             )
             daily_limit.add(1)
             stats.placeholders += 1
+            if not unsupported and caption:
+                limit = MESSAGE_LIMIT if entry.get("media_type") == "text" else CAPTION_LIMIT
+                recovery_parts = text_chunks(caption, _decode_entities(entities_json), limit)
+                for part_index, (_chunk_text, _chunk_entities) in enumerate(recovery_parts[1:], start=1):
+                    slot_text = t("placeholder.continuation", id=msg.id, part=part_index)
+                    slot_id = None
+                    for attempt in range(3):
+                        try:
+                            self._check_limit()
+                            slot_id = await self._send_chunk(dest, slot_text, None, dest_topic, None)
+                            break
+                        except FloodWaitError as exc:
+                            if attempt == 2:
+                                raise
+                            await self._handle_flood(exc)
+                    if slot_id is None:
+                        raise RuntimeError(t("copy.send_unconfirmed"))
+                    self.repo.add_placeholder_part(
+                        source_id, dest_id, msg.id, part_index, slot_id, dest_topic=dest_topic
+                    )
+                    daily_limit.add(1)
             return int(created_id)
         except DailyLimitReached:
             raise
@@ -1480,55 +1501,75 @@ class Copier:
         dest_topic = payload.get("dest_topic")
         reply_to = payload.get("reply_to")
 
-        media_entries = [e for e in plan if (e["path"] or e.get("reference")) and not e.get("failed")]
-        native_entries = [e for e in plan if e.get("native") and not e.get("failed")]
-        failed_entries = [e for e in plan if e.get("failed")]
-        text_entries = [
-            e for e in plan
-            if not e["path"] and not e.get("reference") and not e.get("failed")
-            and not e.get("native") and _caption(e["msg"])
-        ]
         sent_ids: Dict[int, int] = {}
 
-        try:
-            if len(media_entries) > 1:
-                if all(e.get("reference") and not e.get("path") for e in media_entries):
+        async def send_media_group(group: List[Dict[str, Any]]) -> List[int]:
+            if len(group) > 1:
+                if all(e.get("reference") and not e.get("path") for e in group):
                     ids = await self._send_album_reference_cascade(
-                        media_entries, dest, dest_topic, reply_to, progress, stats,
+                        group, dest, dest_topic, reply_to, progress, stats,
                         payload.get("source"),
                     )
-                    stats.server_copies += len(media_entries)
-                    stats.bytes_saved += sum(int(e.get("size") or 0) for e in media_entries)
+                    stats.server_copies += len(group)
+                    stats.bytes_saved += sum(int(e.get("size") or 0) for e in group)
                 else:
-                    ids = await self._send_album(media_entries, dest, dest_topic, progress, stats, reply_to)
-                for entry, created_id in zip(media_entries, ids):
-                    sent_ids[entry["msg"].id] = created_id
-            elif len(media_entries) == 1:
-                entry = media_entries[0]
+                    ids = await self._send_album(group, dest, dest_topic, progress, stats, reply_to)
+                stats.albums += 1
+                return ids
+            entry = group[0]
+            if entry.get("reference") and not entry.get("path"):
+                created_id = await self._send_reference_cascade(
+                    entry, dest, dest_topic, reply_to, progress, stats,
+                    payload.get("source"),
+                )
                 if entry.get("reference") and not entry.get("path"):
-                    created_id = await self._send_reference_cascade(
-                        entry, dest, dest_topic, reply_to, progress, stats,
-                        payload.get("source"),
-                    )
-                    if entry.get("reference") and not entry.get("path"):
-                        stats.server_copies += 1
-                        stats.bytes_saved += int(entry.get("size") or 0)
-                        logger.info(f"Entrega por referência msg {entry['msg'].id}")
-                else:
-                    created_id = await self._send_media(
-                        entry, dest, dest_topic, progress, stats, reply_to
-                    )
-                sent_ids[entry["msg"].id] = created_id
-
-            for entry in native_entries:
-                sent_ids[entry["msg"].id] = await self._send_native(
-                    entry, dest, dest_topic, reply_to, stats
+                    stats.server_copies += 1
+                    stats.bytes_saved += int(entry.get("size") or 0)
+                    logger.info(f"Entrega por referência msg {entry['msg'].id}")
+            else:
+                created_id = await self._send_media(
+                    entry, dest, dest_topic, progress, stats, reply_to
                 )
+            return [created_id]
 
-            for entry in text_entries:
-                sent_ids[entry["msg"].id] = await self._send_text(
-                    entry["msg"], dest, dest_topic, reply_to, entry=entry
-                )
+        try:
+            index = 0
+            while index < len(plan):
+                entry = plan[index]
+                msg = entry["msg"]
+                if entry.get("failed"):
+                    reason = entry.get("reason") or t("copy.prepare_failure")
+                    await self._record_failed_entry(
+                        entry, source_id, dest_id, dest, dest_topic, reply_to,
+                        stats, payload, reason,
+                    )
+                    index += 1
+                    continue
+                if entry.get("native"):
+                    sent_ids[msg.id] = await self._send_native(
+                        entry, dest, dest_topic, reply_to, stats
+                    )
+                    index += 1
+                    continue
+                if entry.get("path") or entry.get("reference"):
+                    end = index + 1
+                    while (end < len(plan) and not plan[end].get("failed")
+                           and not plan[end].get("native")
+                           and (plan[end].get("path") or plan[end].get("reference"))):
+                        end += 1
+                    group = plan[index:end]
+                    ids = await send_media_group(group)
+                    for group_entry, created_id in zip(group, ids):
+                        sent_ids[group_entry["msg"].id] = created_id
+                    index = end
+                    continue
+                if _caption(msg):
+                    sent_ids[msg.id] = await self._send_text(
+                        msg, dest, dest_topic, reply_to, entry=entry
+                    )
+                    index += 1
+                    continue
+                raise RuntimeError(t("copy.unsupported_media", kind="empty"))
         except DailyLimitReached:
             raise
         except Exception as exc:
@@ -1556,16 +1597,6 @@ class Copier:
             if created_id is None:
                 raise RuntimeError(t("copy.send_unconfirmed"))
             self._record_delivered(entry, source_id, dest_id, created_id, dest_topic, stats)
-
-        if len(media_entries) > 1:
-            stats.albums += 1
-
-        for entry in failed_entries:
-            reason = entry.get("reason") or t("copy.prepare_failure")
-            await self._record_failed_entry(
-                entry, source_id, dest_id, dest, dest_topic, reply_to,
-                stats, payload, reason,
-            )
 
     def _parts(self, msg, limit: int) -> List[Tuple[str, List[Any]]]:
         text = _caption(msg)
@@ -2085,6 +2116,8 @@ class Copier:
                 caption = self._placeholder_caption(message)[0]
             entities = _decode_entities(row.get("entities"))
             file = entry.get("path")
+            if not file and entry.get("reference"):
+                file = tl_utils.get_input_media(message.media, is_photo=entry["media_type"] == "photo")
             limit = CAPTION_LIMIT if file else MESSAGE_LIMIT
             parts = text_chunks(caption, entities, limit) or [("", [])]
             text, first_entities = parts[0]
@@ -2092,10 +2125,21 @@ class Copier:
                 await self._edit_placeholder_message(
                     row, dest, text, first_entities, entry=entry, file=file
                 )
-                for chunk, chunk_entities in parts[1:]:
-                    self._check_limit()
-                    await self._send_chunk(dest, chunk, chunk_entities, row.get("dest_topic"), None)
-                    daily_limit.add(1)
+                slots = {int(p["part_index"]): p for p in
+                         self.repo.placeholder_parts(source_id, dest_id, msg_id)}
+                for part_index, (chunk, chunk_entities) in enumerate(parts[1:], start=1):
+                    slot = slots.get(part_index)
+                    if slot is None:
+                        logger.error(f"Reserva msg {msg_id} sem slot de continuação {part_index}")
+                        return "failed"
+                    try:
+                        await self.client.edit_message(
+                            dest, int(slot["dest_msg_id"]), text=chunk,
+                            formatting_entities=list(chunk_entities or []),
+                            parse_mode=None, link_preview=False,
+                        )
+                    except MessageNotModifiedError:
+                        pass
             except DailyLimitReached:
                 raise
             except FloodWaitError as exc:
@@ -2114,8 +2158,11 @@ class Copier:
             except Exception as exc:
                 logger.error(f"Edição da reserva msg {msg_id}: {exc}")
                 return "failed"
-            if file and os.path.exists(file):
+            if isinstance(file, (str, os.PathLike)) and os.path.exists(file):
                 stats.bytes_uploaded += os.path.getsize(file)
+            elif file is not None:
+                stats.server_copies += 1
+                stats.bytes_saved += int(entry.get("size") or 0)
             self._record_delivered(
                 entry, source_id, dest_id, int(row["dest_msg_id"]),
                 row.get("dest_topic"), stats, count_daily=False,
