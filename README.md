@@ -330,6 +330,36 @@ começar. Ao rodar de novo no mesmo par origem → destino:
 
 Para **recomeçar do zero** em um par: Configurações → `b`.
 
+### 6.1 Reserva de posição em falhas
+
+A reserva vem **ativada por padrão** e pode ser desligada em `[4] Configurações → [h]`.
+Com ela ligada, quando um item falha na cópia/espelho/clone o app cria no destino um
+marcador de texto **na posição sequencial da mensagem original** (e no mesmo tópico,
+quando houver mapa de fórum): `⏳ Conteúdo pendente — mensagem N. Motivo: ...`.
+A legenda completa, entidades e assinatura ficam guardadas no banco; o checkpoint
+permanece `ERROR`, o item continua na fila de falhas e **não** entra na deduplicação.
+O marcador conta como envio confirmado no limite diário. Reexecutar a cópia não cria
+um segundo marcador para o mesmo item.
+
+Para preencher as lacunas use `[5] Ferramentas → [6] Recuperar lacunas` (ou o caminho
+legado `[5] → [3] Reprocessar falhas`). A recuperação **edita a mesma mensagem** do
+destino com a mídia/legenda real, mantendo a posição; edições não consomem limite
+diário. Legendas maiores que 1024 unidades UTF-16 são editadas no primeiro bloco e o
+restante é enviado como continuações de texto no mesmo tópico — essas continuações
+contam no limite diário e ficam no fim da sequência, enquanto a mídia permanece na
+posição original. Se a origem não tiver mais a mensagem, o conteúdo for não suportado
+ou a edição falhar definitivamente, o marcador vira `❌ Conteúdo indisponível` com o
+motivo real; nunca fica um buraco invisível.
+
+Observações: álbuns são recuperados **item a item** (mensagem avulsa) para preservar a
+posição do marcador; não reagrupamos o álbum. O modo estrito de pré-reserva para
+grandes mídias ficou pendente para não arriscar o fluxo concorrente de envio atual. A
+tabela `placeholders` é aditiva e compatível com bancos da v4.0; `[b] Zerar dados`
+também apaga as reservas. Existe uma janela rara de crash entre a confirmação de um
+marcador pelo Telegram e a gravação no SQLite; a chave única protege reexecuções
+normais, mas não é uma garantia exactly-once distribuída. Com a reserva desligada, o
+comportamento de falha é o da versão anterior.
+
 ---
 
 ## 7. Deduplicação: como funciona

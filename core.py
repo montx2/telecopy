@@ -1483,7 +1483,8 @@ class App:
             self._pop()
             return
 
-        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0}
+        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0,
+                  "placeholders": 0}
         for index, setup in enumerate(ready, start=1):
             dest = setup.dest
             ui.section(f"{t('multi.dest_label', i=index, total=len(ready))}: "
@@ -1525,12 +1526,17 @@ class App:
                     logger.exception(f"Falha ao restaurar opções dos tópicos: {exc}")
                     ui.warn(t("copy.clone.setting_failed", topic="—", reason=str(exc)))
 
-        ui.box(t("multi.total_sent", n=len(ready)), [
+        total_rows = [
             (t("result.sent"), Fmt.number(totals["done"])),
             (t("result.skipped"), Fmt.number(totals["skipped"])),
             (t("result.errors"), Fmt.number(totals["errors"])),
             (t("result.bytes"), Fmt.size(totals["bytes"])),
-        ], color=C.GREEN)
+        ]
+        if totals["placeholders"]:
+            total_rows.append((t("result.placeholders"),
+                               f"{Fmt.number(totals['placeholders'])} ({t('result.placeholders.hint')})"))
+        ui.box(t("multi.total_sent", n=len(ready)), total_rows,
+               color=C.AMBER if totals["errors"] or totals["placeholders"] else C.GREEN)
         ui.pause()
         self._pop()
 
@@ -2066,6 +2072,7 @@ class App:
                 ("3", t("tools.retry"), t("tools.retry.desc")),
                 ("4", t("tools.dedup"), t("tools.dedup.desc")),
                 ("5", t("tools.maint"), t("tools.maint.desc")),
+                ("6", t("tools.recover"), t("tools.recover.desc")),
                 ("0", t("menu.back"), ""),
             ])
             choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
@@ -2083,6 +2090,8 @@ class App:
                     self._tool_dedup()
                 elif choice == "5":
                     await self._tool_maintenance()
+                elif choice == "6":
+                    await self._tool_recover()
                 elif choice:
                     ui.warn(t("menu.invalid"))
             except Exception as exc:
@@ -2219,7 +2228,8 @@ class App:
             groups.setdefault((job.source_id, job.dest_id), []).append(job.msg_id)
 
         ui.info(t("queue.retry_start"))
-        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0}
+        totals = {"done": 0, "skipped": 0, "errors": 0, "duplicates": 0, "bytes": 0,
+                  "placeholders": 0}
         for (source_id, dest_id), msg_ids in groups.items():
             try:
                 source = await self.client.get_entity(source_id)
@@ -2242,6 +2252,62 @@ class App:
             for key in totals:
                 totals[key] += int(result.get(key, 0) or 0)
         return totals
+
+    async def _tool_recover(self) -> None:
+        ui.clear()
+        ui.header(t("tools.recover.title"))
+        self._trail_line()
+        pairs = db.placeholder_pairs()
+        if not pairs:
+            ui.info(t("tools.recover.empty"))
+            ui.pause()
+            return
+        ui.info(t("tools.recover.columns"))
+        ui.box(t("tools.recover.title"), [
+            (t("tools.recover.pair", source=row["source_id"], dest=row["dest_id"]),
+             f"{row['open']} / {row['recovered']} / {row['unrecoverable']}")
+            for row in pairs
+        ], color=C.AMBER)
+        if not any(row["open"] for row in pairs):
+            ui.info(t("tools.recover.empty"))
+            ui.pause()
+            return
+        if not ui.confirm(t("tools.recover.confirm")):
+            return
+        from copier import Copier
+
+        totals = {"recovered": 0, "unrecoverable": 0, "failed": 0}
+        for row in pairs:
+            if not row["open"]:
+                continue
+            try:
+                source = await self.client.get_entity(int(row["source_id"]))
+                dest = await self.client.get_entity(int(row["dest_id"]))
+            except Exception as exc:
+                logger.error(f"Recuperação: entidade indisponível {row['source_id']}->{row['dest_id']}: {exc}")
+                totals["failed"] += int(row["open"])
+                continue
+            copier = Copier(self.client, repo=db, config=self.config)
+            try:
+                result = await copier.recover_placeholders(source, dest, self.config)
+            except Exception as exc:
+                logger.exception("Falha ao recuperar lacunas")
+                ui.err(f"{t('err.generic')}: {exc}")
+                totals["failed"] += int(row["open"])
+                continue
+            for key in totals:
+                totals[key] += int(result.get(key, 0) or 0)
+        display = {
+            "done": totals["recovered"],
+            "errors": totals["failed"],
+            "unrecoverable": totals["unrecoverable"],
+            "complete": totals["failed"] == 0 and totals["unrecoverable"] == 0,
+        }
+        if totals["failed"]:
+            display["first_error"] = t("tools.recover.failed")
+        self._print_result(display, pause=False)
+        (ui.ok if display["complete"] else ui.warn)(t("tools.recover.done"))
+        ui.pause()
 
     def _tool_dedup(self) -> None:
         ui.clear()
@@ -2342,6 +2408,8 @@ class App:
                 (t("settings.resume"), t("settings.on") if cfg.resume else t("settings.off")),
                 (t("settings.forward"),
                  t("copy.mode.forward") if cfg.forward_mode else t("copy.mode.copy")),
+                (t("settings.placeholder"),
+                 t("settings.on") if cfg.placeholder else t("settings.off")),
                 (t("settings.signature"), cfg.signature or "—"),
                 (t("clone.suffix"), self.prefs.clone_suffix or "—"),
                 (t("clone.photo"),
@@ -2364,6 +2432,7 @@ class App:
                 ("a", t("settings.clone_suffix.option"), self.prefs.clone_suffix or "—"),
                 ("f", t("settings.clone_photo.toggle"), ""),
                 ("k", t("settings.clone_start.toggle"), ""),
+                ("h", t("settings.placeholder.toggle"), ""),
                 ("b", t("settings.data_reset"), t("settings.data_reset.desc")),
                 ("c", t("settings.creds.reset"), t("settings.creds.desc")),
                 ("0", t("menu.back"), ""),
@@ -2410,6 +2479,13 @@ class App:
                 await asyncio.sleep(0.7)
             elif choice == "k":
                 self._toggle_clone_start()
+                await asyncio.sleep(0.7)
+            elif choice == "h":
+                cfg.placeholder = not cfg.placeholder
+                self._save_config()
+                message = (f"{t('settings.placeholder')}: "
+                           f"{t('settings.on') if cfg.placeholder else t('settings.off')}")
+                (ui.ok if cfg.placeholder else ui.warn)(message)
                 await asyncio.sleep(0.7)
             elif choice == "b":
                 if ui.confirm(t("settings.data_reset.confirm")):
@@ -2604,10 +2680,21 @@ class App:
             rows.append((t("result.bytes"), Fmt.size(result["bytes"])))
         if result.get("speed"):
             rows.append((t("result.speed"), str(result["speed"])))
-        ok = bool(result.get("complete")) and not result.get("errors") and not result.get("first_error")
+        if result.get("placeholders"):
+            rows.append((t("result.placeholders"),
+                         f"{Fmt.number(result['placeholders'])} ({t('result.placeholders.hint')})"))
+        if result.get("unrecoverable"):
+            rows.append((t("result.unrecoverable"), Fmt.number(result["unrecoverable"])))
+        ok = (bool(result.get("complete")) and not result.get("errors")
+              and not result.get("first_error") and not result.get("placeholders")
+              and not result.get("unrecoverable"))
         ui.box(t("result.title"), rows, color=C.GREEN if ok else C.AMBER)
         if result:
-            (ui.ok if ok else ui.warn)(t("result.complete" if ok else "result.incomplete"))
+            if not ok and result.get("placeholders"):
+                ui.warn(t("copy.placeholders", count=result["placeholders"]))
+                ui.warn(t("result.pending_placeholders"))
+            else:
+                (ui.ok if ok else ui.warn)(t("result.complete" if ok else "result.incomplete"))
         topic_rows = result.get("topics") or []
         if topic_rows:
             ui.box(t("result.topics"), [

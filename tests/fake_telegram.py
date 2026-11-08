@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -153,6 +153,9 @@ class FakeClient:
                  temp_dir: Optional[str] = None) -> None:
         self.messages = sorted(messages, key=lambda m: m.id)
         self.sent: List[Dict[str, Any]] = []
+        self.edits: List[Dict[str, Any]] = []
+        self.edit_errors: Dict[int, List[Exception]] = {}
+        self.edit_failures: Dict[int, Exception] = {}
         self.forwarded: List[Dict[str, Any]] = []
         self.downloads: List[int] = []
         self.fail_ids = set(fail_ids or ())
@@ -244,6 +247,33 @@ class FakeClient:
             entity, "text", text=text, reply_to=reply_to,
             formatting_entities=kwargs.get("formatting_entities"),
         )
+
+    async def edit_message(self, entity, message, text=None, *, file=None,
+                           formatting_entities=None, **kwargs):
+        msg_id = int(getattr(message, "id", message))
+        errors = self.edit_errors.get(msg_id, [])
+        if errors:
+            raise errors.pop(0)
+        if msg_id in self.edit_failures:
+            raise self.edit_failures[msg_id]
+        record = next((item for item in self.sent if item["msg_id"] == msg_id), None)
+        if record is None:
+            raise AssertionError(f"mensagem enviada não encontrada para edição: {msg_id}")
+        path = str(file) if file is not None else None
+        record.update({
+            "kind": "file" if path else "text",
+            "path": path,
+            "text": text if not path else None,
+            "caption": text if path else None,
+            "size": os.path.getsize(path) if path and os.path.exists(path) else 0,
+            "formatting_entities": formatting_entities,
+        })
+        self.edits.append({
+            "dest": getattr(entity, "id", entity), "msg_id": msg_id,
+            "text": text, "path": path, "formatting_entities": formatting_entities,
+            **kwargs,
+        })
+        return FakeMessage(id=msg_id, message=text or "", entities=formatting_entities)
 
     async def get_input_entity(self, entity):
         return entity

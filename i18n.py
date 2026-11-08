@@ -304,6 +304,33 @@ _s("placeholder.pending", "⚠️ Conteúdo em recuperação (mensagem {id}). Mo
    "⚠️ Content being recovered (message {id}). Reason: {reason}")
 _s("placeholder.unrecoverable", "❌ Conteúdo indisponível (mensagem {id}). Motivo: {reason}",
    "❌ Content unavailable (message {id}). Reason: {reason}")
+_s("placeholder.missing", "A mensagem original não está mais disponível na origem.",
+   "The original message is no longer available in the source.")
+_s("settings.placeholder", "Reservar posição em falhas", "Reserve position on failures")
+_s("settings.placeholder.toggle", "Reservar posição em falhas (recomendado)",
+   "Reserve position on failures (recommended)")
+_s("tools.recover", "Recuperar lacunas", "Recover gaps")
+_s("tools.recover.desc", "Preenche marcadores por edição, mantendo a ordem",
+   "Fill placeholders by editing, keeping the order")
+_s("tools.recover.title", "RECUPERAR LACUNAS", "RECOVER GAPS")
+_s("tools.recover.empty", "Nenhuma reserva aberta para recuperar.",
+   "No open placeholders to recover.")
+_s("tools.recover.confirm", "Recuperar agora as reservas abertas?",
+   "Recover the open placeholders now?")
+_s("tools.recover.done", "Recuperação concluída.", "Recovery finished.")
+_s("tools.recover.columns", "Par origem→destino: abertas / recuperadas / irrecuperáveis",
+   "Source→destination pair: open / recovered / unrecoverable")
+_s("tools.recover.pair", "Origem {source} → destino {dest}",
+   "Source {source} → destination {dest}")
+_s("tools.recover.failed", "Falhas na recuperação", "Recovery failures")
+_s("copy.placeholders", "Reservas de posição: {count} (recupere em [5]→6)",
+   "Position placeholders: {count} (recover in [5]→6)")
+_s("result.placeholders", "Reservas de posição", "Position placeholders")
+_s("result.placeholders.hint", "recupere em [5]→6", "recover in [5]→6")
+_s("result.unrecoverable", "Irrecuperáveis", "Unrecoverable")
+_s("result.pending_placeholders",
+   "Conferência: há reservas de posição pendentes; a cópia NÃO está completa. Use [5]→6.",
+   "Check: there are pending position placeholders; the copy is NOT complete. Use [5]→6.")
 _s("copy.send_unconfirmed", "O Telegram não confirmou o ID da mensagem enviada; o item não foi marcado como concluído.", "Telegram did not confirm the sent message ID; the item was not marked as completed.")
 _s("result.complete", "Conferência: todas as mensagens selecionadas foram concluídas.", "Check: all selected messages were completed.")
 _s("result.incomplete", "Conferência: a cópia NÃO está completa. Veja erros/tópicos abaixo e retome.", "Check: the copy is NOT complete. See errors/topics below and resume.")

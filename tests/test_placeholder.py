@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -50,6 +53,7 @@ from tests.fake_telegram import (  # noqa: E402
     channel,
     document_message,
     photo_message,
+    text_message,
 )
 
 
@@ -77,6 +81,19 @@ class RetryClient(FakeClient):
         if isinstance(ids, int):
             self.refreshes.append(ids)
         return await super().get_messages(entity, ids=ids, **kwargs)
+
+
+@contextmanager
+def answers(*values):
+    queue = list(values)
+
+    def fake_input(*_args, **_kwargs):
+        if not queue:
+            raise EOFError
+        return queue.pop(0)
+
+    with patch("builtins.input", new=fake_input):
+        yield
 
 
 @contextmanager
@@ -261,7 +278,7 @@ def test_placeholder_false_mantem_caminho_legado(env) -> None:
     assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2)["status"] == "error"
     assert len(env.repo.failures()) == 1
     assert env.limit.count == 2
-    assert not hasattr(setup.client, "edits")
+    assert setup.client.edits == []
 
 
 def test_valueerror_persistente_vira_reserva_legivel(env) -> None:
@@ -413,3 +430,307 @@ def test_excecao_de_preparacao_preserva_motivo_na_reserva(env) -> None:
     row = env.repo.get_placeholder(setup.source.id, setup.dest.id, 1)
     assert result["placeholders"] == 1
     assert row["reason"] == "motivo específico da preparação"
+
+
+def _create_marker(env, messages=None, *, fail_ids=None, client=None, **options):
+    messages = messages or [document_message(2, "aula.pdf")]
+    fail_ids = {2} if fail_ids is None else fail_ids
+    client = client if client is not None else FakeClient(messages, fail_ids=fail_ids)
+    setup = make_copier(env, messages, client=client, **options)
+    with fast_sleep():
+        asyncio.run(setup.copier.run(setup.source, setup.dest))
+    return setup
+
+
+def test_retry_com_marcador_usa_edicao(env) -> None:
+    messages = [document_message(i, f"aula{i}.pdf") for i in (1, 2, 3)]
+    setup = _create_marker(env, messages, fail_ids={2}, use_dedup=True)
+    marker = setup.client.sent[1]["msg_id"]
+    before_sent = len(setup.client.sent)
+    before_daily = env.limit.count
+    setup.client.fail_ids.clear()
+    with fast_sleep():
+        result = asyncio.run(setup.copier.retry_messages(setup.source, setup.dest, [2]))
+    assert result["done"] == 1 and result["errors"] == 0
+    assert len(setup.client.sent) == before_sent
+    assert len(setup.client.edits) == 1
+    assert setup.client.edits[0]["msg_id"] == marker
+    assert setup.client.edits[0]["path"]
+    row = env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)
+    assert row["state"] == "recovered"
+    route = env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2)
+    assert route["status"] == "done" and route["dest_msg_id"] == marker
+    assert env.repo.dedup_count() == 3
+    assert not env.repo.failures()
+    assert env.limit.count == before_daily
+    assert not list(env.temp.glob("*"))
+
+
+def test_origem_sem_mensagem_edita_aviso_final(env) -> None:
+    setup = _create_marker(env)
+    marker = setup.client.sent[0]["msg_id"]
+    before_daily = env.limit.count
+    setup.client.messages = []
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result == {"recovered": 0, "unrecoverable": 1, "failed": 0}
+    assert len(setup.client.edits) == 1
+    edit = setup.client.edits[0]
+    assert edit["msg_id"] == marker and edit["path"] is None
+    assert "indisponível" in edit["text"]
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "unrecoverable"
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2)["status"] == "error"
+    assert env.limit.count == before_daily
+
+
+def test_legenda_longa_recuperada_com_continuacoes(env) -> None:
+    from telethon.tl.types import MessageEntityBold
+
+    text = "A" * 1500 + "📚" + "B" * 500
+    message = photo_message(1, text, entities=[MessageEntityBold(offset=0, length=10)])
+    setup = _create_marker(env, [message], fail_ids={1}, signature="@curso")
+    row = env.repo.get_placeholder(setup.source.id, setup.dest.id, 1)
+    stored = row["caption"]
+    setup.client.fail_ids.clear()
+    before_daily = env.limit.count
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["recovered"] == 1
+    edit = setup.client.edits[0]
+    assert edit["path"]
+    continuations = [item["text"] for item in setup.client.sent if item["kind"] == "text"]
+    assert edit["text"] + "".join(continuations) == stored
+    assert edit["formatting_entities"][0].length == 10
+    assert env.limit.count == before_daily + len(continuations)
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 1)["state"] == "recovered"
+    assert not list(env.temp.glob("*"))
+
+
+def test_album_recupera_item_avulso_sem_grupo(env) -> None:
+    messages = album_messages(10, 3)
+    setup = _create_marker(env, messages, fail_ids={11})
+    before_sent = len(setup.client.sent)
+    setup.client.fail_ids.clear()
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["recovered"] == 1
+    assert len(setup.client.edits) == 1
+    assert setup.client.edits[0]["path"]
+    assert len(setup.client.sent) == before_sent
+    assert not setup.client.sent[-1]["album"]
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 11)["state"] == "recovered"
+
+
+def test_forum_recupera_marcador_sem_mexer_no_mapa(env) -> None:
+    reply = SimpleNamespace(reply_to_msg_id=11, reply_to_top_id=11, forum_topic=True)
+    message = document_message(10, "aula.pdf", reply_to=reply)
+    source = channel(-1100, "Fórum origem", forum=True, broadcast=False)
+    dest = channel(-2200, "Fórum destino", forum=True, broadcast=False)
+    client = FakeClient([message], fail_ids={10})
+    client.register_entity(source)
+    client.register_entity(dest)
+    copier = Copier(client, repo=env.repo,
+                    config=RunConfig(workers=1, delay=0.1, use_dedup=False), rich_ok=False)
+    topic_map = {1: 1, 11: 911}
+    with fast_sleep():
+        asyncio.run(copier.run(source, dest, topic_map=topic_map))
+        client.fail_ids.clear()
+        result = asyncio.run(copier.recover_placeholders(source, dest))
+    assert result["recovered"] == 1
+    assert topic_map == {1: 1, 11: 911}
+    route = env.repo.checkpoint_route(source.id, dest.id, 10)
+    assert route["status"] == "done" and route["dest_topic"] == 911
+    assert len(client.edits) == 1
+
+
+def test_valueerror_transiente_na_recuperação(env) -> None:
+    message = document_message(2, "aula.pdf")
+    client = RetryClient([message], fail_ids={2})
+    setup = _create_marker(env, [message], client=client)
+    client.fail_ids.clear()
+    client.download_errors[2] = [ValueError("Request was unsuccessful 2 time(s)")]
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["recovered"] == 1
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "recovered"
+    assert client.download_attempts[2] == 4
+
+
+def test_valueerror_persistente_na_recuperacao_vira_aviso(env) -> None:
+    message = document_message(2, "aula.pdf")
+    client = RetryClient([message], fail_ids={2})
+    setup = _create_marker(env, [message], client=client)
+    client.fail_ids.clear()
+    reason = "Request was unsuccessful 2 time(s)"
+    client.persistent_errors[2] = ValueError(reason)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["unrecoverable"] == 1
+    row = env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)
+    assert row["state"] == "unrecoverable"
+    assert reason in row["reason"]
+    assert reason in setup.client.edits[0]["text"]
+    assert not list(env.temp.glob("*"))
+
+
+@pytest.mark.parametrize(
+    "error_name,expected_state,expected_key",
+    [
+        ("MessageNotModifiedError", "open", "failed"),
+        ("MessageEditTimeExpiredError", "unrecoverable", "unrecoverable"),
+        ("MessageAuthorRequiredError", "unrecoverable", "unrecoverable"),
+        ("MessageIdInvalidError", "unrecoverable", "unrecoverable"),
+        ("ChatWriteForbiddenError", "unrecoverable", "unrecoverable"),
+    ],
+)
+def test_erros_de_edicao_nao_derrubam_lote(env, error_name, expected_state, expected_key) -> None:
+    from telethon import errors
+
+    setup = _create_marker(env)
+    marker = setup.client.sent[0]["msg_id"]
+    setup.client.fail_ids.clear()
+    setup.client.edit_failures[marker] = getattr(errors, error_name)(request=None)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result[expected_key] == 1
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == expected_state
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2)["status"] == "error"
+
+
+def test_floodwait_na_edicao_mantem_reserva_aberta(env) -> None:
+    from telethon.errors import FloodWaitError
+
+    setup = _create_marker(env)
+    marker = setup.client.sent[0]["msg_id"]
+    setup.client.fail_ids.clear()
+    setup.client.edit_failures[marker] = FloodWaitError(request=None, capture=1)
+    with fast_sleep() as delays:
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["failed"] == 1
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "open"
+    assert 4 in delays
+
+
+def test_retry_repetido_apos_recuperacao_nao_duplica(env) -> None:
+    setup = _create_marker(env)
+    setup.client.fail_ids.clear()
+    with fast_sleep():
+        asyncio.run(setup.copier.retry_messages(setup.source, setup.dest, [2]))
+        edits = len(setup.client.edits)
+        sent = len(setup.client.sent)
+        second = asyncio.run(setup.copier.retry_messages(setup.source, setup.dest, [2]))
+    assert second["skipped"] == 1
+    assert len(setup.client.edits) == edits
+    assert len(setup.client.sent) == sent
+
+
+def test_recuperacao_de_texto_sem_midia(env) -> None:
+    class FailFirstTextClient(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.text_calls = 0
+
+        async def send_message(self, *args, **kwargs):
+            self.text_calls += 1
+            if self.text_calls == 1:
+                raise OSError("envio de texto falhou")
+            return await super().send_message(*args, **kwargs)
+
+    message = text_message(5, "texto original")
+    setup = make_copier(env, [message], client=FailFirstTextClient([message]))
+    with fast_sleep():
+        first = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert first["placeholders"] == 1
+    with fast_sleep():
+        result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
+    assert result["recovered"] == 1
+    assert setup.client.edits[-1]["text"] == "texto original"
+    assert setup.client.edits[-1]["path"] is None
+
+
+def test_settings_h_persiste_toggle(env, monkeypatch) -> None:
+    import core
+    from prefs import Preferences
+
+    prefs = Preferences(env.root / "prefs.json")
+    monkeypatch.setattr(core, "prefs", prefs)
+    monkeypatch.setattr(core, "db", env.repo)
+    app = core.App()
+    app.config = RunConfig(delay=0.1, workers=1, placeholder=True)
+    with answers("h", "0"), fast_sleep():
+        asyncio.run(app._menu_settings())
+    assert app.config.placeholder is False
+    assert prefs.config.placeholder is False
+    assert Preferences(env.root / "prefs.json").get("placeholder") is False
+
+
+def test_tools_recover_ui_edita_marcador(env, monkeypatch) -> None:
+    import core
+    from prefs import Preferences
+
+    setup = _create_marker(env)
+    setup.client.fail_ids.clear()
+    monkeypatch.setattr(core, "db", env.repo)
+    monkeypatch.setattr(core, "prefs", Preferences(env.root / "prefs.json"))
+    app = core.App()
+    app.client = setup.client
+    app.config = setup.copier.cfg
+    with answers("s", ""), fast_sleep():
+        asyncio.run(app._tool_recover())
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "recovered"
+    assert len(setup.client.edits) == 1
+
+
+def test_reset_all_apaga_reservas_mas_preserva_preferencias(env) -> None:
+    env.repo.add_placeholder(-1, -2, 7, 1007, caption="x", reason="falha")
+    env.repo.set_kv("forum_topic_map:-1:-2", '{"1":1}')
+    env.repo.set_kv("preferencia_interna", "manter")
+    env.repo.reset_all()
+    assert env.repo.placeholder_stats() == {"open": 0, "recovered": 0, "unrecoverable": 0}
+    assert env.repo.get_kv("forum_topic_map:-1:-2") is None
+    assert env.repo.get_kv("preferencia_interna") == "manter"
+
+
+def test_i18n_placeholder_pt_en() -> None:
+    from i18n import set_lang, t
+
+    keys = [
+        "placeholder.pending", "placeholder.unrecoverable", "settings.placeholder.toggle",
+        "tools.recover", "tools.recover.title", "tools.recover.empty",
+        "tools.recover.confirm", "tools.recover.done", "copy.placeholders",
+    ]
+    previous = get_lang()
+    try:
+        for lang in ("pt", "en"):
+            set_lang(lang)
+            for key in keys:
+                assert t(key) != key
+            assert "7" in t("placeholder.pending", id=7, reason="teste")
+            assert "7" in t("placeholder.unrecoverable", id=7, reason="teste")
+            assert "3" in t("copy.placeholders", count=3)
+    finally:
+        set_lang(previous)
+
+
+def test_cli_flags_e_instancia_unica_isolados(env) -> None:
+    app_dir = env.root / "app"
+    app_dir.mkdir()
+    for path in ROOT.glob("*.py"):
+        shutil.copy2(path, app_dir / path.name)
+    env_vars = dict(os.environ)
+    env_vars["PYTHONDONTWRITEBYTECODE"] = "1"
+    for flag in ("--version", "--check", "--reset"):
+        proc = subprocess.run([sys.executable, "main.py", flag], cwd=app_dir,
+                              env=env_vars, capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+    if os.name == "nt":
+        return
+    import fcntl
+
+    lock_path = app_dir / "data" / "telecopy.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = subprocess.run([sys.executable, "main.py"], cwd=app_dir,
+                              env=env_vars, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2

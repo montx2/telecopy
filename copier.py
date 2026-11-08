@@ -32,7 +32,12 @@ from telethon.tl import types
 from telethon.errors import (
     ChatAdminRequiredError,
     ChannelPrivateError,
+    ChatWriteForbiddenError,
     FloodWaitError,
+    MessageAuthorRequiredError,
+    MessageEditTimeExpiredError,
+    MessageIdInvalidError,
+    MessageNotModifiedError,
     RPCError,
 )
 from telethon.helpers import generate_random_long
@@ -257,6 +262,33 @@ def _entities_json(msg) -> str:
         data["type"] = type(entity).__name__
         items.append(data)
     return json.dumps(items, ensure_ascii=False)
+
+
+def _decode_entities(raw: Optional[str]) -> List[Any]:
+    """Restaura entidades TL tipadas; JSON inválido é logado, nunca executado."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning(f"Entidades de reserva inválidas: {exc}")
+        return []
+    entities = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            logger.warning(f"Entidade de reserva inválida: {item!r}")
+            continue
+        name = item.get("type")
+        cls = getattr(types, str(name), None)
+        if cls is None or not str(name).startswith("MessageEntity"):
+            logger.warning(f"Tipo de entidade desconhecido: {name}")
+            continue
+        fields = {k: v for k, v in item.items() if k != "type"}
+        try:
+            entities.append(cls(**fields))
+        except (TypeError, ValueError) as exc:
+            logger.warning(f"Entidade {name} não restaurada: {exc}")
+    return entities
 
 
 def add_signature(caption: str, signature: str) -> str:
@@ -624,9 +656,11 @@ class Copier:
         completed = (self.repo.completed_ids(source_id, dest_id)
                      if self.cfg.use_dedup else self.repo.done_ids(source_id, dest_id))
         missing_total = sum(1 for msg in messages if msg.id not in completed)
+        placeholders = self.repo.placeholder_stats(source_id, dest_id)
         stats.complete = (
             not stats.interrupted and stats.errors == 0
             and stats.unsupported == 0 and missing_total == 0
+            and placeholders["open"] == 0 and placeholders["unrecoverable"] == 0
         )
         if not topic_map:
             return
@@ -1399,6 +1433,25 @@ class Copier:
         self.repo.add_failure(source_id, dest_id, msg.id, reason)
         payload.setdefault("reserved_ids", set()).add(msg.id)
 
+    def _record_delivered(
+        self, entry: Dict[str, Any], source_id: int, dest_id: int,
+        dest_msg_id: int, dest_topic: Optional[int], stats: TransferStats,
+        *, count_daily: bool = True,
+    ) -> None:
+        """Único registro de conteúdo realmente entregue (envio ou edição)."""
+        msg = entry["msg"]
+        content_hash = hash_message(msg)
+        size = entry["size"] if entry.get("path") else 0
+        self.dedup.register(content_hash, dest_id, dest_msg_id, size, source_id)
+        self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
+        self.repo.mark_done(source_id, dest_id, msg.id, content_hash, size,
+                            entry["media_type"], dest_msg_id=dest_msg_id,
+                            dest_topic=dest_topic)
+        self.repo.clear_failure(source_id, dest_id, msg.id)
+        stats.done += 1
+        if count_daily:
+            daily_limit.add(1)
+
     # ── Envio ───────────────────────────────────────────────────────────────
 
     async def _send(self, payload: Dict[str, Any], source_id: int, dest_id: int,
@@ -1457,7 +1510,6 @@ class Copier:
                     )
             raise
 
-        sent_count = 0
         for entry in plan:
             if entry.get("failed"):
                 continue
@@ -1465,19 +1517,8 @@ class Copier:
             created_id = sent_ids.get(msg.id) or entry.get("dest_msg_id")
             if created_id is None:
                 raise RuntimeError(t("copy.send_unconfirmed"))
-            content_hash = hash_message(msg)
-            size = entry["size"] if entry["path"] else 0
-            self.dedup.register(content_hash, dest_id, created_id, size, source_id)
-            self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
-            self.repo.mark_done(source_id, dest_id, msg.id, content_hash, size,
-                                entry["media_type"], dest_msg_id=created_id,
-                                dest_topic=dest_topic)
-            self.repo.clear_failure(source_id, dest_id, msg.id)
-            sent_count += 1
+            self._record_delivered(entry, source_id, dest_id, created_id, dest_topic, stats)
 
-        stats.done += sent_count
-        if sent_count:
-            daily_limit.add(sent_count)
         if len(media_entries) > 1:
             stats.albums += 1
 
@@ -1797,6 +1838,149 @@ class Copier:
         return created_id
 
 
+    # ── Recuperação por edição ────────────────────────────────────────────────
+
+    async def _edit_placeholder_message(
+        self, row: Dict[str, Any], dest, text: str, entities,
+        entry: Optional[Dict[str, Any]] = None, file: Optional[str] = None,
+    ) -> int:
+        options: Dict[str, Any] = {}
+        if file and entry is not None:
+            media_options = self._media_options(entry)
+            options = {key: media_options[key]
+                       for key in ("attributes", "force_document", "supports_streaming")
+                       if key in media_options}
+        result = await self.client.edit_message(
+            dest, int(row["dest_msg_id"]), text=text, file=file,
+            formatting_entities=list(entities or []), parse_mode=None,
+            link_preview=False, **options,
+        )
+        edited_id = getattr(result, "id", None)
+        if edited_id is None or int(edited_id) != int(row["dest_msg_id"]):
+            raise RuntimeError(t("copy.send_unconfirmed"))
+        return int(edited_id)
+
+    async def _finish_placeholder_unrecoverable(
+        self, row: Dict[str, Any], dest, reason: str,
+    ) -> str:
+        source_id, dest_id, msg_id = int(row["source_id"]), int(row["dest_id"]), int(row["msg_id"])
+        caption = row.get("caption") or ""
+        warning = t("placeholder.unrecoverable", id=msg_id, reason=reason)
+        text = f"{caption}\n\n{warning}" if caption else warning
+        if utf16_len(text) > MESSAGE_LIMIT:
+            text = warning
+        if utf16_len(text) > MESSAGE_LIMIT:
+            text = text[:_cut_index(text, MESSAGE_LIMIT)]
+        try:
+            await self._edit_placeholder_message(row, dest, text, [])
+        except FloodWaitError as exc:
+            await self._handle_flood(exc)
+            return "failed"
+        except MessageNotModifiedError:
+            pass
+        except (MessageEditTimeExpiredError, MessageAuthorRequiredError,
+                MessageIdInvalidError, ChatWriteForbiddenError) as exc:
+            logger.error(f"Edição definitiva indisponível msg {msg_id}: {exc}")
+        except Exception as exc:
+            logger.error(f"Aviso final da reserva msg {msg_id} não editado: {exc}")
+            return "failed"
+        self.repo.set_placeholder_state(source_id, dest_id, msg_id, "unrecoverable", reason)
+        self.repo.clear_failure(source_id, dest_id, msg_id)
+        return "unrecoverable"
+
+    async def _deliver_placeholder(
+        self, source, dest, row: Dict[str, Any], stats: TransferStats,
+        quiet: Optional[ProgressDisplay] = None,
+    ) -> str:
+        """Entrega uma reserva aberta por edição; compartilhado por retry e [5]→6."""
+        source_id, dest_id, msg_id = int(row["source_id"]), int(row["dest_id"]), int(row["msg_id"])
+        if row.get("state") != "open":
+            return "failed"
+        quiet = quiet or ProgressDisplay(0, "", False)
+        message = await self.client.get_messages(source, ids=msg_id)
+        if message is None:
+            return await self._finish_placeholder_unrecoverable(
+                row, dest, t("placeholder.missing")
+            )
+        payload = await self._prepare(0, message, quiet, source=source, strong=True)
+        try:
+            entry = payload["plan"][0]
+            if entry.get("failed"):
+                return await self._finish_placeholder_unrecoverable(
+                    row, dest, entry.get("reason") or t("copy.download_unavailable")
+                )
+            caption = row.get("caption")
+            if caption is None:
+                caption = self._placeholder_caption(message)[0]
+            entities = _decode_entities(row.get("entities"))
+            file = entry.get("path")
+            limit = CAPTION_LIMIT if file else MESSAGE_LIMIT
+            parts = text_chunks(caption, entities, limit) or [("", [])]
+            text, first_entities = parts[0]
+            try:
+                await self._edit_placeholder_message(
+                    row, dest, text, first_entities, entry=entry, file=file
+                )
+                for chunk, chunk_entities in parts[1:]:
+                    self._check_limit()
+                    await self._send_chunk(dest, chunk, chunk_entities, row.get("dest_topic"), None)
+                    daily_limit.add(1)
+            except DailyLimitReached:
+                raise
+            except FloodWaitError as exc:
+                await self._handle_flood(exc)
+                return "failed"
+            except MessageNotModifiedError as exc:
+                logger.warning(f"Reserva msg {msg_id} não modificada: {exc}")
+                return "failed"
+            except (MessageEditTimeExpiredError, MessageAuthorRequiredError,
+                    MessageIdInvalidError, ChatWriteForbiddenError) as exc:
+                reason = self._explain(exc)
+                logger.error(f"Edição definitiva indisponível msg {msg_id}: {exc}")
+                self.repo.set_placeholder_state(source_id, dest_id, msg_id, "unrecoverable", reason)
+                self.repo.clear_failure(source_id, dest_id, msg_id)
+                return "unrecoverable"
+            except Exception as exc:
+                logger.error(f"Edição da reserva msg {msg_id}: {exc}")
+                return "failed"
+            if file and os.path.exists(file):
+                stats.bytes_uploaded += os.path.getsize(file)
+            self._record_delivered(
+                entry, source_id, dest_id, int(row["dest_msg_id"]),
+                row.get("dest_topic"), stats, count_daily=False,
+            )
+            self.repo.set_placeholder_state(source_id, dest_id, msg_id, "recovered")
+            return "recovered"
+        finally:
+            self._cleanup(payload.get("plan", []))
+
+    async def recover_placeholders(
+        self, source, dest, cfg: Optional[RunConfig] = None, quiet: bool = False,
+    ) -> Dict[str, int]:
+        if cfg is not None:
+            self.cfg = cfg
+            self.dedup = DedupEngine(self.repo, enabled=self.cfg.use_dedup)
+        source_id = int(getattr(source, "id", 0) or 0)
+        dest_id = int(getattr(dest, "id", 0) or 0)
+        self.dedup.warm_up(dest_id, limit=200_000)
+        rows = self.repo.open_placeholders(source_id, dest_id)
+        stats = TransferStats(planned=len(rows))
+        progress = ProgressDisplay(0, "", False if quiet else self.rich_ok)
+        result = {"recovered": 0, "unrecoverable": 0, "failed": 0}
+        for row in rows:
+            try:
+                outcome = await self._deliver_placeholder(source, dest, row, stats, progress)
+                result[outcome] += 1
+            except DailyLimitReached as exc:
+                logger.warning(f"Recuperação interrompida: {exc}")
+                result["failed"] += 1
+                break
+            except Exception as exc:
+                logger.error(f"Recuperação msg {row.get('msg_id')}: {exc}")
+                result["failed"] += 1
+            await asyncio.sleep(self.delay)
+        return result
+
     # ── Reprocessar falhas ──────────────────────────────────────────────────
 
     async def retry_messages(self, source, dest, msg_ids: List[int],
@@ -1810,6 +1994,18 @@ class Copier:
 
         for msg_id in msg_ids:
             try:
+                placeholder = self.repo.get_placeholder(source_id, dest_id, msg_id)
+                if placeholder is not None:
+                    if placeholder.get("state") == "open":
+                        outcome = await self._deliver_placeholder(source, dest, placeholder, stats, quiet)
+                        if outcome != "recovered":
+                            stats.errors += 1
+                            if stats.first_error is None:
+                                stats.first_error = placeholder.get("reason") or t("copy.prepare_failure")
+                    else:
+                        stats.skipped += 1
+                    await asyncio.sleep(self.delay)
+                    continue
                 message = await self.client.get_messages(source, ids=msg_id)
                 if message is None:
                     self.repo.clear_failure(source_id, dest_id, msg_id)
