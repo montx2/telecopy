@@ -1190,7 +1190,7 @@ class Copier:
 
     async def _prepare(self, index: int, item: QueueItem,
                        progress: ProgressDisplay,
-                       source: Any = None) -> Dict[str, Any]:
+                       source: Any = None, *, strong: bool = False) -> Dict[str, Any]:
         messages = item if isinstance(item, list) else [item]
         plan: List[Dict[str, Any]] = []
 
@@ -1234,38 +1234,55 @@ class Copier:
                 )
 
             downloaded = None
-            for attempt in (1, 2):
-                try:
-                    downloaded = await self.client.download_media(
-                        msg, file=str(temp_path), progress_callback=callback
-                    )
-                    break
-                except FloodWaitError as exc:
-                    await self._handle_flood(exc)
-                except (RPCError, OSError) as exc:
-                    logger.warning(f"Download msg {msg.id} tentativa {attempt}: {exc}")
-                    if attempt == 2:
-                        downloaded = None
-                    else:
-                        if source is not None and hasattr(self.client, "get_messages"):
-                            try:
-                                refreshed = await self.client.get_messages(source, ids=msg.id)
-                                if refreshed is not None and getattr(refreshed, "media", None) is not None:
-                                    msg = refreshed
-                                    entry["msg"] = refreshed
-                            except Exception:
-                                pass
-                        await asyncio.sleep(1.5)
-            progress.remove_transfer(task_id)
+            last_error: Optional[Exception] = None
+            attempts = 5 if strong else 2
+            try:
+                for attempt in range(1, attempts + 1):
+                    try:
+                        downloaded = await self.client.download_media(
+                            msg, file=str(temp_path), progress_callback=callback
+                        )
+                        break
+                    except FloodWaitError as exc:
+                        last_error = exc
+                        await self._handle_flood(exc)
+                    except (RPCError, OSError, ValueError) as exc:
+                        # Telethon também sinaliza esgotamento interno como ValueError.
+                        last_error = exc
+                        logger.warning(f"Download msg {msg.id} tentativa {attempt}: {exc}")
+
+                    if attempt == attempts:
+                        break
+                    if source is not None and hasattr(self.client, "get_messages"):
+                        try:
+                            refreshed = await self.client.get_messages(source, ids=msg.id)
+                        except (RPCError, OSError, ValueError) as exc:
+                            logger.warning(f"Refresh msg {msg.id} tentativa {attempt}: {exc}")
+                        else:
+                            if refreshed is None:
+                                entry["source_missing"] = True
+                                break
+                            if getattr(refreshed, "media", None) is not None:
+                                msg = refreshed
+                                entry["msg"] = refreshed
+                    await asyncio.sleep(2 ** attempt if strong else 1.5)
+            finally:
+                progress.remove_transfer(task_id)
+                if not downloaded:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        logger.warning(f"Limpeza do download incompleto {msg.id}: {exc}")
 
             if downloaded and os.path.exists(str(downloaded)):
                 entry["path"] = str(downloaded)
             else:
-                # download falhou/expirado: será registrado como erro e reenfileirado
-                logger.warning(f"Mídia indisponível (msg {msg.id})")
+                # Preserva o motivo real para checkpoint, fila e eventual reserva.
+                detail = self._explain(last_error) if last_error else t("copy.download_unavailable")
+                logger.warning(f"Mídia indisponível (msg {msg.id}): {detail}")
                 entry["downloadable"] = False
                 entry["failed"] = True
-                entry["reason"] = t("copy.download_unavailable")
+                entry["reason"] = t("copy.download_failed", reason=detail)
 
         return {"index": index, "plan": plan, "messages": messages}
 

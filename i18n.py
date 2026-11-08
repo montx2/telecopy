@@ -299,6 +299,7 @@ _s("settings.clone_start.toggle", "Iniciar cópia após criar", "Start copying a
 _s("copy.topic_unmapped", "A mensagem pertence ao tópico de origem {topic}, que não está no mapa do destino. Atualize a estrutura antes de copiar.", "The message belongs to source topic {topic}, which is not mapped in the destination. Refresh the structure before copying.")
 _s("copy.unsupported_media", "Tipo de mensagem não reproduzível pela API ({kind}); registrado como falha, não como cópia concluída.", "Message type cannot be reproduced by the API ({kind}); recorded as a failure, not as a completed copy.")
 _s("copy.download_unavailable", "Download da mídia indisponível ou expirado.", "Media download unavailable or expired.")
+_s("copy.download_failed", "Não foi possível baixar a mídia: {reason}", "Could not download the media: {reason}")
 _s("copy.send_unconfirmed", "O Telegram não confirmou o ID da mensagem enviada; o item não foi marcado como concluído.", "Telegram did not confirm the sent message ID; the item was not marked as completed.")
 _s("result.complete", "Conferência: todas as mensagens selecionadas foram concluídas.", "Check: all selected messages were completed.")
 _s("result.incomplete", "Conferência: a cópia NÃO está completa. Veja erros/tópicos abaixo e retome.", "Check: the copy is NOT complete. See errors/topics below and resume.")
