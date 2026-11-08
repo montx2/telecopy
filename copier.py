@@ -675,6 +675,7 @@ class Copier:
         self.dedup = DedupEngine(repo, enabled=self.cfg.use_dedup)
         self._stop = False
         self._flood_penalty = 0.0
+        self._flood_successes = 0
         self._mirror_locks: Dict[Any, asyncio.Lock] = {}
         self._upload_gate: Optional[asyncio.Semaphore] = None
         self._transfer_pool: Optional[FastTransferPool] = None
@@ -689,6 +690,20 @@ class Copier:
 
     def request_stop(self) -> None:
         self._stop = True
+
+    def _note_successful_send(self) -> None:
+        """Decai a penalidade de flood gradualmente após envios confirmados."""
+        self._flood_successes += 1
+        if self._flood_successes >= 10:
+            self._flood_successes = 0
+            self._flood_penalty = max(0.0, self._flood_penalty - 0.5)
+
+    @staticmethod
+    def _warn_cryptg() -> None:
+        try:
+            import cryptg  # noqa: F401
+        except Exception:
+            print(f"\n  {C.YELLOW}!{C.RST}  {t('cryptg.missing')}", flush=True)
 
     # ── API principal ────────────────────────────────────────────────────────
 
@@ -734,6 +749,9 @@ class Copier:
     ) -> Dict[str, Any]:
         self._stop = False
         self._force_reference = False
+        self._flood_penalty = 0.0
+        self._flood_successes = 0
+        self._warn_cryptg()
         source_id = int(getattr(source, "id", 0) or 0)
         dest_id = int(getattr(dest, "id", 0) or 0)
         resume = self.cfg.resume if resume is None else resume
@@ -1999,6 +2017,7 @@ class Copier:
                             dest_topic=dest_topic)
         self.repo.clear_failure(source_id, dest_id, msg.id)
         stats.done += 1
+        self._note_successful_send()
         if count_daily:
             daily_limit.add(1)
 
@@ -2312,7 +2331,7 @@ class Copier:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"Download rápido msg {msg.id} falhou; fallback padrão: {exc}")
+                logger.warning(f"{t('transfer.fast_fallback')} Download msg {msg.id}: {exc}")
         return await self.client.download_media(msg, file=path, progress_callback=callback)
 
     async def _upload_file(self, entry: Dict[str, Any], progress_callback=None):
@@ -2334,7 +2353,7 @@ class Copier:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"Upload rápido msg {entry['msg'].id} falhou; fallback padrão: {exc}")
+                logger.warning(f"{t('transfer.fast_fallback')} Upload msg {entry['msg'].id}: {exc}")
         return await self.client.upload_file(
             entry["path"], file_name=file_name, progress_callback=progress_callback,
         )
@@ -3288,6 +3307,7 @@ class Copier:
         self.repo.clear_failure(source_id, dest_id, msg.id)
         self.dedup.register(content_hash, dest_id, dest_msg_id or msg.id, 0, source_id)
         stats.done += 1
+        self._note_successful_send()
         daily_limit.add(1)
 
     def _mark_failed(self, messages, source_id: int, dest_id: int,

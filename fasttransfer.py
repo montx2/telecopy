@@ -20,9 +20,8 @@ import asyncio
 import hashlib
 import inspect
 import os
-import time
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
 
@@ -40,6 +39,7 @@ from telethon.errors import (
 from telethon.helpers import generate_random_long
 from telethon.tl import types
 
+from i18n import t
 from utils import logger
 
 PART_SIZE = 512 * 1024
@@ -242,7 +242,7 @@ class FastTransferPool:
     def penalize(self, reason: str) -> None:
         new = max(1, self.capacity // 2)
         if new < self.capacity:
-            logger.warning(f"Auto-proteção ({reason}): conexões {self.capacity} → {new}")
+            logger.warning(t("transfer.auto_protect", val=new) + f" ({reason})")
             self.capacity = new
             self.halvings += 1
 

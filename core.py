@@ -518,6 +518,9 @@ class App:
                     connection_retries=1,
                     retry_delay=0,
                     request_retries=1,
+                    # timeout do TelegramClient é timeout de conexão no Telethon;
+                    # mantido em 12 s. Requisições de parte do caminho rápido usam
+                    # PART_TIMEOUT=30 s (fasttransfer.py) sem mudar a conexão.
                     timeout=12,
                     auto_reconnect=True,
                 )
@@ -2472,6 +2475,11 @@ class App:
             ui.box(t("settings.status"), [
                 (t("settings.delay"), f"{cfg.delay:.1f}s"),
                 (t("settings.workers"), str(cfg.workers)),
+                (t("settings.fast_transfer"), t("settings.on") if cfg.fast_transfer else t("settings.off")),
+                (t("settings.connections_per_file"), str(cfg.connections_per_file)),
+                (t("settings.lookahead"), str(cfg.lookahead) if cfg.lookahead else "auto"),
+                (t("settings.max_tmp_gb"), f"{cfg.max_tmp_gb:g}"),
+                (t("settings.max_total_connections"), str(cfg.max_total_connections)),
                 (t("settings.dedup"), t("settings.on") if cfg.use_dedup else t("settings.off")),
                 (t("settings.resume"), t("settings.on") if cfg.resume else t("settings.off")),
                 (t("settings.forward"),
@@ -2497,6 +2505,11 @@ class App:
             ui.menu([
                 ("1", t("settings.delay.option"), f"{cfg.delay:.1f}s"),
                 ("2", t("settings.workers.option"), str(cfg.workers)),
+                ("t", t("settings.fast_transfer.toggle"), t("settings.on") if cfg.fast_transfer else t("settings.off")),
+                ("n", t("settings.connections_per_file.option"), str(cfg.connections_per_file)),
+                ("l", t("settings.lookahead.option"), str(cfg.lookahead) if cfg.lookahead else "auto"),
+                ("g", t("settings.max_tmp_gb.option"), f"{cfg.max_tmp_gb:g}"),
+                ("j", t("settings.max_total_connections.option"), str(cfg.max_total_connections)),
                 ("3", t("settings.dedup.toggle"), ""),
                 ("4", t("settings.resume.toggle"), ""),
                 ("5", t("settings.forward.toggle"), ""),
@@ -2590,6 +2603,25 @@ class App:
                 self._save_config()
                 ui.ok(f"{t('settings.on_failure')}: {t(f'on_failure.{cfg.on_failure}')}")
                 await asyncio.sleep(0.7)
+            elif choice == "t":
+                cfg.fast_transfer = not cfg.fast_transfer
+                self._save_config()
+                ui.info(t("settings.fast_transfer.hint"))
+                ui.ok(f"{t('settings.fast_transfer')}: "
+                      f"{t('settings.on') if cfg.fast_transfer else t('settings.off')}")
+                await asyncio.sleep(0.7)
+            elif choice == "n":
+                self._set_connection_option("connections_per_file", 1, 8)
+                await asyncio.sleep(0.7)
+            elif choice == "l":
+                self._set_connection_option("lookahead", 0, 1000)
+                await asyncio.sleep(0.7)
+            elif choice == "g":
+                self._set_tmp_limit()
+                await asyncio.sleep(0.7)
+            elif choice == "j":
+                self._set_connection_option("max_total_connections", 1, 64)
+                await asyncio.sleep(0.7)
             elif choice == "m":
                 raw = ui.ask(t("settings.max_retries"), required=False)
                 if raw is not None:
@@ -2663,6 +2695,44 @@ class App:
         self.config.delay = value
         self._save_config()
         ui.ok(t("settings.delay.set", val=f"{value:.1f}"))
+
+    def _set_connection_option(self, field: str, minimum: int, maximum: int) -> None:
+        ui.blank()
+        ui.info(t(f"settings.{field}.hint"))
+        current = getattr(self.config, field)
+        raw = ui.ask(t(f"settings.{field}.title", current=current), required=False)
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            ui.err(t("menu.invalid"))
+            return
+        if not minimum <= value <= maximum:
+            ui.err(t("menu.invalid"))
+            return
+        setattr(self.config, field, value)
+        self._save_config()
+        ui.ok(t(f"settings.{field}.set", val=value))
+
+    def _set_tmp_limit(self) -> None:
+        ui.blank()
+        ui.info(t("settings.max_tmp_gb.hint"))
+        raw = ui.ask(t("settings.max_tmp_gb.title", current=f"{self.config.max_tmp_gb:g}"),
+                     required=False)
+        if not raw:
+            return
+        try:
+            value = float(raw.replace(",", "."))
+        except ValueError:
+            ui.err(t("menu.invalid"))
+            return
+        if value <= 0:
+            ui.err(t("menu.invalid"))
+            return
+        self.config.max_tmp_gb = value
+        self._save_config()
+        ui.ok(t("settings.max_tmp_gb.set", val=f"{value:g}"))
 
     def _set_workers(self) -> None:
         from system_analyzer import analyzer

@@ -79,7 +79,11 @@ class Preferences:
             merged["delivery"] = cfg.delivery
             merged["server_copy"] = cfg.server_copy
             self.data = merged
-            if saved and old_version < _PREFS_VERSION:
+            new_keys = {"fast_transfer", "connections_per_file", "lookahead",
+                        "max_tmp_gb", "max_total_connections"}
+            if saved and (old_version < _PREFS_VERSION or not new_keys.issubset(saved_config)):
+                # Migração aditiva: prefs v2 continuam v2, apenas ganham os
+                # campos novos com defaults sem alterar escolhas existentes.
                 self.save()
         return self.data
 

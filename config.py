@@ -8,6 +8,7 @@ do executável.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -716,6 +717,11 @@ class RunConfig:
     on_failure: str = "abort"  # abort | placeholder
     strict_order: bool = True
     max_retries: int = MAX_RETRIES
+    fast_transfer: bool = True
+    connections_per_file: int = 4
+    lookahead: int = 0          # 0 = auto (2 x workers)
+    max_tmp_gb: float = 8.0
+    max_total_connections: int = 12
 
     def __post_init__(self) -> None:
         self.delay = max(0.1, float(self.delay))
@@ -736,6 +742,24 @@ class RunConfig:
         # Ordem estrita é um invariante, não uma opção que possa abrir lacunas.
         self.strict_order = True
         self.max_retries = max(0, min(int(self.max_retries), 10))
+        self.fast_transfer = bool(self.fast_transfer)
+        try:
+            self.connections_per_file = max(1, min(int(self.connections_per_file), 8))
+        except (TypeError, ValueError):
+            self.connections_per_file = 4
+        try:
+            self.lookahead = max(0, min(int(self.lookahead), 1000))
+        except (TypeError, ValueError):
+            self.lookahead = 0
+        try:
+            tmp_gb = float(self.max_tmp_gb)
+        except (TypeError, ValueError):
+            tmp_gb = 8.0
+        self.max_tmp_gb = tmp_gb if math.isfinite(tmp_gb) and tmp_gb > 0 else 8.0
+        try:
+            self.max_total_connections = max(1, min(int(self.max_total_connections), 64))
+        except (TypeError, ValueError):
+            self.max_total_connections = 12
 
     def to_dict(self) -> dict:
         return {
@@ -754,6 +778,11 @@ class RunConfig:
             "on_failure": self.on_failure,
             "strict_order": self.strict_order,
             "max_retries": self.max_retries,
+            "fast_transfer": self.fast_transfer,
+            "connections_per_file": self.connections_per_file,
+            "lookahead": self.lookahead,
+            "max_tmp_gb": self.max_tmp_gb,
+            "max_total_connections": self.max_total_connections,
         }
 
     @classmethod

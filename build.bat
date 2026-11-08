@@ -34,6 +34,13 @@ if errorlevel 1 (
 )
 
 echo.
+python -c "import cryptg" >nul 2>&1
+if errorlevel 1 (
+    echo  [AVISO] cryptg nao pode ser importado; AES em Python puro limita a velocidade.
+    echo          Instale com: python -m pip install cryptg
+)
+
+echo.
 echo  [2/4] Instalando Nuitka e Zstandard...
 python -m pip install --upgrade nuitka zstandard ordered-set
 if errorlevel 1 (
@@ -78,6 +85,8 @@ python -m nuitka ^
     --product-version=4.0.0.0 ^
     --file-description="TELECOPY - Replicador de Canais Telegram" ^
     --include-package=telethon ^
+    --include-package=cryptg ^
+    --include-package-data=cryptg ^
     --include-module=channel_clone ^
     --include-package=cryptography ^
     --include-package=psutil ^
