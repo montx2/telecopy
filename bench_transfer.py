@@ -3,7 +3,7 @@
 bench_transfer.py — Mede o caminho padrão vs. rápido com um arquivo real.
 
 Uso:
-    python bench_transfer.py --source LINK --msg-id N --connections 1,2,4,8
+    python bench_transfer.py --source LINK --msg-id N --connections 1,2,4,8,16
 
 Baixa a mensagem indicada, reenvia o arquivo para as Mensagens Salvas e imprime
 MB/s de download, upload e agregado. Não afirma ganho sem medição; a recomendação
@@ -25,7 +25,7 @@ from typing import Any, Dict, List
 
 from telethon import TelegramClient
 
-from config import SESSION_FILE, TEMP_DIR, VAULT_FILE
+from config import MAX_CONNECTIONS_PER_FILE, SESSION_FILE, TEMP_DIR, VAULT_FILE
 from fasttransfer import FastTransferPool, fast_download, fast_upload
 from security import Vault
 from utils import logger
@@ -38,8 +38,9 @@ def _parse_connections(raw: str) -> List[int]:
         if not item:
             continue
         value = int(item)
-        if not 1 <= value <= 8:
-            raise argparse.ArgumentTypeError("connections deve estar entre 1 e 8")
+        if not 1 <= value <= MAX_CONNECTIONS_PER_FILE:
+            raise argparse.ArgumentTypeError(
+                f"connections deve estar entre 1 e {MAX_CONNECTIONS_PER_FILE}")
         if value not in values:
             values.append(value)
     if not values:
@@ -191,9 +192,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark padrão vs. rápido do TELECOPY")
     parser.add_argument("--source", required=True, help="link/username/ID da origem")
     parser.add_argument("--msg-id", required=True, type=int, help="ID da mensagem com mídia")
-    parser.add_argument("--connections", type=_parse_connections, default="1,2,4,8",
-                        help="lista separada por vírgula (1–8), padrão 1,2,4,8")
-    parser.add_argument("--max-total", type=int, default=12, help="orçamento global de conexões")
+    parser.add_argument("--connections", type=_parse_connections, default="1,2,4,8,16",
+                        help=f"lista separada por vírgula (1–{MAX_CONNECTIONS_PER_FILE}), padrão 1,2,4,8,16")
+    parser.add_argument("--max-total", type=int, default=32, help="orçamento global de conexões")
     parser.add_argument("--api-id", type=int, default=None)
     parser.add_argument("--api-hash", default=None)
     args = parser.parse_args()

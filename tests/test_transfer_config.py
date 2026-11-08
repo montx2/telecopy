@@ -41,18 +41,18 @@ def test_runconfig_valida_e_persiste_campos_novos() -> None:
     cfg = RunConfig(connections_per_file=99, lookahead=-1, max_tmp_gb=-2,
                     max_total_connections=0, fast_transfer=0)
     assert cfg.fast_transfer is False
-    assert cfg.connections_per_file == 8
+    assert cfg.connections_per_file == 32
     assert cfg.lookahead == 0
-    assert cfg.max_tmp_gb == 8.0
+    assert cfg.max_tmp_gb == 16.0
     assert cfg.max_total_connections == 1
     data = cfg.to_dict()
     assert RunConfig.from_dict(data).to_dict() == data
     bad = RunConfig.from_dict({"connections_per_file": "abc", "lookahead": "x",
                                "max_total_connections": None, "max_tmp_gb": "nan"})
-    assert bad.connections_per_file == 4
+    assert bad.connections_per_file == 8
     assert bad.lookahead == 0
-    assert bad.max_total_connections == 12
-    assert bad.max_tmp_gb == 8.0
+    assert bad.max_total_connections == 32
+    assert bad.max_tmp_gb == 16.0
 
 
 def test_prefs_v2_ganham_campos_novos_sem_perder_escolhas(tmp_path) -> None:
@@ -65,9 +65,9 @@ def test_prefs_v2_ganham_campos_novos_sem_perder_escolhas(tmp_path) -> None:
     assert loaded.get("prefs_version") == 2
     assert loaded.config.workers == 3 and loaded.config.delay == 1.5
     assert loaded.config.fast_transfer is True
-    assert loaded.config.connections_per_file == 4
+    assert loaded.config.connections_per_file == 8
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["config"]["max_tmp_gb"] == 8.0
+    assert saved["config"]["max_tmp_gb"] == 16.0
     assert saved["config"]["lookahead"] == 0
 
 
@@ -78,10 +78,10 @@ def test_penalidade_de_flood_decai_e_run_zera(env) -> None:
     client.register_entity(dest)
     copier = Copier(client, repo=env.repo, config=RunConfig(use_dedup=False), rich_ok=False)
     copier._flood_penalty = 2.0
-    for _ in range(10):
+    for _ in range(5):
         copier._note_successful_send()
-    assert copier._flood_penalty == 1.5
-    for _ in range(30):
+    assert copier._flood_penalty == 1.0
+    for _ in range(5):
         copier._note_successful_send()
     assert copier._flood_penalty == 0.0
 

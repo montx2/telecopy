@@ -41,7 +41,8 @@ from telethon.errors import (
     FilePartMissingError,
     FileReferenceExpiredError,
     FileReferenceInvalidError,
-    FloodWaitError,
+    FloodError,
+    FloodPremiumWaitError,
     MessageAuthorRequiredError,
     MessageEditTimeExpiredError,
     MessageIdInvalidError,
@@ -68,6 +69,7 @@ from fasttransfer import (
     FastTransferPool,
     fast_download,
     fast_upload,
+    input_location,
 )
 from filters import apply as filter_apply
 from i18n import t
@@ -686,7 +688,7 @@ class Copier:
 
     @property
     def delay(self) -> float:
-        return max(0.1, self.cfg.delay + self._flood_penalty)
+        return max(0.0, self.cfg.delay + self._flood_penalty)
 
     def request_stop(self) -> None:
         self._stop = True
@@ -694,9 +696,9 @@ class Copier:
     def _note_successful_send(self) -> None:
         """Decai a penalidade de flood gradualmente após envios confirmados."""
         self._flood_successes += 1
-        if self._flood_successes >= 10:
+        if self._flood_successes >= 5:
             self._flood_successes = 0
-            self._flood_penalty = max(0.0, self._flood_penalty - 0.5)
+            self._flood_penalty = max(0.0, self._flood_penalty - 1.0)
 
     @staticmethod
     def _warn_cryptg() -> None:
@@ -855,7 +857,7 @@ class Copier:
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
-        if isinstance(exc, (FloodWaitError, ValueError, OSError, asyncio.TimeoutError)):
+        if isinstance(exc, (FloodError, ValueError, OSError, asyncio.TimeoutError)):
             return True
         return type(exc).__name__ in {"ServerError", "RpcCallFailError", "TimedOutError"}
 
@@ -991,7 +993,7 @@ class Copier:
                     async for msg in self._collect_stream(source, filter_code, stream_topic):
                         by_id[int(msg.id)] = msg
                     break
-                except FloodWaitError as exc:
+                except FloodError as exc:
                     if attempt == 4:
                         raise RuntimeError(self._explain(exc)) from exc
                     await self._handle_flood(exc)
@@ -1179,7 +1181,7 @@ class Copier:
                     self._check_limit()
                     await self._send(payload, source_id, dest_id, stats, progress)
                     return
-                except FloodWaitError as exc:
+                except FloodError as exc:
                     if retry < 2:
                         await self._handle_flood(exc)
                         continue
@@ -1268,7 +1270,7 @@ class Copier:
                     break
                 except DailyLimitReached:
                     raise
-                except FloodWaitError as exc:
+                except FloodError as exc:
                     error = exc
                     await self._handle_flood(exc)
                     if attempt < attempts - 1:
@@ -1354,7 +1356,7 @@ class Copier:
                                       dest_topic=item_topic)
                     should_stop = True
 
-                if isinstance(error, FloodWaitError):
+                if isinstance(error, FloodError):
                     print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
                     should_stop = True
                 elif self._is_fatal_send_error(error) or stats.first_error == t("order.reserve_failed"):
@@ -1385,11 +1387,12 @@ class Copier:
     @staticmethod
     def _is_fatal_send_error(exc: Exception) -> bool:
         """Falhas estruturais que não vão se resolver tentando outra mensagem."""
-        if isinstance(exc, FloodWaitError):
+        if isinstance(exc, DailyLimitReached):
             return True
-        if isinstance(exc, RuntimeError) and str(exc) == t(
-            "copy.limit_reached", limit=DAILY_LIMIT
-        ):
+        if isinstance(exc, FloodPremiumWaitError):
+            # Teto de velocidade da conta: espera e continua, não aborta a cópia.
+            return False
+        if isinstance(exc, FloodError):
             return True
         return type(exc).__name__ in {
             "ChatAdminRequiredError",
@@ -1417,7 +1420,9 @@ class Copier:
             lookahead = 2 * self.cfg.workers
         budget = temp_budget_bytes(float(getattr(self.cfg, "max_tmp_gb", 8.0)))
         window = TransferWindow(items, lookahead, budget)
-        self._upload_gate = asyncio.Semaphore(max(1, MAX_WORKERS_UP))
+        # Pré-upload acompanha os workers; o orçamento real de partes é o pool
+        # global. Usar MAX_WORKERS_UP (metade dos workers) serializava o envio.
+        self._upload_gate = asyncio.Semaphore(max(1, self.cfg.workers, MAX_WORKERS_UP))
         if getattr(self.cfg, "fast_transfer", True) and self.cfg.delivery == "upload":
             max_total = min(int(getattr(self.cfg, "max_total_connections", 12)),
                             max(1, BUFFER_RAM_MAX // FAST_PART_SIZE))
@@ -1523,7 +1528,7 @@ class Copier:
                             break
                         except DailyLimitReached:
                             raise
-                        except FloodWaitError as exc:
+                        except FloodError as exc:
                             error = exc
                             await self._handle_flood(exc)
                             if attempt < attempts - 1:
@@ -1666,7 +1671,7 @@ class Copier:
                                 last_error_key = error_key
                                 consecutive_errors = 1
 
-                            if isinstance(error, FloodWaitError):
+                            if isinstance(error, FloodError):
                                 print(f"  {C.YELLOW}!{C.RST}  {t('copy.stop_flood')}", flush=True)
                                 self._stop = True
                             elif self._is_fatal_send_error(error) or reason == t("order.reserve_failed"):
@@ -1828,7 +1833,7 @@ class Copier:
                             msg, str(temp_path), callback, source=source, entry=entry,
                         )
                         break
-                    except FloodWaitError as exc:
+                    except FloodError as exc:
                         last_error = exc
                         await self._handle_flood(exc)
                     except (RPCError, OSError, ValueError) as exc:
@@ -1881,7 +1886,7 @@ class Copier:
                 try:
                     async with gate if gate is not None else nullcontext():
                         await self._preupload_entry(entry, peer, progress)
-                except FloodWaitError as exc:
+                except FloodError as exc:
                     await self._handle_flood(exc)
                     self._clear_upload(entry)
                     if peer is not None:
@@ -1935,7 +1940,7 @@ class Copier:
                     self._check_limit()
                     created_id = await self._send_chunk(dest, text, entities, dest_topic, reply_to)
                     break
-                except FloodWaitError as exc:
+                except FloodError as exc:
                     if attempt == 2:
                         raise
                     await self._handle_flood(exc)
@@ -1959,7 +1964,7 @@ class Copier:
                             self._check_limit()
                             slot_id = await self._send_chunk(dest, slot_text, None, dest_topic, None)
                             break
-                        except FloodWaitError as exc:
+                        except FloodError as exc:
                             if attempt == 2:
                                 raise
                             await self._handle_flood(exc)
@@ -2332,6 +2337,20 @@ class Copier:
                 raise
             except Exception as exc:
                 logger.warning(f"{t('transfer.fast_fallback')} Download msg {msg.id}: {exc}")
+        # Fallback também em partes grandes: o padrão do Telethon usa 128–256 KiB
+        # para estes tamanhos, o que multiplica as idas e voltas por arquivo.
+        if hasattr(self.client, "download_file"):
+            try:
+                location = input_location(msg)
+                size = int(getattr(getattr(msg, "file", None), "size", 0) or 0)
+                return await self.client.download_file(
+                    location, path, part_size_kb=FAST_PART_SIZE // 1024,
+                    file_size=size or None, progress_callback=callback,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"Download padrão com partes grandes falhou: {exc}")
         return await self.client.download_media(msg, file=path, progress_callback=callback)
 
     async def _upload_file(self, entry: Dict[str, Any], progress_callback=None):
@@ -2356,6 +2375,7 @@ class Copier:
                 logger.warning(f"{t('transfer.fast_fallback')} Upload msg {entry['msg'].id}: {exc}")
         return await self.client.upload_file(
             entry["path"], file_name=file_name, progress_callback=progress_callback,
+            part_size_kb=FAST_PART_SIZE // 1024,
         )
 
     def _uploaded_input_media(self, entry: Dict[str, Any], uploaded) -> Any:
@@ -2793,7 +2813,7 @@ class Copier:
             text = text[:_cut_index(text, MESSAGE_LIMIT)]
         try:
             await self._edit_placeholder_message(row, dest, text, [])
-        except FloodWaitError as exc:
+        except FloodError as exc:
             await self._handle_flood(exc)
             return "failed"
         except MessageNotModifiedError:
@@ -2889,7 +2909,7 @@ class Copier:
                         pass
             except DailyLimitReached:
                 raise
-            except FloodWaitError as exc:
+            except FloodError as exc:
                 await self._handle_flood(exc)
                 return "failed"
             except MessageNotModifiedError as exc:
@@ -3021,7 +3041,7 @@ class Copier:
                             break
                         except DailyLimitReached:
                             raise
-                        except FloodWaitError as exc:
+                        except FloodError as exc:
                             error = exc
                             await self._handle_flood(exc)
                             if attempt < attempts - 1:
@@ -3047,7 +3067,7 @@ class Copier:
                 stats.first_error = str(exc)
                 stats.interrupted = True
                 break
-            except FloodWaitError as exc:
+            except FloodError as exc:
                 await self._handle_flood(exc)
             except Exception as exc:
                 logger.error(f"Retry msg {msg_id}: {exc}")
@@ -3250,7 +3270,7 @@ class Copier:
                                 break
                             except DailyLimitReached:
                                 raise
-                            except FloodWaitError as exc:
+                            except FloodError as exc:
                                 error = exc
                                 await self._handle_flood(exc)
                                 if attempt < attempts - 1:
@@ -3275,7 +3295,7 @@ class Copier:
                       f"{C.GRAY}({stats.done} {t('mirror.sent')}){C.RST}")
             except DailyLimitReached as exc:
                 print(f"\n  {C.YELLOW}!{C.RST}  {exc}", flush=True)
-            except FloodWaitError as exc:
+            except FloodError as exc:
                 await self._handle_flood(exc)
             except Exception as exc:
                 already_recorded = bool(payload and msg.id in payload.get("reserved_ids", set()))
@@ -3327,21 +3347,32 @@ class Copier:
             self.repo.add_failure(source_id, dest_id, msg.id, reason)
 
     def _check_limit(self) -> None:
-        level, _, _ = daily_limit.status()
+        cap = int(getattr(self.cfg, "daily_limit", DAILY_LIMIT))
+        level, _, _ = daily_limit.status(cap)
         if level == "limit":
-            raise DailyLimitReached(t("copy.limit_reached", limit=DAILY_LIMIT))
+            raise DailyLimitReached(t("copy.limit_reached", limit=cap))
 
-    async def _handle_flood(self, exc: FloodWaitError) -> None:
+    async def _handle_flood(self, exc: FloodError) -> None:
         wait = int(getattr(exc, "seconds", 30) or 30) + 3
-        self._flood_penalty = min(self._flood_penalty + 1.5, 20.0)
-        logger.warning(f"FloodWait {wait}s (penalidade {self._flood_penalty:.1f}s)")
+        if isinstance(exc, FloodPremiumWaitError):
+            # Teto de velocidade da conta, não excesso de envios: esperar sem
+            # aumentar a penalidade nem cortar o paralelismo.
+            logger.warning(t("transfer.premium_wait", sec=wait))
+            print(f"\n  {C.YELLOW}!{C.RST}  {t('transfer.premium_wait', sec=wait)}", flush=True)
+            await asyncio.sleep(wait)
+            return
+        self._flood_penalty = min(self._flood_penalty + 1.5, 12.0)
+        logger.warning(f"{type(exc).__name__} {wait}s "
+                       f"(penalidade {self._flood_penalty:.1f}s)")
         print(f"\n  {C.YELLOW}!{C.RST}  {t('progress.flood', sec=wait)}", flush=True)
         await asyncio.sleep(wait)
 
     @staticmethod
     def _explain(exc: Exception) -> str:
         name = type(exc).__name__
-        if isinstance(exc, FloodWaitError):
+        if isinstance(exc, FloodPremiumWaitError):
+            return t("transfer.premium_wait", sec=int(getattr(exc, "seconds", 0) or 0))
+        if isinstance(exc, FloodError):
             return t("progress.flood", sec=int(getattr(exc, "seconds", 0) or 0))
         if isinstance(exc, ChatAdminRequiredError):
             return t("err.need_admin")

@@ -33,12 +33,14 @@ from telethon.errors import (
     FilePartsInvalidError,
     FileReferenceExpiredError,
     FilerefUpgradeNeededError,
-    FloodWaitError,
+    FloodError,
+    FloodPremiumWaitError,
     RPCError,
 )
 from telethon.helpers import generate_random_long
 from telethon.tl import types
 
+from config import MAX_CONNECTIONS_PER_FILE
 from i18n import t
 from utils import logger
 
@@ -51,6 +53,13 @@ BIG_MAX_PARTS = 8192
 PART_TIMEOUT = 30.0
 MAX_BLOCK_ATTEMPTS = 5
 MAX_REFRESHES = 2
+# FLOOD_PREMIUM_WAIT é teto de velocidade da conta, não excesso de requisições:
+# cortar conexões não ajuda (e deixaria tudo mais lento). Só se espera.
+MAX_PREMIUM_WAITS = 30
+# Recuperação gradual: depois de um flood o pool voltava a ficar lento para o
+# resto da execução. Agora a capacidade sobe de volta com envios bem-sucedidos.
+RECOVERY_SUCCESSES = 48
+TIMEOUTS_BEFORE_PENALTY = 5
 
 ProgressCallback = Callable[[int, int], Any]
 RefreshCallback = Callable[[], Awaitable[Any]]
@@ -164,14 +173,17 @@ class FastTransferPool:
         self.client = client
         self.capacity = max(1, int(max_total_connections))
         self.initial_capacity = self.capacity
-        self.connections_per_file = max(1, min(int(connections_per_file), 8))
+        self.connections_per_file = max(
+            1, min(int(connections_per_file), MAX_CONNECTIONS_PER_FILE))
         self._idle: Dict[Optional[int], Deque[Any]] = defaultdict(deque)
         self._owned: Set[Any] = set()
         self._leased = 0
         self._closed = False
         self._cond = asyncio.Condition()
         self._timeouts = 0
+        self._successes = 0
         self.halvings = 0
+        self.recoveries = 0
 
     async def _new_sender(self, dc_id: Optional[int]) -> _SenderInfo:
         home = getattr(getattr(self.client, "session", None), "dc_id", None)
@@ -232,14 +244,25 @@ class FastTransferPool:
 
     def note_timeout(self) -> None:
         self._timeouts += 1
-        if self._timeouts >= 3:
+        if self._timeouts >= TIMEOUTS_BEFORE_PENALTY:
             self._timeouts = 0
             self.penalize("timeouts repetidos")
 
     def note_success(self) -> None:
+        """Zera timeouts e devolve capacidade perdida, degrau por degrau."""
         self._timeouts = 0
+        if self.capacity >= self.initial_capacity:
+            self._successes = 0
+            return
+        self._successes += 1
+        if self._successes >= RECOVERY_SUCCESSES:
+            self._successes = 0
+            self.capacity = min(self.initial_capacity, self.capacity + 1)
+            self.recoveries += 1
+            logger.info(t("transfer.recovered", val=self.capacity))
 
     def penalize(self, reason: str) -> None:
+        self._successes = 0
         new = max(1, self.capacity // 2)
         if new < self.capacity:
             logger.warning(t("transfer.auto_protect", val=new) + f" ({reason})")
@@ -277,14 +300,30 @@ async def _call_part(pool: FastTransferPool, dc_id: Optional[int], request: Any)
 
 
 async def _retry_block(pool: FastTransferPool, operation: Callable[[], Awaitable[Any]],
-                       *, on_flood: Optional[Callable[[FloodWaitError], Awaitable[None]]] = None) -> Any:
+                       *, on_flood: Optional[Callable[[FloodError], Awaitable[None]]] = None) -> Any:
     last: Optional[Exception] = None
-    for attempt in range(MAX_BLOCK_ATTEMPTS):
+    attempt = 0
+    premium_waits = 0
+    while attempt < MAX_BLOCK_ATTEMPTS:
         try:
             return await operation()
-        except FloodWaitError as exc:
+        except FloodPremiumWaitError as exc:
+            # Limite de velocidade da conta (sem Premium). Não reduz conexões,
+            # não conta como tentativa falha: espera e repete a mesma parte.
             last = exc
-            pool.penalize("FloodWait")
+            premium_waits += 1
+            if premium_waits > MAX_PREMIUM_WAITS:
+                raise FastTransferError(f"limite de velocidade da conta: {exc}") from exc
+            wait = int(getattr(exc, "seconds", 0) or 0)
+            logger.warning(t("transfer.premium_wait", sec=wait))
+            if on_flood is not None:
+                await on_flood(exc)
+            else:
+                await asyncio.sleep(wait)
+            continue
+        except FloodError as exc:
+            last = exc
+            pool.penalize(type(exc).__name__)
             wait = int(getattr(exc, "seconds", 0) or 0)
             if on_flood is not None:
                 await on_flood(exc)
@@ -294,10 +333,11 @@ async def _retry_block(pool: FastTransferPool, operation: Callable[[], Awaitable
             last = exc
             if attempt < MAX_BLOCK_ATTEMPTS - 1:
                 await asyncio.sleep(min(2 ** attempt, 8))
-        except RPCError as exc:
+        except RPCError:
             # Erros de protocolo específicos são tratados pelo chamador antes
             # de chegar aqui (migração/refresh). Outros RPC não são transitórios.
             raise
+        attempt += 1
     raise FastTransferError(f"parte esgotou retentativas: {last}") from last
 
 
@@ -325,7 +365,7 @@ async def fast_download(
     *,
     refresh: Optional[RefreshCallback] = None,
     progress_callback: Optional[ProgressCallback] = None,
-    on_flood: Optional[Callable[[FloodWaitError], Awaitable[None]]] = None,
+    on_flood: Optional[Callable[[FloodError], Awaitable[None]]] = None,
 ) -> str:
     """Baixa por blocos de 512 KiB alinhados, gravando por offset."""
     path = str(path)
@@ -415,7 +455,7 @@ async def fast_upload(
     file_name: str,
     *,
     progress_callback: Optional[ProgressCallback] = None,
-    on_flood: Optional[Callable[[FloodWaitError], Awaitable[None]]] = None,
+    on_flood: Optional[Callable[[FloodError], Awaitable[None]]] = None,
 ) -> Any:
     """Upload paralelo de partes; retorna InputFile/InputFileBig sem enviar."""
     path = str(path)

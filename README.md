@@ -303,10 +303,12 @@ e sugere usar um destino existente.
 | `1` Intervalo entre envios | Pausa entre uploads (recomendado 0,9 s) |
 | `2` Workers | Arquivos em andamento: download + pré-upload (o programa recomenda o ideal para seu PC) |
 | `t` Transferência rápida | Liga/desliga pré-upload nos workers e transporte multi-conexão |
-| `n` Conexões por arquivo | 1–8 (padrão 4); meça com `bench_transfer.py` antes de aumentar |
+| `p` **PERFIL TURBO** | Detecta o hardware e abre todo o paralelismo que o PC aguenta |
+| `n` Conexões por arquivo | 1–32 (padrão 8); meça com `bench_transfer.py` |
 | `l` Janela | Lookahead de itens à frente do sender (0 = auto, 2 × workers) |
-| `g` Limite de tmp | Orçamento de disco em GB para temporários em andamento (padrão 8) |
-| `j` Conexões globais | Orçamento compartilhado entre workers (padrão 12) |
+| `g` Limite de tmp | Orçamento de disco em GB para temporários em andamento (padrão 16) |
+| `j` Conexões globais | Orçamento compartilhado entre workers (padrão 32, máx. 256) |
+| `q` Teto diário local | Trava do programa (padrão 1000); `0` remove a parede no meio do canal |
 | `3` Deduplicação | Liga/desliga a proteção anti-duplicata |
 | `4` Retomar | Pula automaticamente o que já foi copiado |
 | `5` Modo de envio | Reenviar (cópia limpa) ou Encaminhar (rápido) |
@@ -473,9 +475,16 @@ checkpoints, dedup, retomada, álbuns, tópicos, replies, assinatura, placeholde
   o orçamento passa sozinho quando chega ao cabeçote. O cabeçote nunca fica
   bloqueado pelos demais, evitando deadlock. `MAX_WORKERS_UP` limita pré-uploads
   simultâneos; `BUFFER_RAM_MAX` limita o orçamento de partes em memória.
-- **Auto-proteção:** FloodWait ou timeouts repetidos reduzem as conexões pela
-  metade na sessão. A penalidade de flood (`_flood_penalty`) decai 0,5 s a cada 10
-  envios confirmados e é zerada em `run()`.
+- **Auto-proteção que também acelera de volta:** FloodWait ou 5 timeouts seguidos
+  reduzem as conexões pela metade, mas a capacidade **sobe de novo** (um degrau a
+  cada 48 partes confirmadas) até o valor inicial — antes ficava lenta para o
+  resto da execução. A penalidade de flood decai 1 s a cada 5 envios confirmados
+  (teto 12 s) e zera em `run()`.
+- **Premium / `FLOOD_PREMIUM_WAIT`:** é teto de velocidade **da conta**, não
+  excesso de requisições. O cliente espera o tempo pedido **sem cortar conexões**
+  e sem gastar tentativas do bloco, em vez de abortar para o caminho lento.
+  Contas Premium não recebem esse erro de download
+  (<https://core.telegram.org/api/premium>).
 - **cryptg:** `main.py --check` e o início da cópia avisam se `cryptg` não puder
   ser importado (AES em Python puro limita a criptografia). `build.bat` inclui
   `cryptg` no Nuitka.
@@ -488,15 +497,48 @@ Configuração (`RunConfig` / prefs / menu Configurações):
 | Campo | Padrão | Faixa | Efeito |
 |---|---:|---|---|
 | `fast_transfer` | `True` | bool | `False` reproduz o caminho legado (upload no sender), mantendo C e D |
-| `connections_per_file` | `4` | 1–8 | senders/requisições em voo por arquivo |
+| `connections_per_file` | `8` | 1–32 | senders/requisições em voo por arquivo |
 | `lookahead` | `0` | 0 = auto | itens à frente do sender |
-| `max_tmp_gb` | `8` | >0, limitado pelo disco | orçamento de temporários em andamento |
-| `max_total_connections` | `12` | 1–64 | orçamento global compartilhado |
+| `max_tmp_gb` | `16` | >0, limitado pelo disco | orçamento de temporários em andamento |
+| `max_total_connections` | `32` | 1–256 | orçamento global compartilhado |
+| `workers` | auto | 1–16 | arquivos em andamento (I/O-bound: pode passar do nº de CPUs) |
+| `delay` | `0.35` | ≥0 | espera entre envios; `0` = sem espera |
+| `daily_limit` | `1000` | ≥0 | guard **local**; `0` = sem teto |
+
+### 6.4 Perfil turbo: velocidade máxima do PC
+
+`[6] Configurações → [p]` aplica de uma vez o maior paralelismo que o hardware
+comporta, calculado por RAM disponível, CPUs e disco livre:
+
+```
+workers                  = min(16, RAM/0,35 GB, CPUs x 3, disco/2 GB)
+connections_per_file     = min(16, max(4, workers x 2))
+max_total_connections    = min(128, workers x connections_per_file)
+max_tmp_gb               = min(64, max(8, disco livre x 0,5))
+delay                    = 0,2 s
+daily_limit              = 0 (sem parede local)
+```
+
+O turbo **não** toca em ordem estrita, checkpoint, dedup, retomada, álbuns nem na
+política de FloodWait. Gargalos artificiais removidos nesta revisão:
+
+| Antes | Depois | Efeito |
+|---|---|---|
+| pré-upload limitado a `workers // 2` | acompanha os workers | estágio mais lento deixa de serializar |
+| `workers` travado em 6 | até 16, por hardware | mais arquivos em andamento |
+| `delay` mínimo 0,1 s | mínimo 0 s | sem espera artificial entre envios |
+| conexões/arquivo máx. 8 | máx. 32 | mais partes em voo por arquivo |
+| pool global máx. 64 | máx. 256 | orçamento não estrangula os workers |
+| pool só reduzia, nunca recuperava | recupera até o inicial | velocidade volta após o flood |
+| 3 timeouts cortavam conexões | 5 timeouts | menos falso positivo |
+| fallback com partes de 128–256 KiB | 512 KiB | 2–4x menos idas e voltas no plano B |
+| `request_retries=1` | `5` | menos queda precoce para o caminho lento |
+| teto local de 1000 msgs/dia fixo | configurável, `0` = sem teto | não interrompe canal de 1.279 msgs |
 
 Benchmark real (não executado nesta entrega contra o Telegram):
 
 ```bash
-python bench_transfer.py --source LINK --msg-id N --connections 1,2,4,8
+python bench_transfer.py --source LINK --msg-id N --connections 1,2,4,8,16
 ```
 
 Ele baixa e reenvia o arquivo para as Mensagens Salvas e imprime MB/s padrão vs.
@@ -635,7 +677,7 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**224 passed** (`python -m pytest -q`, suíte isolada, sem rede).
+**236 passed** (`python -m pytest -q`, suíte isolada, sem rede).
 Pyflakes: apenas os achados pré-existentes confirmados no baseline —
 `split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
 
@@ -725,7 +767,7 @@ tests/             suíte automatizada + cliente Telegram simulado
 **Desempenho:** `workers` significa arquivos em andamento (download + pré-upload
 quando `fast_transfer=True`), com envio estritamente sequencial para manter a
 ordem original. Workers recomendados: 1 para cada 0,5 GB de RAM livre, limitado
-pelo número de CPUs (máx. 6 na configuração atual). Conexões por arquivo e
+pelo dobro das CPUs (máx. 16). Conexões por arquivo e
 orçamento global são separados de workers; meça antes de aumentar.
 
 ---
