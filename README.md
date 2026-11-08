@@ -333,7 +333,10 @@ começar. Ao rodar de novo no mesmo par origem → destino:
 3. O programa evita reenviar o que já tem checkpoint concluído, pulado ou
    reservado por marcador. Antes de enviar, um *preflight* por tópico aborta com
    `order.violation` se encontrar uma posição resolvida depois de uma posição
-   não resolvida no mesmo tópico.
+   não resolvida no mesmo tópico — **inclusive quando a pendência ficou fora da
+   coleta atual** (filtro diferente ou mensagem removida da origem). Mensagem que
+   deixou de existir na origem resolve a posição como skip ao reprocessar em
+   `[5] → 3`, para não travar o preflight para sempre.
 
 Exactly-once absoluto através de `kill -9` não é prometido: existe uma janela
 entre o Telegram aceitar uma mensagem e o SQLite gravar a confirmação. A
@@ -392,7 +395,9 @@ Invariantes implementados:
 - por par origem→destino **e por tópico de destino**, os `msg_id` de origem
   entregues/reservados têm `dest_msg_id` estritamente crescente;
 - falha transitória nunca avança: até `max_retries + 1` tentativas, backoff
-  2/4/8/16/32 s, FloodWait espera `seconds + 3`;
+  2/4/8/16/32 s, FloodWait espera `seconds + 3`. A retentativa **reaproveita o ID
+  já confirmado** e reenvia apenas o que falta (continuações pendentes, blocos
+  restantes do álbum) — nunca duplica o que o Telegram já aceitou;
 - falha permanente reserva o marcador antes de avançar (`on_failure=placeholder`)
   ou pausa/pergunta (`abort`: `[r]`etomar no ponto, `[p]`osition/reservar, `[a]`bortar);
 - `DONE` só com ID de destino confirmado; dedup só para conteúdo entregue;
@@ -400,14 +405,19 @@ Invariantes implementados:
 - álbuns por referência em blocos de 10 com IDs retornados estritamente crescentes;
   cascata referência → refresh único → upload forte;
 - espelho serializado por tópico (`_mirror_locks`); multi-destino já era sequencial;
+- o modo **encaminhar** (`delivery=forward`, alias legado `forward_mode`) obedece
+  ao mesmo contrato: retries, marcador na posição, `on_failure` e `DONE` apenas com
+  ID confirmado e estritamente crescente. Resposta ambígua (sem ID utilizável)
+  aborta sem reservar nem reenviar;
 - métricas `server_copies`, `bytes_saved`, `intentional_skips`; limite diário por
-  envio confirmado, incluindo marcadores e slots pré-reservados.
+  envio confirmado, incluindo continuações de legenda, marcadores e slots
+  pré-reservados.
 
 Benchmark fake (100 vídeos de 8192 B, workers 8, delay 0,1 s, dedup off, sem rede):
 
-| Métrica | Antes `4e7994f` | Depois `4d6a852` |
+| Métrica | Antes `4e7994f` | Depois `f57f469` |
 |---|---:|---:|
-| Tempo decorrido | 10,120 s | 10,136 s |
+| Tempo decorrido | 10,120 s | 10,144 s |
 | Downloads | 100 | 0 |
 | Envios com arquivo local | 100 | 0 |
 | `server_copies` | 0 | 100 |
@@ -545,9 +555,16 @@ fórum criados do zero, reuso de clone existente, recusa de clone sem admin,
 falha parcial com retomada, exclusão apenas do canal criado, foto com falha e
 `[A]` nos três modos.
 
-WP1/WP2 acrescentam `tests/test_ordem.py` e `tests/test_ui_order.py`. Estado
-verificado nesta entrega: **161 passed** (`pytest -q`, suíte isolada, sem rede).
-Pyflakes: apenas o achado pré-existente de `split_text` duplicado em `copier.py`.
+WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
+`tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
+`tests/test_ordem_preflight.py`. Estado verificado nesta entrega:
+**179 passed** (`pytest -q`, suíte isolada, sem rede).
+Pyflakes: apenas os achados pré-existentes confirmados no baseline —
+`split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
+
+A auditoria final (`AUDITORIA.md`) encontrou 7 defeitos que a suíte anterior não
+cobria; todos foram corrigidos e viraram testes de regressão. As sondas originais
+estão em `audit/` para reprodução independente.
 
 | Invariante / recurso | Teste representativo |
 |---|---|
@@ -561,6 +578,14 @@ Pyflakes: apenas o achado pré-existente de `split_text` duplicado em `copier.py
 | Espelho serializado | `test_espelho_dez_mensagens_em_ordem` |
 | Prompt de aborto `[r]` | `test_abort_prompt_retoma_no_mesmo_ponto` |
 | Verificador offline `[5] → 7` | `test_tool_order_reporta_violacao` |
+| Retentativa não reenvia item confirmado | `test_retry_nao_reenvia_midia_ja_confirmada` |
+| Retentativa não reenvia bloco de álbum | `test_retry_nao_reenvia_bloco_de_album_confirmado` |
+| Cada envio conta no diário | `test_cada_envio_confirmado_conta_no_limite_diario` |
+| Forward: barreira e retries | `test_forward_falha_permanente_reserva_posicao` |
+| Forward: DONE exige ID | `test_forward_sem_id_confirmado_nao_vira_done` |
+| Forward ambíguo aborta | `test_forward_ambiguo_aborta_sem_reservar` |
+| Preflight não é cegado por filtro | `test_preflight_nao_e_cegado_por_filtro` |
+| Verificador sem falso positivo | `test_tool_order_pendencia_final_nao_e_violacao` |
 
 Também é possível rodar sem pytest:
 
