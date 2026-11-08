@@ -302,6 +302,10 @@ _s("copy.download_unavailable", "Download da mídia indisponível ou expirado.",
 _s("copy.download_failed", "Não foi possível baixar a mídia: {reason}", "Could not download the media: {reason}")
 _s("order.violation", "Violação de ordem detectada; refaça o tópico/destino afetado.",
    "Order violation detected; rebuild the affected topic/destination.")
+_s("order.violation.detail", "tópico {topic}: pendente msg_id={pending} antes de terminal msg_id={terminal}",
+   "topic {topic}: pending msg_id={pending} before terminal msg_id={terminal}")
+_s("order.blocked", "Ordem bloqueada no tópico {topic}, msg_id={msg_id}: {reason}",
+   "Order blocked in topic {topic}, msg_id={msg_id}: {reason}")
 _s("order.reserve_failed", "Não foi possível reservar a posição; a cópia foi interrompida sem avançar.",
    "Could not reserve the position; the copy stopped without advancing.")
 _s("order.pending", "Há item anterior não resolvido neste tópico; envio bloqueado para preservar a ordem.",

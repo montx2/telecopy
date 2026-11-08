@@ -185,6 +185,56 @@ def test_referencia_em_forum_usa_topico(env) -> None:
     assert setup.client.downloads == []
 
 
+def test_midia_nao_suportada_bloqueia_mensagens_posteriores(env) -> None:
+    unsupported = type("MessageMediaDice", (), {})()
+    messages = [FakeMessage(id=1, media=unsupported), text_message(2, "posterior")]
+    setup = make_copier(env, messages, placeholder=False, on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["errors"] == 1 and result["unsupported"] == 1
+    assert result["interrupted"] and not setup.client.sent
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 1)["status"] == "error"
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2) == {}
+
+
+def test_album_com_falha_de_preparacao_e_atomico_no_padrao(env) -> None:
+    messages = album_messages(10, 3)
+    client = FakeClient(messages, fail_ids={11})
+    setup = make_copier(env, messages, client=client, placeholder=False,
+                        on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 0 and result["errors"] == 3
+    assert result["interrupted"] and not client.sent
+    assert all(env.repo.checkpoint_route(setup.source.id, setup.dest.id, i)["status"] == "error"
+               for i in (10, 11, 12))
+    assert "ordem bloqueada" in result["first_error"].lower()
+
+
+def test_album_precarrega_todos_os_uploads_antes_do_primeiro_envio(env) -> None:
+    messages = album_messages(20, 12)
+
+    class UploadFailClient(FakeClient):
+        def __init__(self, items):
+            super().__init__(items)
+            self.upload_calls = 0
+
+        async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
+            self.upload_calls += 1
+            if self.upload_calls == 11:
+                raise OSError("falha simulada no décimo primeiro upload")
+            return await super().upload_file(path, file_name, progress_callback, **kwargs)
+
+    client = UploadFailClient(messages)
+    setup = make_copier(env, messages, client=client, server_copy=False,
+                        placeholder=False, on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert client.upload_calls == 11
+    assert not client.sent
+    assert result["errors"] == len(messages) and result["interrupted"]
+
+
 def test_album_parcial_reserva_marcador_na_posicao(env) -> None:
     messages = album_messages(1, 4, grouped_id=99)
     client = FakeClient(messages, fail_ids={2})

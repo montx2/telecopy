@@ -792,9 +792,12 @@ def test_forum_repeticoes_nao_sao_descartadas() -> None:
 def test_midia_nao_suportada_nao_conclui() -> None:
     dice = type("MessageMediaDice", (), {})()
     messages = [FakeMessage(id=1, media=dice)]
-    result, client, repo = asyncio.run(_run_copy(
-        messages, config=RunConfig(use_dedup=False, placeholder=False)
-    ))
+    from unittest.mock import patch
+
+    with patch.object(Copier, "_prompt_failure", return_value="a"):
+        result, client, repo = asyncio.run(_run_copy(
+            messages, config=RunConfig(use_dedup=False, placeholder=False)
+        ))
     check(result["errors"] == 1 and result["unsupported"] == 1, "mídia não reproduzível é erro")
     check(not result["complete"], "cópia incompleta não é marcada como completa")
     check(not client.sent, "nada é enviado fingindo sucesso")

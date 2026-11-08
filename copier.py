@@ -608,9 +608,13 @@ class Copier:
 
         violations = self._preflight_order(messages, source_id, dest_id, topic_map, dest_topic)
         if violations:
-            topic = violations[0]["topic"]
-            reason = f"{t('order.violation')} ({t('result.topics')}: {topic})"
-            logger.error(f"Ordem violada source={source_id} dest={dest_id}: {violations}")
+            details = "; ".join(
+                t("order.violation.detail", topic=row["topic"],
+                  pending=row["pending"], terminal=row["terminal"])
+                for row in violations
+            )
+            reason = f"{t('order.violation')}: {details}"
+            logger.error(f"order.violation source={source_id} dest={dest_id}: {details}")
             return TransferStats(indexed=len(messages), errors=1, first_error=reason).as_result()
 
         items = self._group(messages, topic_roots)
@@ -1340,12 +1344,24 @@ class Copier:
                             break
 
                     if error is not None:
-                        logger.error(f"Erro no envio do item {index}: {error}")
                         reserved = payload.get("reserved_ids", set())
                         confirmed = {e["msg"].id for e in payload.get("plan", [])
                                      if e.get("dest_msg_id")}
                         unreserved = [m for m in payload["messages"]
                                       if m.id not in reserved and m.id not in confirmed]
+                        placeholder_mode = self.cfg.placeholder and self.cfg.on_failure == "placeholder"
+                        if self.cfg.strict_order and not placeholder_mode:
+                            failed_id = min((m.id for m in unreserved),
+                                            default=min(m.id for m in payload["messages"]))
+                            topic = payload.get("dest_topic") or 1
+                            blocked_reason = t(
+                                "order.blocked", topic=topic, msg_id=failed_id,
+                                reason=self._explain(error),
+                            )
+                            logger.error(f"order.blocked msg_id={failed_id} topic={topic}: {error}")
+                            error = RuntimeError(blocked_reason)
+                        else:
+                            logger.error(f"Erro no envio do item {index}: {error}")
                         if unreserved:
                             if self.cfg.placeholder and self.cfg.on_failure == "placeholder":
                                 try:
@@ -1394,15 +1410,53 @@ class Copier:
                                         raise
                                     except Exception as retry_exc:
                                         logger.error(f"Retomada manual msg {index}: {retry_exc}")
-                                        self._mark_failed(unreserved, source_id, dest_id, stats, retry_exc,
+                                        failed_id = min(m.id for m in unreserved)
+                                        retry_blocked = RuntimeError(t(
+                                            "order.blocked",
+                                            topic=payload.get("dest_topic") or 1,
+                                            msg_id=failed_id, reason=self._explain(retry_exc),
+                                        ))
+                                        self._mark_failed(unreserved, source_id, dest_id, stats,
+                                                          retry_blocked,
                                                           dest_topic=payload.get("dest_topic"))
                                         self._stop = True
                                 else:
                                     self._mark_failed(unreserved, source_id, dest_id, stats, error,
                                                       dest_topic=payload.get("dest_topic"))
                                     self._stop = True
+                        if error is not None and self.cfg.strict_order and not self._stop:
+                            reserved_now = payload.get("reserved_ids", set())
+                            fully_reserved = all(m.id in reserved_now
+                                                 for m in payload["messages"])
+                            if not fully_reserved:
+                                if not unreserved:
+                                    unresolved = [m for m in payload["messages"]
+                                                  if m.id not in reserved_now]
+                                    if unresolved:
+                                        self._mark_failed(
+                                            unresolved, source_id, dest_id, stats, error,
+                                            dest_topic=payload.get("dest_topic"),
+                                        )
+                                    else:
+                                        stats.errors += 1
+                                failed_id = min((m.id for m in unreserved),
+                                                default=min(m.id for m in payload["messages"]))
+                                topic = payload.get("dest_topic") or 1
+                                blocked_reason = t(
+                                    "order.blocked", topic=topic, msg_id=failed_id,
+                                    reason=self._explain(error),
+                                )
+                                logger.error(f"order.blocked msg_id={failed_id} topic={topic}: "
+                                             f"{self._explain(error)}")
+                                stats.first_error = blocked_reason
+                                self._stop = True
                         if error is not None:
                             reserved_now = payload.get("reserved_ids", set())
+                            unsupported_ids = {
+                                entry["msg"].id for entry in payload.get("plan", [])
+                                if entry.get("unsupported")
+                            }
+                            stats.unsupported += len(unsupported_ids - reserved_now)
                             all_reserved = all(m.id in reserved_now or m.id in confirmed
                                                for m in payload["messages"])
                             reason = self._explain(error)
@@ -1750,12 +1804,19 @@ class Copier:
             return [created_id]
 
         try:
+            if (len(payload.get("messages", [])) > 1
+                    and any(e.get("failed") for e in plan)
+                    and not (self.cfg.placeholder and self.cfg.on_failure == "placeholder")):
+                failed = next(e for e in plan if e.get("failed"))
+                raise RuntimeError(failed.get("reason") or t("copy.prepare_failure"))
             index = 0
             while index < len(plan):
                 entry = plan[index]
                 msg = entry["msg"]
                 if entry.get("failed"):
                     reason = entry.get("reason") or t("copy.prepare_failure")
+                    if not self.cfg.placeholder:
+                        raise RuntimeError(reason)
                     await self._record_failed_entry(
                         entry, source_id, dest_id, dest, dest_topic, reply_to,
                         stats, payload, reason,
@@ -2133,14 +2194,19 @@ class Copier:
         created_ids: List[int] = []
         try:
             peer = await self.client.get_input_entity(dest)
-            for start in range(0, len(entries), 10):
-                chunk = entries[start:start + 10]
+            # Carrega toda a mídia do álbum antes do primeiro envio. Assim, falha
+            # de download/upload não pode deixar apenas as primeiras partes visíveis.
+            prepared = []
+            for entry in entries:
+                parts = self._parts(entry["msg"], CAPTION_LIMIT)
+                caption, entities = parts[0] if parts else ("", [])
+                input_media = await self._album_input_media(entry, peer)
+                prepared.append((entry, input_media, caption, entities))
+            for start in range(0, len(prepared), 10):
+                chunk = prepared[start:start + 10]
                 multi_media = []
                 random_ids = []
-                for entry in chunk:
-                    parts = self._parts(entry["msg"], CAPTION_LIMIT)
-                    caption, entities = parts[0] if parts else ("", [])
-                    input_media = await self._album_input_media(entry, peer)
+                for entry, input_media, caption, entities in chunk:
                     random_id = generate_random_long()
                     random_ids.append(random_id)
                     multi_media.append(types.InputSingleMedia(
@@ -2156,7 +2222,7 @@ class Copier:
                     raise RuntimeError(t("copy.send_unconfirmed"))
                 batch_ids = [self._created_id(item) for item in parsed]
                 created_ids.extend(batch_ids)
-                for entry, created_id in zip(chunk, batch_ids):
+                for (entry, _, _, _), created_id in zip(chunk, batch_ids):
                     entry["dest_msg_id"] = created_id
         finally:
             progress.remove_transfer(task_id)
@@ -2485,6 +2551,7 @@ class Copier:
         quiet = ProgressDisplay(0, "", False)
 
         for msg_id in sorted(int(m) for m in msg_ids):
+            target_topic: Optional[int] = dest_topic
             try:
                 placeholder = self.repo.get_placeholder(source_id, dest_id, msg_id)
                 if placeholder is not None:
@@ -2500,6 +2567,10 @@ class Copier:
                     continue
                 message = await self.client.get_messages(source, ids=msg_id)
                 route = self.repo.checkpoint_route(source_id, dest_id, msg_id)
+                if self._position_resolved(route):
+                    stats.skipped += 1
+                    await asyncio.sleep(self.delay)
+                    continue
                 if message is None:
                     # Não há o que entregar: resolve a posição como skip em vez de
                     # deixar uma pendência eterna bloqueando o preflight.
@@ -2513,15 +2584,16 @@ class Copier:
                 roots = {self._source_topic_id(message, set()) or 1}
                 reply_to = self._reply_target(message, source_id, dest_id, {root: root for root in roots})
                 if self.repo.order_pending_before(source_id, dest_id, target_topic, msg_id):
-                    self.repo.add_failure(source_id, dest_id, msg_id, t("order.pending"))
-                    stats.skipped += 1
-                    if stats.first_error is None:
-                        stats.first_error = t("order.pending")
-                    await asyncio.sleep(self.delay)
-                    continue
+                    stats.errors += 1
+                    stats.first_error = t("order.blocked", topic=target_topic or 1,
+                                          msg_id=msg_id, reason=t("order.pending"))
+                    self._stop = True
+                    break
                 if self.repo.order_terminal_after(source_id, dest_id, target_topic, msg_id):
                     stats.errors += 1
-                    stats.first_error = t("order.violation")
+                    stats.first_error = t("order.blocked", topic=target_topic or 1,
+                                          msg_id=msg_id, reason=t("order.violation"))
+                    self._stop = True
                     break
                 payload = await self._prepare(0, message, quiet, source=source)
                 payload.update({"dest": dest, "source": source, "dest_topic": target_topic,
@@ -2568,11 +2640,20 @@ class Copier:
                 await self._handle_flood(exc)
             except Exception as exc:
                 logger.error(f"Retry msg {msg_id}: {exc}")
-                self.repo.add_failure(source_id, dest_id, msg_id, self._explain(exc))
+                reason = t("order.blocked", topic=target_topic or 1,
+                           msg_id=msg_id, reason=self._explain(exc))
+                self.repo.add_failure(source_id, dest_id, msg_id, reason)
                 # Sem checkpoint a pendência ficaria invisível para
                 # order_pending_before e o próximo id abriria buraco.
-                self.repo.upsert_checkpoint(source_id, dest_id, msg_id, Status.ERROR)
+                self.repo.upsert_checkpoint(
+                    source_id, dest_id, msg_id, Status.ERROR,
+                    dest_topic=target_topic,
+                )
                 stats.errors += 1
+                stats.first_error = stats.first_error or reason
+                self._stop = True
+                break
+        stats.interrupted = self._stop
         return stats.as_result()
 
     # ── Espelho em tempo real ───────────────────────────────────────────────
@@ -2593,10 +2674,34 @@ class Copier:
         confirmed = {e["msg"].id for e in payload.get("plan", []) if e.get("dest_msg_id")}
         unreserved = [m for m in payload["messages"]
                       if m.id not in reserved and m.id not in confirmed]
+        placeholder_mode = self.cfg.placeholder and self.cfg.on_failure == "placeholder"
         if not unreserved:
+            if self.cfg.strict_order and confirmed:
+                failed_id = min(confirmed)
+                blocked = t("order.blocked", topic=dest_topic or 1,
+                            msg_id=failed_id, reason=reason)
+                stats.first_error = blocked
+                logger.error(f"order.blocked msg_id={failed_id} topic={dest_topic or 1}: {reason}")
+                if not placeholder_mode:
+                    stats.unsupported += sum(
+                        1 for entry in payload.get("plan", [])
+                        if entry.get("unsupported") and entry["msg"].id in confirmed
+                    )
+                self._mark_failed(
+                    [m for m in payload["messages"] if m.id in confirmed],
+                    source_id, dest_id, stats, RuntimeError(blocked),
+                    dest_topic=dest_topic,
+                )
+                self._stop = True
             return
 
-        action = ("p" if self.cfg.placeholder and self.cfg.on_failure == "placeholder" else "a")
+        if self.cfg.strict_order and not placeholder_mode:
+            failed_id = min(m.id for m in unreserved)
+            reason = t("order.blocked", topic=dest_topic or 1,
+                       msg_id=failed_id, reason=reason)
+            stats.first_error = reason
+
+        action = "p" if placeholder_mode else "a"
         if self.cfg.on_failure == "abort":
             action = self._prompt_failure(reason)
 
@@ -2627,6 +2732,11 @@ class Copier:
                 stats.first_error = t("order.reserve_failed")
                 error = exc
 
+        if not placeholder_mode:
+            stats.unsupported += sum(
+                1 for entry in payload.get("plan", [])
+                if entry.get("unsupported") and entry["msg"].id in {m.id for m in unreserved}
+            )
         self._mark_failed(unreserved, source_id, dest_id, stats, error, dest_topic=dest_topic)
         self._stop = True
 

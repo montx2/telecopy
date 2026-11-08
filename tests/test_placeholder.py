@@ -272,18 +272,19 @@ def test_forum_reserva_no_topico_mapeado(env) -> None:
     assert env.repo.checkpoint_route(source.id, dest.id, 10)["dest_topic"] == 911
 
 
-def test_placeholder_false_mantem_caminho_legado(env) -> None:
+def test_placeholder_false_aborta_sem_abrir_buraco(env) -> None:
     messages = [document_message(i, f"aula{i}.pdf") for i in (1, 2, 3)]
     setup = make_copier(env, messages, client=FakeClient(messages, fail_ids={2}),
                         placeholder=False)
-    with fast_sleep():
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
         result = asyncio.run(setup.copier.run(setup.source, setup.dest))
-    assert result["placeholders"] == 0
-    assert [item["kind"] for item in setup.client.sent] == ["file", "file"]
+    assert result["interrupted"] and result["placeholders"] == 0
+    assert [item["kind"] for item in setup.client.sent] == ["file"]
     assert env.repo.placeholder_stats() == {"open": 0, "recovered": 0, "unrecoverable": 0}
     assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 2)["status"] == "error"
+    assert env.repo.checkpoint_route(setup.source.id, setup.dest.id, 3) == {}
     assert len(env.repo.failures()) == 1
-    assert env.limit.count == 2
+    assert env.limit.count == 1
     assert setup.client.edits == []
 
 
