@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     media_type    TEXT    NOT NULL DEFAULT '',
     dest_msg_id   INTEGER,
     dest_topic    INTEGER,
+    continuation_parts_sent INTEGER,
     UNIQUE (source_id, dest_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_cp_pair   ON checkpoints (source_id, dest_id);
@@ -227,7 +228,7 @@ class Repository:
             # Bancos da v4.0 não tinham o vínculo origem→destino necessário
             # para reconstruir respostas e retomar retries no tópico certo.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")}
-            for column in ("dest_msg_id", "dest_topic"):
+            for column in ("dest_msg_id", "dest_topic", "continuation_parts_sent"):
                 if column not in columns:
                     conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {column} INTEGER")
 
@@ -284,6 +285,7 @@ class Repository:
         media_type: str = "",
         dest_msg_id: Optional[int] = None,
         dest_topic: Optional[int] = None,
+        continuation_parts_sent: Optional[int] = None,
     ) -> None:
         status_value = status.value if isinstance(status, Status) else str(status)
         now = time.time()
@@ -292,8 +294,9 @@ class Repository:
                 """
                 INSERT INTO checkpoints
                     (source_id, dest_id, msg_id, status, content_hash,
-                     bytes_done, media_type, timestamp, dest_msg_id, dest_topic)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     bytes_done, media_type, timestamp, dest_msg_id, dest_topic,
+                     continuation_parts_sent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (source_id, dest_id, msg_id) DO UPDATE SET
                     status       = excluded.status,
                     content_hash = COALESCE(excluded.content_hash, checkpoints.content_hash),
@@ -301,10 +304,13 @@ class Repository:
                     media_type   = excluded.media_type,
                     timestamp    = excluded.timestamp,
                     dest_msg_id  = COALESCE(excluded.dest_msg_id, checkpoints.dest_msg_id),
-                    dest_topic   = COALESCE(excluded.dest_topic, checkpoints.dest_topic)
+                    dest_topic   = COALESCE(excluded.dest_topic, checkpoints.dest_topic),
+                    continuation_parts_sent = COALESCE(
+                        excluded.continuation_parts_sent, checkpoints.continuation_parts_sent)
                 """,
                 (source_id, dest_id, msg_id, status_value, content_hash,
-                 bytes_done, media_type, now, dest_msg_id, dest_topic),
+                 bytes_done, media_type, now, dest_msg_id, dest_topic,
+                 continuation_parts_sent),
             )
 
     def update_status(
@@ -383,7 +389,7 @@ class Repository:
         """Vínculo persistido para replies/retries; vazio em bancos antigos."""
         with self._db() as conn:
             row = conn.execute(
-                "SELECT status, dest_msg_id, dest_topic FROM checkpoints "
+                "SELECT status, dest_msg_id, dest_topic, continuation_parts_sent FROM checkpoints "
                 "WHERE source_id=? AND dest_id=? AND msg_id=?",
                 (source_id, dest_id, msg_id),
             ).fetchone()

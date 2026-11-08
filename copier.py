@@ -987,7 +987,10 @@ class Copier:
                 self.repo.mark_processed(source_id, msg.id, None, dest_id)
                 self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.SKIPPED)
             return
-        payload = await self._prepare(index, item, progress, source=source)
+        payload = await self._prepare(
+            index, item, progress, source=source,
+            checkpoint_pair=(source_id, dest_id),
+        )
         try:
             payload.update({
                 "dest": dest,
@@ -1254,7 +1257,10 @@ class Copier:
                     elif self._is_duplicate(messages, dest_id):
                         payload = {"skip": True, "dedup": True}
                     else:
-                        payload = await self._prepare(index, item, progress, source=source)
+                        payload = await self._prepare(
+                            index, item, progress, source=source,
+                            checkpoint_pair=(source_id, dest_id),
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1533,7 +1539,8 @@ class Copier:
     async def _prepare(self, index: int, item: QueueItem,
                        progress: ProgressDisplay,
                        source: Any = None, *, strong: bool = False,
-                       force_upload: bool = False) -> Dict[str, Any]:
+                       force_upload: bool = False,
+                       checkpoint_pair: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:
         messages = item if isinstance(item, list) else [item]
         plan: List[Dict[str, Any]] = []
 
@@ -1548,9 +1555,25 @@ class Copier:
             empty = not _caption(msg) and not has_media
             entry = {
                 "msg": msg, "media_type": media_type, "size": size,
+                "has_media": bool(has_media),
                 "path": None, "downloadable": bool(has_media) and not native,
                 "native": native,
             }
+            if checkpoint_pair is not None:
+                source_id, dest_id = checkpoint_pair
+                route = self.repo.checkpoint_route(source_id, dest_id, msg.id)
+                if (route.get("status") in {Status.PENDING.value, Status.ERROR.value}
+                        and route.get("dest_msg_id")):
+                    entry.update({
+                        "already_sent": True,
+                        "dest_msg_id": int(route["dest_msg_id"]),
+                        "text_parts_sent": int(route.get("continuation_parts_sent") or 0),
+                        "_source_id": source_id,
+                        "_dest_id": dest_id,
+                        "downloadable": False,
+                    })
+                    plan.append(entry)
+                    continue
             if (has_media and not native and not unsupported and not force_upload
                     and self.cfg.server_copy
                     and (self.cfg.delivery == "reference" or self._force_reference)):
@@ -1750,7 +1773,7 @@ class Copier:
         """Único registro de conteúdo realmente entregue (envio ou edição)."""
         msg = entry["msg"]
         content_hash = hash_message(msg)
-        size = entry["size"] if entry.get("path") else 0
+        size = entry["size"] if entry.get("path") or entry.get("already_sent") else 0
         self.dedup.register(content_hash, dest_id, dest_msg_id, size, source_id)
         self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
         self.repo.mark_done(source_id, dest_id, msg.id, content_hash, size,
@@ -1769,6 +1792,15 @@ class Copier:
         dest = payload["dest"]
         dest_topic = payload.get("dest_topic")
         reply_to = payload.get("reply_to")
+
+        for entry in plan:
+            entry["_source_id"] = source_id
+            entry["_dest_id"] = dest_id
+            route = self.repo.checkpoint_route(source_id, dest_id, entry["msg"].id)
+            if route.get("status") in {Status.PENDING.value, Status.ERROR.value} and route.get("dest_msg_id"):
+                entry["already_sent"] = True
+                entry["dest_msg_id"] = int(route["dest_msg_id"])
+                entry["text_parts_sent"] = int(route.get("continuation_parts_sent") or 0)
 
         sent_ids: Dict[int, int] = {}
         if (len(payload.get("messages", [])) > 10 and self.cfg.strict_order
@@ -1830,8 +1862,8 @@ class Copier:
                 if confirmed_id:
                     # Já aceito pelo Telegram numa tentativa anterior: reenviar
                     # criaria duplicata e quebraria a ordem. Só faltam continuações.
-                    has_media = bool(entry.get("path") or entry.get("reference")
-                                     or entry.get("native"))
+                    has_media = bool(entry.get("has_media") or entry.get("path")
+                                     or entry.get("reference") or entry.get("native"))
                     limit = CAPTION_LIMIT if has_media else MESSAGE_LIMIT
                     await self._send_continuations(entry, dest, dest_topic,
                                                    self._parts(msg, limit))
@@ -1892,6 +1924,19 @@ class Copier:
                 raise RuntimeError(t("copy.send_unconfirmed"))
             self._record_delivered(entry, source_id, dest_id, created_id, dest_topic, stats)
 
+    def _persist_partial_entry(self, entry: Dict[str, Any], dest_topic) -> None:
+        """Persiste o ID remoto e o avanço de legenda antes da conclusão do item."""
+        source_id = entry.get("_source_id")
+        dest_id = entry.get("_dest_id")
+        dest_msg_id = entry.get("dest_msg_id")
+        if source_id is None or dest_id is None or dest_msg_id is None:
+            return
+        self.repo.upsert_checkpoint(
+            int(source_id), int(dest_id), entry["msg"].id, Status.PENDING,
+            dest_msg_id=int(dest_msg_id), dest_topic=dest_topic,
+            continuation_parts_sent=int(entry.get("text_parts_sent") or 0),
+        )
+
     async def _send_continuations(self, entry: Dict[str, Any], dest, dest_topic,
                                   parts: List[Tuple[str, List[Any]]]) -> None:
         """Envia apenas as continuações ainda não confirmadas do item.
@@ -1906,6 +1951,7 @@ class Copier:
                 continue
             await self._send_chunk(dest, chunk, entities, dest_topic, None)
             entry["text_parts_sent"] = offset + 1
+            self._persist_partial_entry(entry, dest_topic)
             daily_limit.add(1)
 
     def _parts(self, msg, limit: int) -> List[Tuple[str, List[Any]]]:
@@ -2023,6 +2069,7 @@ class Copier:
             )
             created_id = self._created_id(result)
         entry["dest_msg_id"] = created_id
+        self._persist_partial_entry(entry, dest_topic)
         await self._send_continuations(entry, dest, dest_topic, parts)
         return created_id
 
@@ -2047,6 +2094,8 @@ class Copier:
                                       strong=True, force_upload=True)
         try:
             prepared = payload["plan"][0]
+            prepared["_source_id"] = entry.get("_source_id")
+            prepared["_dest_id"] = entry.get("_dest_id")
             if prepared.get("failed") or not prepared.get("path"):
                 raise RuntimeError(prepared.get("reason") or t("copy.download_unavailable"))
             prepared["dest_msg_id"] = entry.get("dest_msg_id")
@@ -2104,6 +2153,7 @@ class Copier:
             created_ids.extend(batch_ids)
             for entry, created_id in zip(chunk, batch_ids):
                 entry["dest_msg_id"] = created_id
+                self._persist_partial_entry(entry, dest_topic)
         for entry in entries:
             parts = self._parts(entry["msg"], CAPTION_LIMIT)
             await self._send_continuations(entry, dest, dest_topic, parts)
@@ -2178,6 +2228,7 @@ class Copier:
             progress.remove_transfer(task_id)
 
         entry["dest_msg_id"] = created_id
+        self._persist_partial_entry(entry, dest_topic)
         await self._send_continuations(entry, dest, dest_topic, parts)
         stats.bytes_uploaded += size
         return created_id
@@ -2227,6 +2278,7 @@ class Copier:
                 created_ids.extend(batch_ids)
                 for (entry, _, _, _), created_id in zip(chunk, batch_ids):
                     entry["dest_msg_id"] = created_id
+                    self._persist_partial_entry(entry, dest_topic)
         finally:
             progress.remove_transfer(task_id)
 
@@ -2269,6 +2321,7 @@ class Copier:
             first_id = await self._send_chunk(dest, chunk, entities, dest_topic, reply_to)
             if entry is not None:
                 entry["dest_msg_id"] = first_id
+                self._persist_partial_entry(entry, dest_topic)
         if entry is not None:
             await self._send_continuations(entry, dest, dest_topic, parts)
         else:
@@ -2349,6 +2402,7 @@ class Copier:
             )
             created_id = self._created_id(result)
         entry["dest_msg_id"] = created_id
+        self._persist_partial_entry(entry, dest_topic)
         await self._send_continuations(entry, dest, dest_topic, parts)
         return created_id
 
@@ -2598,7 +2652,10 @@ class Copier:
                                           msg_id=msg_id, reason=t("order.violation"))
                     self._stop = True
                     break
-                payload = await self._prepare(0, message, quiet, source=source)
+                payload = await self._prepare(
+                    0, message, quiet, source=source,
+                    checkpoint_pair=(source_id, dest_id),
+                )
                 payload.update({"dest": dest, "source": source, "dest_topic": target_topic,
                                 "reply_to": reply_to})
                 errors_before = stats.errors
@@ -2815,7 +2872,10 @@ class Copier:
                         return
 
                     silent = ProgressDisplay(0, "", False)
-                    payload = await self._prepare(0, msg, silent, source=source)
+                    payload = await self._prepare(
+                        0, msg, silent, source=source,
+                        checkpoint_pair=(source_id, dest_id),
+                    )
                     route_roots = set(topic_map or {})
                     if source_topic:
                         route_roots.add(int(source_topic))
