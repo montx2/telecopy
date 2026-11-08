@@ -505,6 +505,26 @@ Configuração (`RunConfig` / prefs / menu Configurações):
 | `delay` | `0.35` | ≥0 | espera entre envios; `0` = sem espera |
 | `daily_limit` | `1000` | ≥0 | guard **local**; `0` = sem teto |
 
+### 6.3.1 Ordem nunca depende da velocidade (canal de curso em fórum)
+
+O paralelismo é só na **preparação**. O envio é um `for index in range(total)`
+que espera o item daquele índice: nada é enviado porque "ficou pronto primeiro".
+Por isso `workers`, `connections_per_file` e o turbo **não** reordenam aulas.
+
+`tests/test_ordem_curso.py` trava o cenário real: aulas 321→329 em dois tópicos,
+com álbuns no meio, workers terminando **fora de ordem** de propósito e turbo
+ligado. O teste exige:
+
+- destino na sequência exata da origem (Aula 321, 322, 323...);
+- cada aula no tópico correto do destino (`dest_topic` no checkpoint);
+- álbuns contíguos e agrupados via `UploadMedia` + `SendMultiMedia`;
+- `done` só com ID de destino confirmado;
+- retomada após interrupção sem repetir e sem inverter.
+
+**Atenção às prefs salvas:** os defaults novos não sobrescrevem o que já está em
+`prefs.json`. Se o banner ainda mostra `0.9s`, aplique `[6] Configurações → [p]`
+(perfil turbo) ou ajuste `[1]` intervalo e `[2]` workers manualmente.
+
 ### 6.4 Perfil turbo: velocidade máxima do PC
 
 `[6] Configurações → [p]` aplica de uma vez o maior paralelismo que o hardware
@@ -677,7 +697,7 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**236 passed** (`python -m pytest -q`, suíte isolada, sem rede).
+**239 passed** (`python -m pytest -q`, suíte isolada, sem rede).
 Pyflakes: apenas os achados pré-existentes confirmados no baseline —
 `split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
 
