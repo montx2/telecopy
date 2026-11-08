@@ -306,6 +306,8 @@ _s("order.violation.detail", "tópico {topic}: pendente msg_id={pending} antes d
    "topic {topic}: pending msg_id={pending} before terminal msg_id={terminal}")
 _s("order.blocked", "Ordem bloqueada no tópico {topic}, msg_id={msg_id}: {reason}",
    "Order blocked in topic {topic}, msg_id={msg_id}: {reason}")
+_s("copy.album_too_large", "Álbum com {count} partes excede o limite atômico de 10; envio bloqueado.",
+   "Album with {count} parts exceeds the atomic limit of 10; sending blocked.")
 _s("order.reserve_failed", "Não foi possível reservar a posição; a cópia foi interrompida sem avançar.",
    "Could not reserve the position; the copy stopped without advancing.")
 _s("order.pending", "Há item anterior não resolvido neste tópico; envio bloqueado para preservar a ordem.",

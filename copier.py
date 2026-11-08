@@ -1771,6 +1771,9 @@ class Copier:
         reply_to = payload.get("reply_to")
 
         sent_ids: Dict[int, int] = {}
+        if (len(payload.get("messages", [])) > 10 and self.cfg.strict_order
+                and not (self.cfg.placeholder and self.cfg.on_failure == "placeholder")):
+            raise RuntimeError(t("copy.album_too_large", count=len(payload["messages"])))
 
         async def send_media_group(group: List[Dict[str, Any]]) -> List[int]:
             if len(group) > 1:

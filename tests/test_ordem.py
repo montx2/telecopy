@@ -212,7 +212,7 @@ def test_album_com_falha_de_preparacao_e_atomico_no_padrao(env) -> None:
 
 
 def test_album_precarrega_todos_os_uploads_antes_do_primeiro_envio(env) -> None:
-    messages = album_messages(20, 12)
+    messages = album_messages(20, 10)
 
     class UploadFailClient(FakeClient):
         def __init__(self, items):
@@ -221,8 +221,8 @@ def test_album_precarrega_todos_os_uploads_antes_do_primeiro_envio(env) -> None:
 
         async def upload_file(self, path, file_name=None, progress_callback=None, **kwargs):
             self.upload_calls += 1
-            if self.upload_calls == 11:
-                raise OSError("falha simulada no décimo primeiro upload")
+            if self.upload_calls == 10:
+                raise OSError("falha simulada no décimo upload")
             return await super().upload_file(path, file_name, progress_callback, **kwargs)
 
     client = UploadFailClient(messages)
@@ -230,9 +230,21 @@ def test_album_precarrega_todos_os_uploads_antes_do_primeiro_envio(env) -> None:
                         placeholder=False, on_failure="abort", max_retries=0)
     with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
         result = asyncio.run(setup.copier.run(setup.source, setup.dest))
-    assert client.upload_calls == 11
+    assert client.upload_calls == 10
     assert not client.sent
     assert result["errors"] == len(messages) and result["interrupted"]
+
+
+def test_album_maior_que_limite_atomico_e_bloqueado(env) -> None:
+    messages = album_messages(40, 12)
+    setup = make_copier(env, messages, server_copy=False, placeholder=False,
+                        on_failure="abort", max_retries=0)
+    with patch.object(setup.copier, "_prompt_failure", return_value="a"), fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["errors"] == len(messages) and result["interrupted"]
+    assert not setup.client.sent
+    assert all(env.repo.checkpoint_route(setup.source.id, setup.dest.id, msg.id)["status"] == "error"
+               for msg in messages)
 
 
 def test_album_parcial_reserva_marcador_na_posicao(env) -> None:
