@@ -13,6 +13,7 @@ import copier as copier_module
 from config import RunConfig
 from copier import Copier, ProgressDisplay, TransferWindow
 from database import Repository, Status
+from fasttransfer import FastTransferError
 from i18n import get_lang, set_lang
 from telethon.errors import FilePartMissingError
 from tests.fake_telegram import FakeClient, album_messages, channel, text_message
@@ -28,6 +29,16 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TEMP_DIR", temp)
     monkeypatch.setattr(copier_module, "TEMP_DIR", temp)
     monkeypatch.setattr(copier_module, "daily_limit", DailyLimit(tmp_path / "daily.json"))
+
+    # Esta suíte isola a etapa A (pipeline/pré-upload) do transporte B.
+    async def standard_download(*args, **kwargs):
+        raise FastTransferError("teste A usa transporte padrão")
+
+    async def standard_upload(*args, **kwargs):
+        raise FastTransferError("teste A usa transporte padrão")
+
+    monkeypatch.setattr(copier_module, "fast_download", standard_download)
+    monkeypatch.setattr(copier_module, "fast_upload", standard_upload)
     repo = Repository(tmp_path / "test.db")
     try:
         yield SimpleNamespace(repo=repo, temp=temp, root=tmp_path)

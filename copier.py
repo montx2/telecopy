@@ -51,6 +51,7 @@ from telethon.errors import (
 from telethon.helpers import generate_random_long
 
 from config import (
+    BUFFER_RAM_MAX,
     CAPTION_LIMIT,
     C,
     DAILY_LIMIT,
@@ -62,6 +63,12 @@ from config import (
 )
 from database import Repository, Status
 from dedup import DedupEngine, hash_message
+from fasttransfer import (
+    PART_SIZE as FAST_PART_SIZE,
+    FastTransferPool,
+    fast_download,
+    fast_upload,
+)
 from filters import apply as filter_apply
 from i18n import t
 from utils import Fmt, daily_limit, logger
@@ -670,6 +677,7 @@ class Copier:
         self._flood_penalty = 0.0
         self._mirror_locks: Dict[Any, asyncio.Lock] = {}
         self._upload_gate: Optional[asyncio.Semaphore] = None
+        self._transfer_pool: Optional[FastTransferPool] = None
         # Origem protegida derruba o forward para referência sem mexer nas prefs.
         self._force_reference = False
 
@@ -1392,6 +1400,13 @@ class Copier:
         budget = temp_budget_bytes(float(getattr(self.cfg, "max_tmp_gb", 8.0)))
         window = TransferWindow(items, lookahead, budget)
         self._upload_gate = asyncio.Semaphore(max(1, MAX_WORKERS_UP))
+        if getattr(self.cfg, "fast_transfer", True) and self.cfg.delivery == "upload":
+            max_total = min(int(getattr(self.cfg, "max_total_connections", 12)),
+                            max(1, BUFFER_RAM_MAX // FAST_PART_SIZE))
+            self._transfer_pool = FastTransferPool(
+                self.client, max_total_connections=max_total,
+                connections_per_file=int(getattr(self.cfg, "connections_per_file", 4)),
+            )
 
         async def downloader() -> None:
             while not self._stop:
@@ -1682,6 +1697,9 @@ class Copier:
                 if isinstance(payload, dict):
                     self._cleanup(payload.get("plan", []))
             ready.clear()
+            if self._transfer_pool is not None:
+                await self._transfer_pool.close()
+                self._transfer_pool = None
 
     def _is_duplicate(self, messages: List[Any], dest_id: int) -> bool:
         """True quando o conteúdo (mídia/texto) já foi enviado para este destino."""
@@ -1788,8 +1806,8 @@ class Copier:
             try:
                 for attempt in range(1, attempts + 1):
                     try:
-                        downloaded = await self.client.download_media(
-                            msg, file=str(temp_path), progress_callback=callback
+                        downloaded = await self._download_media(
+                            msg, str(temp_path), callback, source=source, entry=entry,
                         )
                         break
                     except FloodWaitError as exc:
@@ -2270,11 +2288,55 @@ class Copier:
         finally:
             progress.remove_transfer(task_id)
 
+    async def _download_media(self, msg: Any, path: str, callback,
+                              source: Any = None,
+                              entry: Optional[Dict[str, Any]] = None) -> Any:
+        """Caminho rápido com fallback transparente para o Telethon padrão."""
+        pool = self._transfer_pool
+        if pool is not None and getattr(self.cfg, "fast_transfer", True):
+            async def refresh():
+                if source is None or not hasattr(self.client, "get_messages"):
+                    return None
+                refreshed = await self.client.get_messages(source, ids=msg.id)
+                if refreshed is not None and getattr(refreshed, "media", None) is not None:
+                    if entry is not None:
+                        entry["msg"] = refreshed
+                    return refreshed
+                return None
+
+            try:
+                return await fast_download(
+                    pool, msg, path, refresh=refresh,
+                    progress_callback=callback, on_flood=self._handle_flood,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"Download rápido msg {msg.id} falhou; fallback padrão: {exc}")
+        return await self.client.download_media(msg, file=path, progress_callback=callback)
+
     async def _upload_file(self, entry: Dict[str, Any], progress_callback=None):
-        """Ponto único de upload cru; a etapa B substitui apenas este transporte."""
+        """Upload cru rápido com fallback para upload_file do Telethon."""
+        file_name = original_filename(entry["msg"], entry["media_type"])
+        pool = self._transfer_pool
+        if pool is not None and getattr(self.cfg, "fast_transfer", True):
+            try:
+                handle = await fast_upload(
+                    pool, entry["path"], file_name,
+                    progress_callback=progress_callback, on_flood=self._handle_flood,
+                )
+                # Metadado local para diagnóstico/fakes; não faz parte do TL.
+                try:
+                    handle.path = entry["path"]
+                except Exception:
+                    pass
+                return handle
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"Upload rápido msg {entry['msg'].id} falhou; fallback padrão: {exc}")
         return await self.client.upload_file(
-            entry["path"], file_name=original_filename(entry["msg"], entry["media_type"]),
-            progress_callback=progress_callback,
+            entry["path"], file_name=file_name, progress_callback=progress_callback,
         )
 
     def _uploaded_input_media(self, entry: Dict[str, Any], uploaded) -> Any:

@@ -1,5 +1,5 @@
 # TELECOPY — dependências de execução
-telethon>=1.36.0
+telethon==1.45.0  # fixado: fasttransfer usa APIs internas de sender/exportação
 cryptography>=42.0.0
 psutil>=5.9.0
 rich>=13.7.0
