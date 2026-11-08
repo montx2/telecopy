@@ -293,6 +293,8 @@ e sugere usar um destino existente.
 | `3` Fila de repetição | Mensagens que falharam e podem ser reenviadas agora |
 | `4` Deduplicação | Estado das 3 camadas anti-duplicata |
 | `5` Manutenção | Limpar temporários, backup do banco, remover histórico antigo, compactar |
+| `6` Recuperar lacunas | Edita marcadores pendentes com o conteúdo real, sem criar mensagem nova |
+| `7` Verificar ordem | Compara `msg_id × dest_msg_id` por tópico, offline, sem enviar nada |
 
 **Configurações**
 
@@ -310,7 +312,12 @@ e sugere usar um destino existente.
 | `a` Sufixo do clone | Texto anexado ao título da origem (padrão ` (Clone)`; `-` remove) |
 | `f` Copiar foto | Copia a foto de perfil da origem ao criar um clone |
 | `k` Copiar após criar | Se desligado, o clone automático só cria a estrutura |
-| `b` Apagar histórico | Zera checkpoints e dedup (útil para recomeçar do zero) |
+| `h` Reservar posição | Liga/desliga o marcador de posição em falhas |
+| `d` Entrega de mídia | `reference` (sem download/upload), `upload` ou `forward` |
+| `s` Cópia no servidor | Prefere referências do servidor quando a entrega é por referência |
+| `o` Política de falha | `placeholder` reserva e segue; `abort` pergunta `[r]/[p]/[a]` |
+| `m` Retentativas | Tentativas extras por item antes da política de falha (0–10) |
+| `b` Apagar histórico | Zera checkpoints, dedup e reservas (útil para recomeçar do zero) |
 | `c` Redefinir credenciais | Apaga login e credenciais para configurar de novo |
 
 ---
@@ -323,10 +330,16 @@ começar. Ao rodar de novo no mesmo par origem → destino:
 1. O programa lê os checkpoints e **descarta tudo o que já foi enviado**.
 2. Mensagens que falharam aparecem na **Fila de repetição** (Ferramentas → 3),
    com a opção de tentar novamente na hora.
-3. O programa evita reenviar o que já tem checkpoint concluído. Em uma queda
-   exatamente entre o envio e a gravação do checkpoint, o Telegram pode ter
-   aceitado a mensagem sem o TELECOPY receber a confirmação; nesse caso raro a
-   retomada pode duplicar o item. Confira o destino antes de apagar checkpoints.
+3. O programa evita reenviar o que já tem checkpoint concluído, pulado ou
+   reservado por marcador. Antes de enviar, um *preflight* por tópico aborta com
+   `order.violation` se encontrar uma posição resolvida depois de uma posição
+   não resolvida no mesmo tópico.
+
+Exactly-once absoluto através de `kill -9` não é prometido: existe uma janela
+entre o Telegram aceitar uma mensagem e o SQLite gravar a confirmação. A
+contratualística aqui é **detectar e abortar**: se o estado ficar ambíguo ou já
+houver violação de ordem, a cópia para e sugere reconstruir o tópico/destino em
+vez de “consertar” silenciosamente acrescentando mensagens fora de ordem.
 
 Para **recomeçar do zero** em um par: Configurações → `b`.
 
@@ -344,21 +357,73 @@ um segundo marcador para o mesmo item.
 Para preencher as lacunas use `[5] Ferramentas → [6] Recuperar lacunas` (ou o caminho
 legado `[5] → [3] Reprocessar falhas`). A recuperação **edita a mesma mensagem** do
 destino com a mídia/legenda real, mantendo a posição; edições não consomem limite
-diário. Legendas maiores que 1024 unidades UTF-16 são editadas no primeiro bloco e o
-restante é enviado como continuações de texto no mesmo tópico — essas continuações
-contam no limite diário e ficam no fim da sequência, enquanto a mídia permanece na
-posição original. Se a origem não tiver mais a mensagem, o conteúdo for não suportado
+diário e nunca criam uma mensagem nova para o item reservado. Quando a legenda
+estoura o limite, as continuações já foram **pré-reservadas na criação do marcador**
+(tabela aditiva `placeholder_parts`): a recuperação edita o marcador e os slots
+existentes, na ordem. Esses slots contam no limite diário no momento da reserva, não
+na recuperação. Se a origem não tiver mais a mensagem, o conteúdo for não suportado
 ou a edição falhar definitivamente, o marcador vira `❌ Conteúdo indisponível` com o
 motivo real; nunca fica um buraco invisível.
 
-Observações: álbuns são recuperados **item a item** (mensagem avulsa) para preservar a
-posição do marcador; não reagrupamos o álbum. O modo estrito de pré-reserva para
-grandes mídias ficou pendente para não arriscar o fluxo concorrente de envio atual. A
-tabela `placeholders` é aditiva e compatível com bancos da v4.0; `[b] Zerar dados`
-também apaga as reservas. Existe uma janela rara de crash entre a confirmação de um
-marcador pelo Telegram e a gravação no SQLite; a chave única protege reexecuções
-normais, mas não é uma garantia exactly-once distribuída. Com a reserva desligada, o
-comportamento de falha é o da versão anterior.
+Álbuns com falha parcial são divididos em **segmentos contíguos**: o que já foi
+confirmado permanece, o marcador ocupa a posição da mensagem que falhou e o restante
+do álbum só segue depois dessa posição reservada. A recuperação de mídia por
+referência tenta editar com `InputMedia`; em `FileReferenceExpired/Invalid` atualiza
+a referência uma vez e, se preciso, cai para upload forte — sempre editando o slot
+reservado. Marcadores legados sem slots pré-reservados não são “consertados” com
+mensagens novas: a recuperação reporta falha/irrecuperável em vez de furar a ordem.
+
+As tabelas `placeholders` e `placeholder_parts` são aditivas e idempotentes,
+compatíveis com bancos da v4.0; não há `DROP TABLE` destrutivo. `[b] Zerar dados`
+também apaga as reservas. Com a reserva desligada (`[h]`), o comportamento de falha
+é o opt-out legado explícito.
+
+### 6.2 Entrega por referência e ordem por tópico
+
+O caminho normal de mídia agora reutiliza referências do servidor
+(`telethon.utils.get_input_media` → `send_file(file=InputMedia)` /
+`SendMediaRequest` / `SendMultiMediaRequest`). Não há `download_media` nem
+`upload_file` nesse caminho. `RunConfig.delivery` aceita `reference|upload|forward`;
+`server_copy` liga/desliga a preferência por referência; `[d]` e `[s]` persistem em
+`prefs`. `[5] Modo de envio` continua sincronizado com `forward`.
+
+Invariantes implementados:
+
+- por par origem→destino **e por tópico de destino**, os `msg_id` de origem
+  entregues/reservados têm `dest_msg_id` estritamente crescente;
+- falha transitória nunca avança: até `max_retries + 1` tentativas, backoff
+  2/4/8/16/32 s, FloodWait espera `seconds + 3`;
+- falha permanente reserva o marcador antes de avançar (`on_failure=placeholder`)
+  ou pausa/pergunta (`abort`: `[r]`etomar no ponto, `[p]`osition/reservar, `[a]`bortar);
+- `DONE` só com ID de destino confirmado; dedup só para conteúdo entregue;
+  filtros/skips exigem confirmação e contam como `intentional_skips`;
+- álbuns por referência em blocos de 10 com IDs retornados estritamente crescentes;
+  cascata referência → refresh único → upload forte;
+- espelho serializado por tópico (`_mirror_locks`); multi-destino já era sequencial;
+- métricas `server_copies`, `bytes_saved`, `intentional_skips`; limite diário por
+  envio confirmado, incluindo marcadores e slots pré-reservados.
+
+Benchmark fake (100 vídeos de 8192 B, workers 8, delay 0,1 s, dedup off, sem rede):
+
+| Métrica | Antes `4e7994f` | Depois `4d6a852` |
+|---|---:|---:|
+| Tempo decorrido | 10,120 s | 10,136 s |
+| Downloads | 100 | 0 |
+| Envios com arquivo local | 100 | 0 |
+| `server_copies` | 0 | 100 |
+| Bytes transferidos | 819200 | 0 |
+| `bytes_saved` | 0 | 819200 |
+| Concluídas / erros | 100 / 0 | 100 / 0 |
+
+O fake limita payloads a 8192 B e não tem latência real; o tempo é dominado pelo
+delay artificial e pelo pipeline ordenado. **Não é uma promessa de velocidade em
+canal real.** Nenhum teste com credenciais/canal real foi executado nesta entrega.
+
+Riscos conhecidos: o servidor pode recusar uma referência (proteção, DC, expiração);
+a cascata cobre isso com refresh/upload. Regras de edição variam por conteúdo/idade;
+erros de edição são tratados sem derrubar o lote. Histórico já fora de ordem não é
+reparado por edição — o verificador `[5] → 7` detecta e a reparação exige reconstruir
+o tópico/destino.
 
 ---
 
@@ -479,6 +544,23 @@ O clone automático tem suíte própria (`tests/test_auto_clone.py`): canal, gru
 fórum criados do zero, reuso de clone existente, recusa de clone sem admin,
 falha parcial com retomada, exclusão apenas do canal criado, foto com falha e
 `[A]` nos três modos.
+
+WP1/WP2 acrescentam `tests/test_ordem.py` e `tests/test_ui_order.py`. Estado
+verificado nesta entrega: **161 passed** (`pytest -q`, suíte isolada, sem rede).
+Pyflakes: apenas o achado pré-existente de `split_text` duplicado em `copier.py`.
+
+| Invariante / recurso | Teste representativo |
+|---|---|
+| Mídia por referência sem download | `test_video_por_referencia_sem_download` |
+| Cascata refresh/upload e álbuns | `tests/test_ordem.py` (referência, fallback, álbum parcial) |
+| Transitório não avança | `test_falha_transitoria_nao_avanca` |
+| 200 mensagens com falhas aleatórias | `test_ordem_com_200_mensagens_e_falhas_aleatorias` |
+| Retomada após interrupção | `test_retomada_apos_interrupcao_continua_na_ordem` |
+| Preflight detecta violação | `test_detecta_violacao_de_ordem_existente` |
+| Fórum: ordem independente por tópico | `test_forum_ordem_independente_por_topico` |
+| Espelho serializado | `test_espelho_dez_mensagens_em_ordem` |
+| Prompt de aborto `[r]` | `test_abort_prompt_retoma_no_mesmo_ponto` |
+| Verificador offline `[5] → 7` | `test_tool_order_reporta_violacao` |
 
 Também é possível rodar sem pytest:
 
