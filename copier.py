@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import re
 import time
@@ -243,6 +244,21 @@ def _entities(msg):
     return getattr(msg, "entities", None)
 
 
+def _entities_json(msg) -> str:
+    """Entidades tipadas para JSON, sem pickle/eval nem perda de custom emoji."""
+    items = []
+    for entity in _entities(msg) or []:
+        if hasattr(entity, "to_dict"):
+            data = entity.to_dict()
+            data.pop("_", None)
+        else:
+            data = {k: v for k, v in getattr(entity, "__dict__", {}).items()
+                    if not k.startswith("_")}
+        data["type"] = type(entity).__name__
+        items.append(data)
+    return json.dumps(items, ensure_ascii=False)
+
+
 def add_signature(caption: str, signature: str) -> str:
     if not signature:
         return caption
@@ -294,6 +310,7 @@ class TransferStats:
     indexed: int = 0
     previously_done: int = 0
     unsupported: int = 0
+    placeholders: int = 0
     interrupted: bool = False
     complete: bool = False
     topics: List[Dict[str, Any]] = field(default_factory=list)
@@ -316,6 +333,7 @@ class TransferStats:
             "indexed": self.indexed,
             "previously_done": self.previously_done,
             "unsupported": self.unsupported,
+            "placeholders": self.placeholders,
             "interrupted": self.interrupted,
             "complete": self.complete,
             "topics": self.topics,
@@ -1039,7 +1057,24 @@ class Copier:
                     raise
                 except Exception as exc:
                     logger.exception(f"Falha ao preparar item {index}: {exc}")
-                    payload = None
+                    # Não perde o motivo nem as mensagens: o sender ainda pode
+                    # reservar a posição pelo caminho comum de _send.
+                    reason = self._explain(exc)
+                    plan = []
+                    for msg in messages:
+                        has_media, media_type, size = media_info(msg)
+                        raw_media = getattr(msg, "media", None)
+                        unsupported = (
+                            not has_media and raw_media is not None
+                            and type(raw_media).__name__ not in {"MessageMediaWebPage", "MessageMediaEmpty"}
+                        )
+                        plan.append({
+                            "msg": msg, "media_type": media_type, "size": size,
+                            "path": None, "downloadable": False, "native": False,
+                            "failed": True, "unsupported": unsupported, "reason": reason,
+                        })
+                    payload = {"index": index, "plan": plan, "messages": messages,
+                               "prepare_error": reason}
                 finally:
                     in_queue.task_done()
                     # garante que o sender nunca fique esperando este índice
@@ -1118,7 +1153,8 @@ class Copier:
                     if error is not None:
                         logger.error(f"Erro no envio do item {index}: {error}")
                         self._mark_failed(payload["messages"], source_id, dest_id, stats, error,
-                                          dest_topic=payload.get("dest_topic"))
+                                          dest_topic=payload.get("dest_topic"),
+                                          skip_ids=payload.get("reserved_ids"))
                         reason = self._explain(error)
                         if not first_failure_shown:
                             print(f"\n  {C.RED}✗{C.RST}  "
@@ -1286,6 +1322,83 @@ class Copier:
 
         return {"index": index, "plan": plan, "messages": messages}
 
+    def _placeholder_caption(self, msg) -> Tuple[str, str]:
+        """Legenda final completa para guardar; o aviso pode não caber junto."""
+        text = _caption(msg)
+        if self.cfg.signature:
+            text = f"{text}\n\n{self.cfg.signature}" if text else self.cfg.signature
+        return text, _entities_json(msg)
+
+    async def _reserve_placeholder(
+        self, entry: Dict[str, Any], source_id: int, dest_id: int,
+        dest, dest_topic: Optional[int], reply_to: Optional[int],
+        stats: TransferStats, reason: str,
+    ) -> Optional[int]:
+        """Cria uma reserva na posição atual; nunca registra conteúdo no dedup."""
+        msg = entry["msg"]
+        if self.repo.get_placeholder(source_id, dest_id, msg.id) is not None:
+            return None
+        caption, entities_json = self._placeholder_caption(msg)
+        unsupported = bool(entry.get("unsupported"))
+        key = "placeholder.unrecoverable" if unsupported else "placeholder.pending"
+        warning = t(key, id=msg.id, reason=reason)
+        if utf16_len(warning) > CAPTION_LIMIT:
+            warning = warning[:_cut_index(warning, CAPTION_LIMIT)]
+        combined = f"{caption}\n\n{warning}" if caption else warning
+        if caption and utf16_len(combined) <= CAPTION_LIMIT:
+            text, entities = combined, _entities(msg) or None
+        else:
+            text, entities = warning, None
+        try:
+            created_id = None
+            for attempt in range(3):
+                try:
+                    self._check_limit()
+                    created_id = await self._send_chunk(dest, text, entities, dest_topic, reply_to)
+                    break
+                except FloodWaitError as exc:
+                    if attempt == 2:
+                        raise
+                    await self._handle_flood(exc)
+            if created_id is None:
+                raise RuntimeError(t("copy.send_unconfirmed"))
+            self.repo.add_placeholder(
+                source_id, dest_id, msg.id, created_id, dest_topic=dest_topic,
+                caption=caption, entities=entities_json, reason=reason,
+                state="unrecoverable" if unsupported else "open",
+            )
+            daily_limit.add(1)
+            stats.placeholders += 1
+            return int(created_id)
+        except DailyLimitReached:
+            raise
+        except Exception as exc:
+            logger.error(f"Reserva de posição msg {msg.id}: {exc}")
+            if self._is_fatal_send_error(exc):
+                self._stop = True
+            return None
+
+    async def _record_failed_entry(
+        self, entry: Dict[str, Any], source_id: int, dest_id: int,
+        dest, dest_topic: Optional[int], reply_to: Optional[int],
+        stats: TransferStats, payload: Dict[str, Any], reason: str,
+    ) -> None:
+        msg = entry["msg"]
+        dest_msg_id = None
+        if self.cfg.placeholder:
+            dest_msg_id = await self._reserve_placeholder(
+                entry, source_id, dest_id, dest, dest_topic, reply_to, stats, reason
+            )
+        stats.errors += 1
+        if entry.get("unsupported"):
+            stats.unsupported += 1
+        if stats.first_error is None:
+            stats.first_error = reason
+        self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.ERROR,
+                                    dest_msg_id=dest_msg_id, dest_topic=dest_topic)
+        self.repo.add_failure(source_id, dest_id, msg.id, reason)
+        payload.setdefault("reserved_ids", set()).add(msg.id)
+
     # ── Envio ───────────────────────────────────────────────────────────────
 
     async def _send(self, payload: Dict[str, Any], source_id: int, dest_id: int,
@@ -1305,43 +1418,51 @@ class Copier:
         ]
         sent_ids: Dict[int, int] = {}
 
-        if len(media_entries) > 1:
-            ids = await self._send_album(media_entries, dest, dest_topic, progress, stats, reply_to)
-            for entry, created_id in zip(media_entries, ids):
-                sent_ids[entry["msg"].id] = created_id
-        elif len(media_entries) == 1:
-            entry = media_entries[0]
-            sent_ids[entry["msg"].id] = await self._send_media(
-                entry, dest, dest_topic, progress, stats, reply_to
-            )
+        try:
+            if len(media_entries) > 1:
+                ids = await self._send_album(media_entries, dest, dest_topic, progress, stats, reply_to)
+                for entry, created_id in zip(media_entries, ids):
+                    sent_ids[entry["msg"].id] = created_id
+            elif len(media_entries) == 1:
+                entry = media_entries[0]
+                sent_ids[entry["msg"].id] = await self._send_media(
+                    entry, dest, dest_topic, progress, stats, reply_to
+                )
 
-        for entry in native_entries:
-            sent_ids[entry["msg"].id] = await self._send_native(
-                entry, dest, dest_topic, reply_to, stats
-            )
+            for entry in native_entries:
+                sent_ids[entry["msg"].id] = await self._send_native(
+                    entry, dest, dest_topic, reply_to, stats
+                )
 
-        for entry in text_entries:
-            sent_ids[entry["msg"].id] = await self._send_text(
-                entry["msg"], dest, dest_topic, reply_to
-            )
+            for entry in text_entries:
+                sent_ids[entry["msg"].id] = await self._send_text(
+                    entry["msg"], dest, dest_topic, reply_to, entry=entry
+                )
+        except DailyLimitReached:
+            raise
+        except Exception as exc:
+            # Só reserva quem ainda não tem ID confirmado. A exceção original
+            # continua governando FloodWait/parada fatal no sender.
+            if self.cfg.placeholder:
+                reason = self._explain(exc)
+                for entry in plan:
+                    msg = entry["msg"]
+                    if entry.get("failed") or entry.get("dest_msg_id") or msg.id in sent_ids:
+                        continue
+                    entry["failed"] = True
+                    entry["reason"] = reason
+                    await self._record_failed_entry(
+                        entry, source_id, dest_id, dest, dest_topic, reply_to,
+                        stats, payload, reason,
+                    )
+            raise
 
-        for entry in failed_entries:
-            msg = entry["msg"]
-            reason = entry.get("reason") or t("copy.prepare_failure")
-            stats.errors += 1
-            if entry.get("unsupported"):
-                stats.unsupported += 1
-            if stats.first_error is None:
-                stats.first_error = reason
-            self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.ERROR,
-                                        dest_topic=dest_topic)
-            self.repo.add_failure(source_id, dest_id, msg.id, reason)
-
+        sent_count = 0
         for entry in plan:
             if entry.get("failed"):
                 continue
             msg = entry["msg"]
-            created_id = sent_ids.get(msg.id)
+            created_id = sent_ids.get(msg.id) or entry.get("dest_msg_id")
             if created_id is None:
                 raise RuntimeError(t("copy.send_unconfirmed"))
             content_hash = hash_message(msg)
@@ -1352,13 +1473,20 @@ class Copier:
                                 entry["media_type"], dest_msg_id=created_id,
                                 dest_topic=dest_topic)
             self.repo.clear_failure(source_id, dest_id, msg.id)
+            sent_count += 1
 
-        sent_count = len(plan) - len(failed_entries)
         stats.done += sent_count
         if sent_count:
             daily_limit.add(sent_count)
         if len(media_entries) > 1:
             stats.albums += 1
+
+        for entry in failed_entries:
+            reason = entry.get("reason") or t("copy.prepare_failure")
+            await self._record_failed_entry(
+                entry, source_id, dest_id, dest, dest_topic, reply_to,
+                stats, payload, reason,
+            )
 
     def _parts(self, msg, limit: int) -> List[Tuple[str, List[Any]]]:
         text = _caption(msg)
@@ -1498,6 +1626,7 @@ class Copier:
         finally:
             progress.remove_transfer(task_id)
 
+        entry["dest_msg_id"] = created_id
         for chunk, entities in parts[1:]:
             await self._send_chunk(dest, chunk, entities, dest_topic, None)
         stats.bytes_uploaded += size
@@ -1539,7 +1668,10 @@ class Copier:
                 parsed = self.client._get_response_message(random_ids, response, peer)
                 if not isinstance(parsed, list) or len(parsed) != len(chunk):
                     raise RuntimeError(t("copy.send_unconfirmed"))
-                created_ids.extend(self._created_id(item) for item in parsed)
+                batch_ids = [self._created_id(item) for item in parsed]
+                created_ids.extend(batch_ids)
+                for entry, created_id in zip(chunk, batch_ids):
+                    entry["dest_msg_id"] = created_id
         finally:
             progress.remove_transfer(task_id)
 
@@ -1572,7 +1704,8 @@ class Copier:
         return self._created_id(result)
 
     async def _send_text(self, msg, dest, dest_topic,
-                         reply_to: Optional[int] = None) -> int:
+                         reply_to: Optional[int] = None,
+                         entry: Optional[Dict[str, Any]] = None) -> int:
         parts = self._parts(msg, MESSAGE_LIMIT)
         if not parts:
             raise RuntimeError(t("copy.unsupported_media", kind="empty"))
@@ -1583,6 +1716,8 @@ class Copier:
             )
             if first_id is None:
                 first_id = created_id
+                if entry is not None:
+                    entry["dest_msg_id"] = created_id
         return int(first_id)
 
     def _native_input_media(self, msg):
@@ -1656,6 +1791,7 @@ class Copier:
                 formatting_entities=entities or None, reply_to=reply_to,
             )
             created_id = self._created_id(result)
+        entry["dest_msg_id"] = created_id
         for chunk, chunk_entities in parts[1:]:
             await self._send_chunk(dest, chunk, chunk_entities, dest_topic, None)
         return created_id
@@ -1748,6 +1884,7 @@ class Copier:
         @self.client.on(events.NewMessage(chats=[source]))
         async def handler(event):  # noqa: ANN001
             msg = event.message
+            payload = None
             try:
                 if type(getattr(msg, "action", None)).__name__ == "MessageActionTopicCreate":
                     # Tópico novo na origem: replica a estrutura antes de
@@ -1790,10 +1927,14 @@ class Copier:
 
                 print(f"  {C.GREEN}›{C.RST} {t('mirror.new_msg', id=msg.id)}  "
                       f"{C.GRAY}({stats.done} {t('mirror.sent')}){C.RST}")
+            except DailyLimitReached as exc:
+                print(f"\n  {C.YELLOW}!{C.RST}  {exc}", flush=True)
             except FloodWaitError as exc:
                 await self._handle_flood(exc)
             except Exception as exc:
-                stats.errors += 1
+                already_recorded = bool(payload and msg.id in payload.get("reserved_ids", set()))
+                if not already_recorded:
+                    stats.errors += 1
                 logger.error(f"Espelho msg {msg.id}: {exc}")
                 print(f"  {C.RED}✗{C.RST} ID {msg.id}: {self._explain(exc)}")
 
@@ -1821,12 +1962,15 @@ class Copier:
 
     def _mark_failed(self, messages, source_id: int, dest_id: int,
                      stats: TransferStats, exc: Exception,
-                     dest_topic: Optional[int] = None) -> None:
+                     dest_topic: Optional[int] = None,
+                     skip_ids: Optional[set] = None) -> None:
         reason = self._explain(exc)
         if stats.first_error is None:
             stats.first_error = reason
         logger.error(f"Falha ao copiar {len(messages)} msg(s): {exc}")
         for msg in messages:
+            if skip_ids and msg.id in skip_ids:
+                continue
             stats.errors += 1
             self.repo.upsert_checkpoint(source_id, dest_id, msg.id, Status.ERROR,
                                         dest_topic=dest_topic)

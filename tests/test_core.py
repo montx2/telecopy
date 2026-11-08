@@ -776,7 +776,9 @@ def test_forum_repeticoes_nao_sao_descartadas() -> None:
 def test_midia_nao_suportada_nao_conclui() -> None:
     dice = type("MessageMediaDice", (), {})()
     messages = [FakeMessage(id=1, media=dice)]
-    result, client, repo = asyncio.run(_run_copy(messages, config=RunConfig(use_dedup=False)))
+    result, client, repo = asyncio.run(_run_copy(
+        messages, config=RunConfig(use_dedup=False, placeholder=False)
+    ))
     check(result["errors"] == 1 and result["unsupported"] == 1, "mídia não reproduzível é erro")
     check(not result["complete"], "cópia incompleta não é marcada como completa")
     check(not client.sent, "nada é enviado fingindo sucesso")
@@ -806,7 +808,8 @@ def test_retry_forum_usa_topico_salvo() -> None:
     client.register_entity(source)
     client.register_entity(dest)
     repo = Repository(_fresh_db("forum_retry"))
-    copier = Copier(client, repo=repo, config=RunConfig(workers=1, delay=0.1, use_dedup=False),
+    copier = Copier(client, repo=repo,
+                    config=RunConfig(workers=1, delay=0.1, use_dedup=False, placeholder=False),
                     rich_ok=False)
     first = asyncio.run(copier.run(source, dest, topic_map={1: 1, 11: 911}))
     check(first["errors"] == 1 and not first["complete"], "falha inicial registrada")

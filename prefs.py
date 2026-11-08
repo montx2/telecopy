@@ -22,6 +22,7 @@ _DEFAULTS: Dict[str, Any] = {
     "last_source_id": None,
     "last_dest_id": None,
     "check_updates": True,
+    "placeholder": True,
     "config": RunConfig().to_dict(),
     # Clone automático
     "clone_suffix": " (Clone)",
@@ -42,8 +43,13 @@ class Preferences:
         saved = read_json(self.path, {})
         if isinstance(saved, dict):
             merged = {**_DEFAULTS, **saved}
-            cfg = RunConfig.from_dict({**RunConfig().to_dict(), **(saved.get("config") or {})})
+            saved_config = saved.get("config") or {}
+            cfg_data = {**RunConfig().to_dict(), **saved_config}
+            if "placeholder" in saved:
+                cfg_data["placeholder"] = bool(saved["placeholder"])
+            cfg = RunConfig.from_dict(cfg_data)
             merged["config"] = cfg.to_dict()
+            merged["placeholder"] = cfg.placeholder
             self.data = merged
         return self.data
 
@@ -62,10 +68,14 @@ class Preferences:
 
     @property
     def config(self) -> RunConfig:
-        return RunConfig.from_dict(self.data.get("config") or {})
+        data = dict(self.data.get("config") or {})
+        if "placeholder" in self.data:
+            data["placeholder"] = bool(self.data["placeholder"])
+        return RunConfig.from_dict(data)
 
     def save_config(self, cfg: RunConfig) -> None:
         self.data["config"] = cfg.to_dict()
+        self.data["placeholder"] = cfg.placeholder
         self.save()
 
     @property

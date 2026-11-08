@@ -710,6 +710,7 @@ class RunConfig:
     signature: str = ""
     retry_failed: bool = True
     clean_failed_text: bool = True
+    placeholder: bool = True
 
     def __post_init__(self) -> None:
         self.delay = max(0.1, float(self.delay))
@@ -727,6 +728,7 @@ class RunConfig:
             "skip_text": self.skip_text,
             "signature": self.signature,
             "retry_failed": self.retry_failed,
+            "placeholder": self.placeholder,
         }
 
     @classmethod

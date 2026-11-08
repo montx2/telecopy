@@ -9,6 +9,7 @@ Tabelas
     sessions     metadados de cada execução
     stats        contadores agregados por sessão
     kv           preferências / estado interno
+    placeholders posições reservadas para conteúdo ainda não entregue
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import DB_FILE
+
+
+PLACEHOLDER_STATES = frozenset({"open", "recovered", "unrecoverable"})
 
 
 class Status(str, Enum):
@@ -133,6 +137,23 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS placeholders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id    INTEGER NOT NULL,
+    dest_id      INTEGER NOT NULL,
+    msg_id       INTEGER NOT NULL,
+    dest_msg_id  INTEGER NOT NULL,
+    dest_topic   INTEGER,
+    caption      TEXT,
+    entities     TEXT,
+    reason       TEXT,
+    state        TEXT NOT NULL DEFAULT 'open',
+    created_at   REAL NOT NULL DEFAULT 0,
+    updated_at   REAL NOT NULL DEFAULT 0,
+    UNIQUE (source_id, dest_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ph_pair ON placeholders (source_id, dest_id, state);
 """
 
 
@@ -228,7 +249,7 @@ class Repository:
             except sqlite3.Error as exc:  # pragma: no cover
                 ok = f"erro: {exc}"
             counts = {}
-            for table in ("checkpoints", "dedup", "processed", "sessions", "failures"):
+            for table in ("checkpoints", "dedup", "processed", "sessions", "failures", "placeholders"):
                 try:
                     counts[table] = conn.execute(
                         f"SELECT COUNT(*) FROM {table}"  # noqa: S608 - nomes fixos
@@ -379,7 +400,7 @@ class Repository:
         """Zera checkpoints/falhas/marcas apenas deste par origem→destino."""
         removed = 0
         with self._db() as conn:
-            for table in ("checkpoints", "failures", "processed"):
+            for table in ("checkpoints", "failures", "processed", "placeholders"):
                 cur = conn.execute(
                     f"DELETE FROM {table} WHERE source_id=? AND dest_id=?",
                     (source_id, dest_id),
@@ -627,6 +648,124 @@ class Repository:
             cur = conn.execute("DELETE FROM failures")
             return cur.rowcount or 0
 
+    # ── reservas de posição ───────────────────────────────────────────────────
+
+    def add_placeholder(
+        self,
+        source_id: int,
+        dest_id: int,
+        msg_id: int,
+        dest_msg_id: int,
+        dest_topic: Optional[int] = None,
+        caption: Optional[str] = None,
+        entities: Optional[str] = None,
+        reason: str = "",
+        state: str = "open",
+    ) -> int:
+        """Vincula uma posição reservada; não sobrescreve vínculo existente."""
+        if state not in PLACEHOLDER_STATES:
+            raise ValueError(f"invalid placeholder state: {state}")
+        now = time.time()
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO placeholders
+                    (source_id, dest_id, msg_id, dest_msg_id, dest_topic,
+                     caption, entities, reason, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_id, dest_id, msg_id) DO NOTHING
+                """,
+                (source_id, dest_id, msg_id, dest_msg_id, dest_topic,
+                 caption, entities, str(reason)[:300], state, now, now),
+            )
+            row = conn.execute(
+                "SELECT id FROM placeholders WHERE source_id=? AND dest_id=? AND msg_id=?",
+                (source_id, dest_id, msg_id),
+            ).fetchone()
+        return int(row["id"])
+
+    def get_placeholder(
+        self, source_id: int, dest_id: int, msg_id: int
+    ) -> Optional[Dict[str, Any]]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM placeholders WHERE source_id=? AND dest_id=? AND msg_id=?",
+                (source_id, dest_id, msg_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def open_placeholders(
+        self, source_id: Optional[int] = None, dest_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM placeholders WHERE state='open'"
+        params: List[Any] = []
+        if source_id is not None:
+            query += " AND source_id=?"
+            params.append(source_id)
+        if dest_id is not None:
+            query += " AND dest_id=?"
+            params.append(dest_id)
+        query += " ORDER BY source_id, dest_id, msg_id"
+        with self._db() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    def set_placeholder_state(
+        self, source_id: int, dest_id: int, msg_id: int,
+        state: str, reason: Optional[str] = None,
+    ) -> bool:
+        if state not in PLACEHOLDER_STATES:
+            raise ValueError(f"invalid placeholder state: {state}")
+        with self._db() as conn:
+            cur = conn.execute(
+                """
+                UPDATE placeholders
+                   SET state=?, reason=COALESCE(?, reason), updated_at=?
+                 WHERE source_id=? AND dest_id=? AND msg_id=?
+                """,
+                (state, str(reason)[:300] if reason is not None else None,
+                 time.time(), source_id, dest_id, msg_id),
+            )
+        return (cur.rowcount or 0) > 0
+
+    def placeholder_stats(
+        self, source_id: Optional[int] = None, dest_id: Optional[int] = None
+    ) -> Dict[str, int]:
+        query = """
+            SELECT COALESCE(SUM(state='open'), 0)          AS open,
+                   COALESCE(SUM(state='recovered'), 0)     AS recovered,
+                   COALESCE(SUM(state='unrecoverable'), 0) AS unrecoverable
+              FROM placeholders
+        """
+        params: List[Any] = []
+        conditions = []
+        if source_id is not None:
+            conditions.append("source_id=?")
+            params.append(source_id)
+        if dest_id is not None:
+            conditions.append("dest_id=?")
+            params.append(dest_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        with self._db() as conn:
+            row = conn.execute(query, params).fetchone()
+        return {key: int(row[key] or 0) for key in ("open", "recovered", "unrecoverable")}
+
+    def placeholder_pairs(self) -> List[Dict[str, Any]]:
+        """Resumo por par, incluindo pares que já não têm reservas abertas."""
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_id, dest_id,
+                       COALESCE(SUM(state='open'), 0)          AS open,
+                       COALESCE(SUM(state='recovered'), 0)     AS recovered,
+                       COALESCE(SUM(state='unrecoverable'), 0) AS unrecoverable
+                  FROM placeholders
+                 GROUP BY source_id, dest_id
+                 ORDER BY source_id, dest_id
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── chave/valor ───────────────────────────────────────────────────────────
 
     def set_kv(self, key: str, value: str) -> None:
@@ -682,7 +821,7 @@ class Repository:
     def reset_all(self) -> None:
         """Apaga o histórico de cópias (mantém apenas as preferências)."""
         with self._db() as conn:
-            for table in ("checkpoints", "dedup", "processed", "failures"):
+            for table in ("checkpoints", "dedup", "processed", "failures", "placeholders"):
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608
             # Mapas de tópicos são estado de cópia; sem isso, "recomeçar do
             # zero" ainda reutilizaria associações antigas.
