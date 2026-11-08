@@ -2480,6 +2480,7 @@ class Copier:
         source_id = int(getattr(source, "id", 0) or 0)
         dest_id = int(getattr(dest, "id", 0) or 0)
         stats = TransferStats(planned=len(msg_ids))
+        self._stop = False
         self.dedup.warm_up(dest_id, limit=200_000)
         quiet = ProgressDisplay(0, "", False)
 
@@ -2527,10 +2528,35 @@ class Copier:
                                 "reply_to": reply_to})
                 errors_before = stats.errors
                 try:
-                    self._check_limit()
-                    await self._send(payload, source_id, dest_id, stats, quiet)
+                    error: Optional[Exception] = None
+                    attempts = self.cfg.max_retries + 1
+                    for attempt in range(attempts):
+                        try:
+                            self._check_limit()
+                            await self._send(payload, source_id, dest_id, stats, quiet)
+                            error = None
+                            break
+                        except DailyLimitReached:
+                            raise
+                        except FloodWaitError as exc:
+                            error = exc
+                            await self._handle_flood(exc)
+                            if attempt < attempts - 1:
+                                continue
+                        except Exception as exc:
+                            error = exc
+                            if self._is_transient(exc) and attempt < attempts - 1:
+                                await asyncio.sleep(2 ** (attempt + 1))
+                                continue
+                            break
+                    if error is not None:
+                        await self._apply_failure_policy(
+                            payload, source_id, dest_id, dest, target_topic, stats, error
+                        )
                 finally:
                     self._cleanup(payload.get("plan", []))
+                if self._stop:
+                    break
                 if stats.errors == errors_before:
                     self.repo.clear_failure(source_id, dest_id, msg_id)
                 await asyncio.sleep(self.delay)
@@ -2543,10 +2569,66 @@ class Copier:
             except Exception as exc:
                 logger.error(f"Retry msg {msg_id}: {exc}")
                 self.repo.add_failure(source_id, dest_id, msg_id, self._explain(exc))
+                # Sem checkpoint a pendência ficaria invisível para
+                # order_pending_before e o próximo id abriria buraco.
+                self.repo.upsert_checkpoint(source_id, dest_id, msg_id, Status.ERROR)
                 stats.errors += 1
         return stats.as_result()
 
     # ── Espelho em tempo real ───────────────────────────────────────────────
+
+    async def _apply_failure_policy(self, payload: Dict[str, Any], source_id: int,
+                                    dest_id: int, dest, dest_topic: Optional[int],
+                                    stats: TransferStats, error: Exception) -> None:
+        """Reserva a posição ou para; nunca deixa buraco para o próximo item.
+
+        Compartilhada por espelho e fila de repetição, que não passam pelo
+        sender do _copy_loop. Sem isso a posição ficava sem checkpoint nem
+        marcador e o item seguinte era entregue fora de ordem.
+        """
+        reason = self._explain(error)
+        if stats.first_error is None:
+            stats.first_error = reason
+        reserved = payload.get("reserved_ids", set())
+        confirmed = {e["msg"].id for e in payload.get("plan", []) if e.get("dest_msg_id")}
+        unreserved = [m for m in payload["messages"]
+                      if m.id not in reserved and m.id not in confirmed]
+        if not unreserved:
+            return
+
+        action = ("p" if self.cfg.placeholder and self.cfg.on_failure == "placeholder" else "a")
+        if self.cfg.on_failure == "abort":
+            action = self._prompt_failure(reason)
+
+        if action == "r":
+            try:
+                self._check_limit()
+                await self._send(payload, source_id, dest_id, stats, ProgressDisplay(0, "", False))
+                return
+            except DailyLimitReached:
+                raise
+            except Exception as retry_exc:
+                logger.error(f"Retomada manual no espelho: {retry_exc}")
+                error = retry_exc
+        elif action == "p" and self.cfg.placeholder:
+            try:
+                for entry in payload.get("plan", []):
+                    if entry["msg"].id in reserved or entry.get("dest_msg_id"):
+                        continue
+                    entry["failed"] = True
+                    entry["reason"] = reason
+                    await self._record_failed_entry(
+                        entry, source_id, dest_id, dest, dest_topic,
+                        payload.get("reply_to"), stats, payload, reason,
+                    )
+                return
+            except Exception as exc:
+                logger.error(f"Reserva de posição após falha: {exc}")
+                stats.first_error = t("order.reserve_failed")
+                error = exc
+
+        self._mark_failed(unreserved, source_id, dest_id, stats, error, dest_topic=dest_topic)
+        self._stop = True
 
     async def _mirror_topic(self, msg, dest_topic: Optional[int],
                             topic_map: Optional[Dict[int, int]],
@@ -2589,6 +2671,8 @@ class Copier:
         async def handler(event):  # noqa: ANN001
             msg = event.message
             payload = None
+            if self._stop:
+                return
             try:
                 if type(getattr(msg, "action", None)).__name__ == "MessageActionTopicCreate":
                     # Tópico novo na origem: replica a estrutura antes de
@@ -2611,6 +2695,10 @@ class Copier:
                     if self.cfg.use_dedup and self.dedup.check(content_hash, dest_id):
                         stats.skipped += 1
                         stats.intentional_skips += 1
+                        # Skip intencional também resolve a posição no banco.
+                        self.repo.mark_processed(source_id, msg.id, None, dest_id)
+                        self.repo.upsert_checkpoint(source_id, dest_id, msg.id,
+                                                    Status.SKIPPED, dest_topic=target_topic)
                         return
 
                     silent = ProgressDisplay(0, "", False)
@@ -2628,10 +2716,37 @@ class Copier:
                         ),
                     })
                     try:
-                        await self._send(payload, source_id, dest_id, stats, silent)
+                        error: Optional[Exception] = None
+                        attempts = self.cfg.max_retries + 1
+                        for attempt in range(attempts):
+                            try:
+                                self._check_limit()
+                                await self._send(payload, source_id, dest_id, stats, silent)
+                                error = None
+                                break
+                            except DailyLimitReached:
+                                raise
+                            except FloodWaitError as exc:
+                                error = exc
+                                await self._handle_flood(exc)
+                                if attempt < attempts - 1:
+                                    continue
+                            except Exception as exc:
+                                error = exc
+                                if self._is_transient(exc) and attempt < attempts - 1:
+                                    await asyncio.sleep(2 ** (attempt + 1))
+                                    continue
+                                break
+                        if error is not None:
+                            await self._apply_failure_policy(
+                                payload, source_id, dest_id, dest, target_topic, stats, error
+                            )
                     finally:
                         self._cleanup(payload.get("plan", []))
 
+                if self._stop:
+                    print(f"\n  {C.YELLOW}!{C.RST}  {t('mirror.stopped')}", flush=True)
+                    return
                 print(f"  {C.GREEN}›{C.RST} {t('mirror.new_msg', id=msg.id)}  "
                       f"{C.GRAY}({stats.done} {t('mirror.sent')}){C.RST}")
             except DailyLimitReached as exc:
