@@ -65,6 +65,9 @@ PAGE_SIZE = 9
 AUTO_CREATE = object()
 """Retorno do picker quando o usuário escolhe [A] Criar destino automaticamente."""
 
+CLONE_SUFFIX_MAX = 60
+"""Sufixo do clone: deixa pelo menos ~68 unidades para o título da origem."""
+
 
 @dataclass
 class _ForumSetup:
@@ -1111,8 +1114,8 @@ class App:
                     self._pop()
                     return
                 if candidate is AUTO_CREATE:
-                    # [A] no seletor: cria um destino novo a partir da origem.
-                    source_topic = None
+                    # [A] no seletor: cria um destino novo a partir da origem,
+                    # mantendo o tópico que o usuário já escolheu (se escolheu).
                     setup = await self._prepare_auto_clone(source)
                     if setup is None:
                         self._pop()
@@ -1462,6 +1465,11 @@ class App:
                 hint = self._clone_error_hint(exc)
                 if hint:
                     ui.warn(hint)
+                recovered = await self._handle_clone_failure(
+                    exc, source, require_forum=False
+                )
+                if recovered is not None:
+                    ready.append(recovered)
                 continue
             except Exception as exc:
                 logger.exception(f"Multi-destino: falha ao preparar {label}: {exc}")
@@ -1588,9 +1596,17 @@ class App:
         except ChannelCloneError as exc:
             logger.exception(f"Falha ao preparar a estrutura do destino: {exc}")
             ui.err(t("copy.clone.failed", reason=str(exc)))
-            ui.pause()
-            self._pop()
-            return
+            hint = self._clone_error_hint(exc)
+            if hint:
+                ui.warn(hint)
+            recovered = await self._handle_clone_failure(
+                exc, source, require_forum=False
+            )
+            if recovered is None:
+                ui.pause()
+                self._pop()
+                return
+            setup = recovered
 
         config = self.config
         topic_map = setup.topic_map if setup.plan is not None else None
@@ -1657,6 +1673,21 @@ class App:
         return bool(getattr(entity, "creator", False)
                     or getattr(entity, "admin_rights", None))
 
+    async def _may_manage(self, chat) -> bool:
+        """Admin/creator do destino? Na dúvida, deixa a cópia reclamar."""
+        if self._looks_admin(chat):
+            return True
+        get_permissions = getattr(self.client, "get_permissions", None)
+        if get_permissions is None:
+            return True
+        try:
+            perms = await get_permissions(chat)
+        except Exception as exc:
+            logger.warning(f"Permissões de {getattr(chat, 'id', '?')} indisponíveis: {exc}")
+            return True
+        return bool(getattr(perms, "is_admin", False)
+                    or getattr(perms, "is_creator", False))
+
     async def _existing_clone(self, source) -> Optional[Any]:
         """Clone desta origem ainda válido (existe e somos admin), ou None."""
         candidates: List[int] = []
@@ -1666,7 +1697,9 @@ class App:
         try:
             for item in await self.picker.load():
                 entity = item.get("entity")
-                if int(getattr(entity, "clone_of", 0) or 0) == int(source.id):
+                clone_of = getattr(entity, "clone_of", None)
+                clone_of_id = int(getattr(clone_of, "channel_id", clone_of) or 0)
+                if clone_of_id and clone_of_id == int(source.id):
                     candidates.append(int(item["id"]))
         except Exception as exc:  # pragma: no cover - depende da rede
             logger.warning(f"Busca por clones existentes falhou: {exc}")
@@ -1684,7 +1717,7 @@ class App:
                     except Exception:
                         pass
                 continue
-            if not self._looks_admin(chat):
+            if not await self._may_manage(chat):
                 ui.warn(t("clone.reuse_no_admin",
                           title=getattr(chat, "title", chat_id)))
                 continue
@@ -1793,7 +1826,9 @@ class App:
             return t("clone.err_admin")
         return ""
 
-    async def _handle_clone_failure(self, exc: Exception, source) -> Optional[_ForumSetup]:
+    async def _handle_clone_failure(self, exc: Exception, source,
+                                    require_forum: bool = True
+                                    ) -> Optional[_ForumSetup]:
         """Falha parcial: continuar no destino criado ou excluí-lo."""
         created = getattr(exc, "destination", None)
         if created is None:
@@ -1807,7 +1842,17 @@ class App:
         ])
         choice = (ui.ask(t("menu.option"), required=False) or "0").strip()
         if choice == "1":
-            setup = await self._plan_forum_structure(source, created, None, None)
+            from channel_clone import ChannelCloneError
+
+            try:
+                setup = await self._plan_forum_structure(
+                    source, created, None, None, require_forum=require_forum
+                )
+            except ChannelCloneError as inner:
+                logger.exception(f"Retomada do clone não é possível: {inner}")
+                ui.err(t("clone.reuse_failed", reason=str(inner)))
+                ui.pause()
+                return None
             if setup is None:
                 ui.info(t("copy.cancelled"))
                 return None
@@ -1852,11 +1897,9 @@ class App:
             return
         self._show_entity(source, t("entity.source"))
 
-        setup = await self._prepare_auto_clone(source)
-        if setup is None:
-            self._pop()
-            return
-
+        # O clone existente é consultado antes de montar um plano novo: se a
+        # leitura dos tópicos da origem falhar, reutilizar continua possível.
+        setup: Optional[_ForumSetup] = None
         existing = await self._existing_clone(source)
         if existing is not None:
             choice = await self._ask_existing_clone(existing)
@@ -1867,18 +1910,22 @@ class App:
                 from channel_clone import ChannelCloneError
 
                 try:
-                    reused = await self._plan_forum_structure(
+                    setup = await self._plan_forum_structure(
                         source, existing, None, None
                     )
                 except ChannelCloneError as exc:
                     logger.exception(f"Clone existente não serve: {exc}")
-                    ui.err(t("copy.clone.failed", reason=str(exc)))
+                    ui.err(t("clone.reuse_failed", reason=str(exc)))
                     ui.pause()
-                    reused = None
-                if reused is None:
+                    setup = None
+                if setup is None:
                     self._pop()
                     return
-                setup = reused
+        if setup is None:
+            setup = await self._prepare_auto_clone(source)
+            if setup is None:
+                self._pop()
+                return
 
         plan = setup.plan
         is_forum = bool(plan is not None and plan.forum)
@@ -1947,6 +1994,12 @@ class App:
             creating = setup.dest is None
             plan = setup.plan
             is_forum = bool(plan is not None and plan.forum)
+        except Exception as exc:  # erro inesperado não derruba o programa
+            logger.exception(f"Falha inesperada ao preparar o clone: {exc}")
+            ui.err(f"{t('err.generic')}: {exc}")
+            ui.pause()
+            self._pop()
+            return
 
         dest = setup.dest
         if dest is None:
@@ -1956,8 +2009,8 @@ class App:
             return
 
         if not self.prefs.clone_start_copy:
-            ui.ok(t("clone.structure_only",
-                    title=getattr(dest, "title", dest.id),
+            key = "clone.structure_only" if creating else "clone.reuse_only"
+            ui.ok(t(key, title=getattr(dest, "title", dest.id),
                     id=getattr(dest, "id", "?")))
             ui.pause()
             self._pop()
@@ -2354,8 +2407,10 @@ class App:
                 self._set_clone_suffix()
             elif choice == "f":
                 self._toggle_clone_photo()
+                await asyncio.sleep(0.7)
             elif choice == "k":
                 self._toggle_clone_start()
+                await asyncio.sleep(0.7)
             elif choice == "b":
                 if ui.confirm(t("settings.data_reset.confirm")):
                     db.reset_all()
@@ -2383,6 +2438,11 @@ class App:
         if text == "-":
             suffix = ""
         elif text:
+            units = len(f" {text}".encode("utf-16-le")) // 2
+            if units > CLONE_SUFFIX_MAX:
+                ui.err(t("settings.clone_suffix.too_long",
+                         count=units, max=CLONE_SUFFIX_MAX))
+                return
             suffix = text
         else:
             return

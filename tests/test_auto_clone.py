@@ -272,6 +272,7 @@ def test_clone_registrado_sem_admin_nao_e_reutilizado() -> None:
     alheio = channel(CREATED_ID, "Clone antigo")
     alheio.creator = False
     client = CloneClient([text_message(1, "x")], [origem, alheio])
+    client.is_admin = False          # get_permissions confirma que não somos admin
     app = build_app(client)
     core.db.set_kv(f"auto_clone:{origem.id}", json.dumps({"dest_id": alheio.id}))
 
@@ -479,3 +480,171 @@ def test_configuracoes_do_clone() -> None:
     titulo = ChannelCloner.default_title(longo, " (Clone)")
     check(len(titulo.encode("utf-16-le")) // 2 == 128,
           "título respeita o limite de 128 unidades UTF-16")
+
+
+def test_sufixo_longo_demais_e_recusado_na_hora() -> None:
+    client = CloneClient([], [])
+    app = build_app(client)
+    anterior = core.prefs.clone_suffix
+
+    # Um sufixo que não cabe no título é recusado antes de qualquer clone.
+    feed("a", "z" * 80, "0")
+    asyncio.run(guard(app._menu_settings()))
+    check(core.prefs.clone_suffix == anterior,
+          "sufixo impossível não é salvo")
+
+
+def test_clone_existente_sem_copiar_avisa_reuso() -> None:
+    origem = channel(-2500, "Canal Origem")
+    anterior = channel(CREATED_ID, "Canal Origem (Clone)")
+    anterior.creator = True
+    client = CloneClient([text_message(1, "x")], [origem, anterior])
+    app = build_app(client)
+    core.db.set_kv(f"auto_clone:{origem.id}", json.dumps({"dest_id": anterior.id}))
+    core.prefs.set("clone_start_copy", False)
+
+    # origem → reutilizar → confirmação → ENTER
+    feed("/", "Canal Origem", "1", "1", "s", "")
+    asyncio.run(guard(app._menu_clone()))
+
+    check(not client.sent, "não copia com a preferência desligada")
+    check(not any(type(r).__name__ == "CreateChannelRequest"
+                  for r in client.requests_log), "reaproveita sem criar outro")
+
+
+# ── 7. Auditoria: casos de borda encontrados na simulação ───────────────────
+
+def test_kv_corrompido_nao_impede_o_clone() -> None:
+    for raw in ("{lixo", "5", "[]", '{"dest_id": "abc"}', '{"dest_id": null}'):
+        origem = channel(-3100, "Canal Audit")
+        client = CloneClient([text_message(1, "x")], [origem])
+        app = build_app(client)
+        core.db.set_kv(f"auto_clone:{origem.id}", raw)
+
+        feed("1", "s", "")
+        asyncio.run(guard(app._menu_clone()))
+
+        check(any(type(r).__name__ == "CreateChannelRequest"
+                  for r in client.requests_log),
+              f"registro corrompido ({raw!r}) não impede criar o destino")
+        check(clone_kv(origem.id)["dest_id"] == CREATED_ID,
+              f"registro corrompido ({raw!r}) é substituído pelo novo")
+
+
+def test_reuso_usa_permissoes_da_api_quando_faltam_flags() -> None:
+    origem = channel(-3200, "Canal Origem")
+    antigo = channel(CREATED_ID, "Canal Origem (Clone)")
+    # A entidade relida não traz creator/admin_rights: só get_permissions sabe.
+    antigo.creator = False
+    client = CloneClient([text_message(1, "x")], [origem, antigo])
+    client.is_admin = True
+    app = build_app(client)
+    core.db.set_kv(f"auto_clone:{origem.id}", json.dumps({"dest_id": antigo.id}))
+
+    feed("1", "1", "s", "")
+    asyncio.run(guard(app._menu_clone()))
+
+    check(not any(type(r).__name__ == "CreateChannelRequest"
+                  for r in client.requests_log),
+          "reutiliza o clone quando a API confirma que somos admin")
+    check({s["dest"] for s in client.sent} == {antigo.id},
+          "copia para o clone registrado")
+
+
+def test_reuso_descarta_registro_de_chat_apagado() -> None:
+    origem = channel(-3300, "Canal Origem")
+    client = CloneClient([text_message(1, "x")], [origem])
+    app = build_app(client)
+    core.db.set_kv(f"auto_clone:{origem.id}",
+                   json.dumps({"dest_id": -999999, "criado_em": "2026-01-01"}))
+
+    feed("1", "s", "")
+    asyncio.run(guard(app._menu_clone()))
+
+    check(any(type(r).__name__ == "CreateChannelRequest"
+              for r in client.requests_log),
+          "chat apagado não bloqueia a criação de um clone novo")
+    check(clone_kv(origem.id)["dest_id"] == CREATED_ID,
+          "registro órfão é substituído")
+
+
+def test_multi_retoma_destino_com_falha_parcial() -> None:
+    origem = forum(-3400, "Fórum Origem")
+    client = CloneClient([topic_message(2, "aviso", 41)], [origem],
+                         {origem.id: full_forum(origem.id)})
+    client.fail_topic_at = 1
+    app = build_app(client)
+
+    # origem → todos os tópicos → lista → [A] → começar → filtro → confirmar →
+    # continuar no destino criado → ENTER
+    feed("1", "", "1", "a", "0", "", "s", "1", "")
+    asyncio.run(guard(app._menu_multi()))
+
+    check([req.title for req in client.create_topic_requests]
+          == ["AVISOS", "PROMOÇÕES", "SUPORTE"],
+          "multi recria os tópicos que faltaram")
+    check({s["dest"] for s in client.sent} == {CREATED_ID},
+          "multi copia para o destino retomado")
+
+
+def test_espelho_exclui_destino_com_falha_parcial() -> None:
+    origem = forum(-3500, "Fórum Origem")
+    client = CloneClient([topic_message(2, "aviso", 41)], [origem],
+                         {origem.id: full_forum(origem.id)})
+    client.fail_topic_at = 1
+    app = build_app(client)
+
+    # origem → todos os tópicos → [A] → filtro → confirmar → excluir → confirmar
+    feed("1", "", "a", "", "s", "2", "s", "")
+    asyncio.run(guard(app._menu_mirror()))
+
+    check(client.deleted == [CREATED_ID],
+          f"espelho apaga somente o canal criado nesta execução ({client.deleted})")
+    check(clone_kv(origem.id) is None, "registro do clone excluído é removido")
+
+
+def test_clone_sem_sufixo_usa_o_titulo_da_origem() -> None:
+    origem = channel(-3600, "Canal Origem")
+    client = CloneClient([text_message(1, "x")], [origem])
+    app = build_app(client)
+    core.prefs.set("clone_suffix", "")
+
+    feed("1", "s", "")
+    asyncio.run(guard(app._menu_clone()))
+
+    check(channel_request(client).title == "Canal Origem",
+          "sem sufixo o destino repete o título da origem")
+
+
+def test_sufixo_longo_demais_e_recusado() -> None:
+    client = CloneClient([], [])
+    app = build_app(client)
+    anterior = core.prefs.clone_suffix
+    try:
+        feed("a", "x" * 80, "0")
+        asyncio.run(guard(app._menu_settings()))
+        check(core.prefs.clone_suffix == anterior,
+              "sufixo maior que o limite não é salvo")
+    finally:
+        core.prefs.set("clone_suffix", anterior)
+
+
+def test_jornada_pelo_menu_principal() -> None:
+    """[4] clona, [6] abre as configurações e [0] encerra o programa."""
+    origem = channel(-3700, "Canal Origem")
+    client = CloneClient([text_message(1, "oi")], [origem])
+    app = build_app(client)
+    app._running = True
+    antes = core.prefs.clone_copy_photo
+
+    # [4] → origem → confirmar → ENTER do relatório → [6] → [f] → [0] → [0]
+    feed("4", "1", "s", "", "6", "f", "0", "0")
+    asyncio.run(guard(app._main_menu()))
+
+    check(app._running is False, "[0] encerra o menu principal")
+    check(any(type(r).__name__ == "CreateChannelRequest"
+              for r in client.requests_log), "[4] é o clone automático")
+    check(len(client.sent) == 1, "a cópia do clone rodou pelo menu")
+    check(core.prefs.clone_copy_photo is not antes,
+          "[6] abre as configurações e [f] alterna a foto")
+    core.prefs.set("clone_copy_photo", antes)

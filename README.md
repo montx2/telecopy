@@ -261,9 +261,10 @@ destino criado** ou **excluir apenas o canal criado nesta execução** — nunca
 chats que o programa não criou.
 
 **Criar destino automaticamente em qualquer modo.** No seletor de destino de
-`Copiar canal`, `Multi-destino` e `Modo espelho`, a tecla `[A]` cria o destino na
-hora (se a conta não tiver nenhum chat elegível, a opção é oferecida direto).
-Para desligar a cópia e criar só a estrutura, use Configurações → `k`.
+`Copiar canal`, `Multi-destino` e `Modo espelho`, a tecla `[A]` prepara a criação
+do destino (ele é criado quando você confirma o fluxo; se a conta não tiver
+nenhum chat elegível, a opção é oferecida direto). Para desligar a cópia e criar
+só a estrutura, use Configurações → `k`.
 
 **Limites.** `FloodWait` é aguardado automaticamente; se a conta atingir o limite
 de canais (`CHANNELS_TOO_MUCH`) ou faltar permissão, o programa explica o motivo
