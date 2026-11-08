@@ -711,11 +711,16 @@ class RunConfig:
     retry_failed: bool = True
     clean_failed_text: bool = True
     placeholder: bool = True
+    delivery: str = "reference"   # reference | upload | forward
+    server_copy: bool = True
 
     def __post_init__(self) -> None:
         self.delay = max(0.1, float(self.delay))
         self.memory_profile = max(0.10, min(0.95, float(self.memory_profile)))
         self.workers = max(1, min(int(self.workers), 8))
+        if self.delivery not in {"reference", "upload", "forward"}:
+            self.delivery = "reference"
+        self.server_copy = bool(self.server_copy)
 
     def to_dict(self) -> dict:
         return {
@@ -729,6 +734,8 @@ class RunConfig:
             "signature": self.signature,
             "retry_failed": self.retry_failed,
             "placeholder": self.placeholder,
+            "delivery": self.delivery,
+            "server_copy": self.server_copy,
         }
 
     @classmethod

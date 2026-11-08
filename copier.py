@@ -343,6 +343,8 @@ class TransferStats:
     previously_done: int = 0
     unsupported: int = 0
     placeholders: int = 0
+    server_copies: int = 0
+    bytes_saved: int = 0
     interrupted: bool = False
     complete: bool = False
     topics: List[Dict[str, Any]] = field(default_factory=list)
@@ -366,6 +368,8 @@ class TransferStats:
             "previously_done": self.previously_done,
             "unsupported": self.unsupported,
             "placeholders": self.placeholders,
+            "server_copies": self.server_copies,
+            "bytes_saved": self.bytes_saved,
             "interrupted": self.interrupted,
             "complete": self.complete,
             "topics": self.topics,
@@ -1278,6 +1282,17 @@ class Copier:
                 "path": None, "downloadable": bool(has_media) and not native,
                 "native": native,
             }
+            if (has_media and not native and not unsupported and len(messages) == 1
+                    and self.cfg.server_copy and self.cfg.delivery == "reference"):
+                try:
+                    tl_utils.get_input_media(raw_media, is_photo=media_type == "photo")
+                except (TypeError, AttributeError, ValueError) as exc:
+                    logger.info(f"Referência indisponível msg {msg.id}; usando upload: {exc}")
+                else:
+                    entry["reference"] = True
+                    entry["downloadable"] = False
+                    plan.append(entry)
+                    continue
             if unsupported or empty:
                 entry["failed"] = True
                 entry["unsupported"] = True
@@ -1461,7 +1476,7 @@ class Copier:
         dest_topic = payload.get("dest_topic")
         reply_to = payload.get("reply_to")
 
-        media_entries = [e for e in plan if e["path"] and not e.get("failed")]
+        media_entries = [e for e in plan if (e["path"] or e.get("reference")) and not e.get("failed")]
         native_entries = [e for e in plan if e.get("native") and not e.get("failed")]
         failed_entries = [e for e in plan if e.get("failed")]
         text_entries = [
@@ -1478,9 +1493,16 @@ class Copier:
                     sent_ids[entry["msg"].id] = created_id
             elif len(media_entries) == 1:
                 entry = media_entries[0]
-                sent_ids[entry["msg"].id] = await self._send_media(
-                    entry, dest, dest_topic, progress, stats, reply_to
-                )
+                if entry.get("reference") and not entry.get("path"):
+                    created_id = await self._send_reference(entry, dest, dest_topic, reply_to)
+                    stats.server_copies += 1
+                    stats.bytes_saved += int(entry.get("size") or 0)
+                    logger.info(f"Entrega por referência msg {entry['msg'].id}")
+                else:
+                    created_id = await self._send_media(
+                        entry, dest, dest_topic, progress, stats, reply_to
+                    )
+                sent_ids[entry["msg"].id] = created_id
 
             for entry in native_entries:
                 sent_ids[entry["msg"].id] = await self._send_native(
@@ -1618,6 +1640,35 @@ class Copier:
             force_file=bool(options.get("force_document")),
             spoiler=spoiler,
         )
+
+    async def _send_reference(self, entry: Dict[str, Any], dest, dest_topic,
+                              reply_to: Optional[int]) -> int:
+        """Envia mídia já registrada no servidor, sem download/upload."""
+        msg = entry["msg"]
+        input_media = tl_utils.get_input_media(msg.media, is_photo=entry["media_type"] == "photo")
+        parts = self._parts(msg, CAPTION_LIMIT)
+        caption, entities = parts[0] if parts else ("", [])
+        if self._needs_raw_reply(dest_topic, reply_to):
+            peer = await self.client.get_input_entity(dest)
+            random_id = generate_random_long()
+            response = await self.client(functions.messages.SendMediaRequest(
+                peer=peer, media=input_media, message=caption or "",
+                entities=entities or None, reply_to=self._reply_header(dest_topic, reply_to),
+                random_id=random_id,
+            ))
+            parsed = self.client._get_response_message(random_id, response, peer)
+            created_id = self._created_id(parsed)
+        else:
+            result = await self.client.send_file(
+                dest, file=input_media, caption=caption or None,
+                formatting_entities=entities or None, reply_to=reply_to,
+                parse_mode=None,
+            )
+            created_id = self._created_id(result)
+        entry["dest_msg_id"] = created_id
+        for chunk, chunk_entities in parts[1:]:
+            await self._send_chunk(dest, chunk, chunk_entities, dest_topic, None)
+        return created_id
 
     async def _send_raw_media(self, entry: Dict[str, Any], dest, dest_topic,
                               reply_to, caption: str, entities, progress_callback=None) -> int:

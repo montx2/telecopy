@@ -23,6 +23,8 @@ _DEFAULTS: Dict[str, Any] = {
     "last_dest_id": None,
     "check_updates": True,
     "placeholder": True,
+    "delivery": "reference",
+    "server_copy": True,
     "config": RunConfig().to_dict(),
     # Clone automático
     "clone_suffix": " (Clone)",
@@ -47,9 +49,15 @@ class Preferences:
             cfg_data = {**RunConfig().to_dict(), **saved_config}
             if "placeholder" in saved:
                 cfg_data["placeholder"] = bool(saved["placeholder"])
+            if "delivery" in saved:
+                cfg_data["delivery"] = saved["delivery"]
+            if "server_copy" in saved:
+                cfg_data["server_copy"] = bool(saved["server_copy"])
             cfg = RunConfig.from_dict(cfg_data)
             merged["config"] = cfg.to_dict()
             merged["placeholder"] = cfg.placeholder
+            merged["delivery"] = cfg.delivery
+            merged["server_copy"] = cfg.server_copy
             self.data = merged
         return self.data
 
@@ -71,11 +79,17 @@ class Preferences:
         data = dict(self.data.get("config") or {})
         if "placeholder" in self.data:
             data["placeholder"] = bool(self.data["placeholder"])
+        if "delivery" in self.data:
+            data["delivery"] = self.data["delivery"]
+        if "server_copy" in self.data:
+            data["server_copy"] = bool(self.data["server_copy"])
         return RunConfig.from_dict(data)
 
     def save_config(self, cfg: RunConfig) -> None:
         self.data["config"] = cfg.to_dict()
         self.data["placeholder"] = cfg.placeholder
+        self.data["delivery"] = cfg.delivery
+        self.data["server_copy"] = cfg.server_copy
         self.save()
 
     @property
