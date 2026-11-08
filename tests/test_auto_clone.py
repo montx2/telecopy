@@ -37,7 +37,11 @@ config.init_dirs()
 
 import core  # noqa: E402
 from telethon.tl import types as tl  # noqa: E402
-from tests.fake_telegram import channel, text_message  # noqa: E402
+from tests.fake_telegram import (  # noqa: E402
+    channel,
+    photo_message,
+    text_message,
+)
 from tests.test_forum_copy import (  # noqa: E402
     ForumClient,
     forum,
@@ -648,3 +652,54 @@ def test_jornada_pelo_menu_principal() -> None:
     check(core.prefs.clone_copy_photo is not antes,
           "[6] abre as configurações e [f] alterna a foto")
     core.prefs.set("clone_copy_photo", antes)
+
+
+def test_parada_da_copia_cancela_os_downloads() -> None:
+    """Se o envio morre (erro/parada), os workers de download param junto.
+
+    Sem isso, a cópia continua baixando a origem inteira em segundo plano,
+    enchendo memória e a pasta tmp/ depois de a execução já ter terminado.
+    """
+    from copier import Copier
+
+    origem = channel(-3800, "Canal Interrompido")
+    destino = channel(-3801, "Destino")
+    # Fotos: cada item passa pelo download, que é o worker a ser cancelado.
+    client = CloneClient([photo_message(i, f"foto {i}") for i in range(1, 41)], [origem])
+    app = build_app(client)
+    app.config.workers = 2
+
+    async def slow_download(message, file=None, **kwargs):
+        await asyncio.sleep(0.05)          # mantém o worker ocupado
+        return await CloneClient.download_media(client, message, file=file, **kwargs)
+
+    async def broken_send(*args, **kwargs):
+        raise RuntimeError("falha simulada de envio")
+
+    client.download_media = slow_download
+    client.send_message = broken_send
+
+    original_upsert = core.db.upsert_checkpoint
+
+    def explode(*args, **kwargs):
+        # Falha inesperada ao registrar: derruba o envio no meio da cópia.
+        raise RuntimeError("banco indisponível")
+
+    core.db.upsert_checkpoint = explode
+
+    async def scenario():
+        antes = asyncio.all_tasks()
+        copier = Copier(client, repo=core.db, config=app.config)
+        try:
+            await copier.run(origem, destino, filter_code="all")
+        except BaseException:
+            pass
+        await asyncio.sleep(0)
+        return [task for task in asyncio.all_tasks() - antes if not task.done()]
+
+    try:
+        pendentes = asyncio.run(scenario())
+    finally:
+        core.db.upsert_checkpoint = original_upsert
+
+    check(not pendentes, f"nenhum download pendente após a parada ({pendentes})")

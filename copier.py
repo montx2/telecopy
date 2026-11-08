@@ -1165,10 +1165,14 @@ class Copier:
 
         downloaders = [asyncio.create_task(downloader()) for _ in range(self.cfg.workers)]
         sender_task = asyncio.create_task(sender())
-        await sender_task
-        for task in downloaders:
-            task.cancel()
-        await asyncio.gather(*downloaders, return_exceptions=True)
+        try:
+            await sender_task
+        finally:
+            # Uma interrupção no envio (Ctrl+C, erro fatal) não pode deixar os
+            # downloads rodando em segundo plano, enchendo memória e tmp/.
+            for task in downloaders:
+                task.cancel()
+            await asyncio.gather(*downloaders, return_exceptions=True)
 
         # se paramos no meio, descarta o que ficou pronto
         for payload in list(ready.values()):
