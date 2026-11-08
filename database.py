@@ -364,6 +364,29 @@ class Repository:
             ).fetchone()
             return int(row[0] or 0)
 
+    def untopiced_checkpoints(self, source_id: int, dest_id: int) -> int:
+        """Concluídos sem tópico de destino: cópia antiga que foi ao General."""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM checkpoints "
+                "WHERE source_id=? AND dest_id=? AND status IN ('done', 'skipped') "
+                "AND dest_topic IS NULL",
+                (source_id, dest_id),
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def reset_pair(self, source_id: int, dest_id: int) -> int:
+        """Zera checkpoints/falhas/marcas apenas deste par origem→destino."""
+        removed = 0
+        with self._db() as conn:
+            for table in ("checkpoints", "failures", "processed"):
+                cur = conn.execute(
+                    f"DELETE FROM {table} WHERE source_id=? AND dest_id=?",
+                    (source_id, dest_id),
+                )
+                removed += cur.rowcount or 0
+        return removed
+
     def pair_summary(self, source_id: int, dest_id: int) -> Dict[str, int]:
         with self._db() as conn:
             row = conn.execute(
@@ -618,6 +641,11 @@ class Repository:
         with self._db() as conn:
             row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return row[0] if row else default
+
+    def delete_kv(self, key: str) -> bool:
+        with self._db() as conn:
+            cur = conn.execute("DELETE FROM kv WHERE key=?", (key,))
+            return (cur.rowcount or 0) > 0
 
     # ── manutenção ────────────────────────────────────────────────────────────
 
