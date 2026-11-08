@@ -8,7 +8,6 @@ na sequência exata da origem, cada aula no seu tópico.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -190,7 +189,6 @@ def test_aula_repetida_com_mesmo_arquivo_nao_e_descartada_no_modo_fiel(env) -> N
     Com dedup ligado o hash (mesmo doc + mesma legenda) descartaria a segunda
     aula. É por isso que a cópia de fórum desliga dedup e assinatura.
     """
-    repetido = tl_video(1, "Aula 321 - material", size=PART_SIZE + 64)
     messages = [
         aula(1, 321, TOPIC_A),
         aula(2, 322, TOPIC_A),

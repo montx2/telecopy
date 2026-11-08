@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from telethon import functions, types
+from telethon import types
 from telethon.errors import FloodWaitError
 
 

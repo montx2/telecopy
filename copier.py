@@ -607,7 +607,7 @@ class TransferWindow:
             self.next_index += 1
             self.active[index] = self.estimate(self.items[index])
             self.peak_active = max(self.peak_active, len(self.active))
-            self.peak_bytes = max(self.peak_bytes, used := self.used_bytes)
+            self.peak_bytes = max(self.peak_bytes, self.used_bytes)
             return index, self.items[index]
 
     async def adjust(self, index: int, actual_bytes: int) -> None:

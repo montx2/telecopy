@@ -24,7 +24,7 @@ from copier import Copier, DailyLimitReached
 from database import Repository
 from fasttransfer import PART_SIZE, FastTransferPool, fast_download, fast_upload
 from telethon.errors import FloodPremiumWaitError, FloodWaitError
-from tests.fake_telegram import FakeClient, channel
+from tests.fake_telegram import FakeClient
 from tests.test_ordem import tl_video
 from utils import DailyLimit
 

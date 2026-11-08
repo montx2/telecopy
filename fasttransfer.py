@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
 
-from telethon import functions, utils as tl_utils
+from telethon import functions
 from telethon.errors import (
     FileIdInvalidError,
     FileMigrateError,
