@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from telethon import functions
 from telethon.errors import FloodWaitError
@@ -38,6 +39,9 @@ class ForumTopicSpec:
     closed: bool = False
     pinned: bool = False
     hidden: bool = False
+    # Data da última atividade informada pela API; usada só para ordenar a
+    # criação dos tópicos como no fórum de origem.
+    date: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,13 @@ class ChannelCloner:
     def __init__(self, client, repo=None) -> None:
         self.client = client
         self.repo = repo
+        # Avisos não fatais (ex.: ícone recusado pelo Telegram) que a UI mostra
+        # depois de preparar a estrutura, sem abortar a clonagem.
+        self.warnings: List[str] = []
+
+    def _warn(self, message: str) -> None:
+        logger.warning(message)
+        self.warnings.append(message)
 
     async def _call(self, request, retries: int = 5):
         """Repete requests rejeitados explicitamente por FloodWait do Telegram."""
@@ -83,9 +94,19 @@ class ChannelCloner:
                 await asyncio.sleep(wait)
 
     @staticmethod
-    def default_title(source) -> str:
-        return (str(getattr(source, "title", "") or "TELECOPY").strip()
-                or "TELECOPY")[:MAX_TITLE_LENGTH]
+    def default_title(source, suffix: str = "") -> str:
+        """Título sugerido; ``suffix`` é anexado respeitando o limite UTF-16.
+
+        O espaço antes do sufixo é adicionado aqui: o prompt de configuração
+        apara espaços nas pontas, então o usuário digita só o texto.
+        """
+        base = (str(getattr(source, "title", "") or "TELECOPY").strip()
+                or "TELECOPY")
+        text = str(suffix or "").strip()
+        suffix = f" {text}" if text else ""
+        while base and len((base + suffix).encode("utf-16-le")) // 2 > MAX_TITLE_LENGTH:
+            base = base[:-1]
+        return f"{base}{suffix}"
 
     @staticmethod
     def _map_key(source, destination) -> str:
@@ -231,7 +252,7 @@ class ChannelCloner:
         topic_map = {k: v for k, v in dict(topic_map).items() if k in valid_source_ids}
         topic_map[1] = general_id
 
-        for topic in plan.topics:
+        for topic in self._creation_order(plan.topics):
             if topic.id == 1:
                 # General é um tópico nativo do Telegram; nunca criar duplicata.
                 topic_map[1] = general_id
@@ -258,8 +279,14 @@ class ChannelCloner:
         self._save_map(plan.source, destination, topic_map)
         return topic_map
 
-    async def create(self, plan: ClonePlan) -> Tuple[Any, Dict[int, int]]:
-        """Cria o chat e todos os tópicos; retorna a entidade e o mapa de IDs."""
+    async def create(self, plan: ClonePlan, on_created=None
+                     ) -> Tuple[Any, Dict[int, int]]:
+        """Cria o chat e todos os tópicos; retorna a entidade e o mapa de IDs.
+
+        ``on_created(destination)`` roda imediatamente depois de
+        ``CreateChannelRequest`` e antes de qualquer tópico, para que o par
+        origem→destino seja registrado mesmo se a criação dos tópicos falhar.
+        """
         destination = None
         try:
             response = await self._call(functions.channels.CreateChannelRequest(
@@ -269,6 +296,14 @@ class ChannelCloner:
             destination = self._created_chat(response, plan.source)
             if destination is None:
                 raise ChannelCloneError(t("copy.clone.created_data_missing"))
+
+            if on_created is not None:
+                try:
+                    result = on_created(destination)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:  # registro não pode derrubar a clonagem
+                    logger.warning(f"Registro do clone automático falhou: {exc}")
 
             topic_map: Dict[int, int] = {}
             if plan.forum:
@@ -387,6 +422,7 @@ class ChannelCloner:
             closed=bool(getattr(topic, "closed", False)),
             pinned=bool(getattr(topic, "pinned", False)),
             hidden=bool(getattr(topic, "hidden", False)),
+            date=getattr(topic, "date", None),
         )
 
     @staticmethod
@@ -467,7 +503,7 @@ class ChannelCloner:
         general_id = general.id if general else 1
         topic_map: Dict[int, int] = {1: general_id}
 
-        for topic in plan.topics:
+        for topic in self._creation_order(plan.topics):
             if topic.id == 1:
                 topic_map[1] = general_id
                 if general is not None:
@@ -484,6 +520,23 @@ class ChannelCloner:
         self._save_map(plan.source, destination, topic_map)
         return topic_map
 
+    @staticmethod
+    def _creation_order(topics: Sequence[ForumTopicSpec]) -> List[ForumTopicSpec]:
+        """Do tópico com menos atividade recente para o com mais atividade.
+
+        O Telegram ordena os tópicos pela última atividade e ``GetForumTopics``
+        devolve os mais recentes primeiro. Criar nessa ordem inverte a lista
+        final do destino; criando do mais antigo para o mais recente, o último
+        tópico criado é o que estava no topo da origem.
+        """
+        def key(item: Tuple[int, ForumTopicSpec]):
+            index, topic = item
+            stamp = topic.date
+            seconds = stamp.timestamp() if isinstance(stamp, datetime) else float("-inf")
+            return (0 if topic.id == 1 else 1, seconds, -index)
+
+        return [topic for _index, topic in sorted(enumerate(topics), key=key)]
+
     async def _create_topic(self, destination, topic: ForumTopicSpec,
                             existing: List[ForumTopicSpec]) -> int:
         before = {item.id for item in existing}
@@ -498,7 +551,39 @@ class ChannelCloner:
         if topic.icon_emoji_id:
             request_kwargs["icon_emoji_id"] = int(topic.icon_emoji_id)
 
-        response = await self._call(functions.messages.CreateForumTopicRequest(**request_kwargs))
+        # Um emoji de tópico pode ser recusado (o ID pertence ao dono original
+        # ou o emoji virou inacessível). O tópico em si ainda é representável:
+        # tentamos sem o emoji e, por último, sem ícone nenhum.
+        attempts: List[Dict[str, Any]] = [dict(request_kwargs)]
+        if topic.icon_emoji_id:
+            without_emoji = {k: v for k, v in request_kwargs.items()
+                             if k != "icon_emoji_id"}
+            attempts.append(without_emoji)
+            attempts.append({k: v for k, v in without_emoji.items()
+                             if k != "icon_color"})
+
+        response = None
+        for index, kwargs in enumerate(attempts):
+            try:
+                response = await self._call(
+                    functions.messages.CreateForumTopicRequest(**kwargs)
+                )
+            except FloodWaitError:
+                raise
+            except Exception as exc:
+                if index + 1 >= len(attempts) or self._fatal_topic_error(exc):
+                    raise
+                logger.warning(
+                    f"CreateForumTopic recusou o ícone do tópico {topic.title!r} "
+                    f"({type(exc).__name__}); tentando novamente sem ele"
+                )
+                continue
+            if index == 1:
+                self._warn(t("copy.clone.topic_icon_fallback", topic=topic.title))
+            elif index == 2:
+                self._warn(t("copy.clone.topic_icon_dropped", topic=topic.title))
+            break
+
         created_id = self._created_topic_id(response)
         if created_id is None:
             refreshed = await self._list_forum_topics(destination)
@@ -510,6 +595,61 @@ class ChannelCloner:
         if not created_id:
             raise RuntimeError(t("copy.clone.topic_id_missing", topic=topic.title))
         return int(created_id)
+
+    @staticmethod
+    def _fatal_topic_error(exc: Exception) -> bool:
+        """Erros que não têm relação com o ícone e não devem ser repetidos."""
+        return type(exc).__name__ in {
+            "ChatAdminRequiredError", "ChannelPrivateError", "ChannelInvalidError",
+            "ChatForbiddenError", "TopicDeletedError", "ParticipantsTooFewError",
+        }
+
+    async def list_topics(self, peer) -> List[ForumTopicSpec]:
+        """Leitura pública da estrutura, na ordem da API (mais ativo primeiro)."""
+        return await self._list_forum_topics(peer)
+
+    async def ensure_topic(self, plan: ClonePlan, destination,
+                           topic: ForumTopicSpec,
+                           topic_map: Dict[int, int]) -> int:
+        """Cria um tópico que apareceu na origem depois do início do espelho."""
+        existing = await self._list_forum_topics(destination)
+        by_id = {item.id: item for item in existing}
+        target_id = topic_map.get(topic.id)
+        if target_id and target_id in by_id:
+            return int(target_id)
+        created_id = await self._create_topic(destination, topic, existing)
+        topic_map[topic.id] = created_id
+        self._save_map(plan.source, destination, topic_map)
+        return int(created_id)
+
+    async def enable_forum(self, destination):
+        """Ativa o modo fórum em um supergrupo; exige que a conta seja admin."""
+        try:
+            request = functions.channels.ToggleForumRequest(
+                channel=destination, enabled=True, tabs=False,
+            )
+        except TypeError:
+            # Camadas antigas do schema não têm o campo ``tabs``.
+            request = functions.channels.ToggleForumRequest(
+                channel=destination, enabled=True,
+            )
+        await self._call(request)
+        try:
+            fresh = await self.client.get_entity(int(destination.id))
+        except Exception as exc:  # pragma: no cover - depende da rede
+            logger.warning(f"Destino não pôde ser relido após ativar tópicos: {exc}")
+            fresh = None
+        if fresh is not None:
+            try:
+                fresh.forum = True
+            except Exception:
+                pass
+            return fresh
+        try:
+            destination.forum = True
+        except Exception:
+            pass
+        return destination
 
     @staticmethod
     def _created_chat(response, source):

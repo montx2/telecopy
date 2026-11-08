@@ -280,22 +280,28 @@ def test_fluxo_cria_destino_e_reproduz_forum() -> None:
           "destino automático também é um fórum")
     check(channel_request.forum and channel_request.megagroup and not channel_request.broadcast,
           "cria supergrupo com fórum habilitado")
-    check(channel_request.title == "Fórum Origem"
+    check(channel_request.title == "Fórum Origem (Clone)"
           and channel_request.about == "Descrição copiada",
-          "replica título e descrição da origem")
+          "replica título (com sufixo) e descrição da origem")
 
     created_topics = client.topic_catalog[client.created.id]
+    # GetForumTopics devolve do mais recente para o mais antigo e o Telegram
+    # ordena por última atividade: a criação vai do mais antigo para o mais
+    # recente, então "Novidades" (menos ativa) nasce antes de "Perguntas".
     check([topic.title for topic in created_topics] == [
-        "General", "Perguntas", "Novidades",
-    ], "recria os tópicos com os mesmos nomes")
+        "General", "Novidades", "Perguntas",
+    ], "recria os tópicos na ordem crescente de atividade da origem")
     forum_topic_requests = [req for req in client.created_requests
                             if type(req).__name__ == "CreateForumTopicRequest"]
-    check(forum_topic_requests[0].icon_color == 0x6C8EBF,
+    perguntas = [req for req in forum_topic_requests if req.title == "Perguntas"]
+    check(perguntas and perguntas[0].icon_color == 0x6C8EBF,
           "replica a cor do ícone de tópico")
     check(any(type(req).__name__ == "UpdatePinnedForumTopicRequest"
               for req in client.created_requests), "replica tópico fixado")
+    by_title = {topic.title: topic.id for topic in created_topics}
     routes = [(item["text"], item["reply_to"]) for item in client.sent]
-    check(routes == [("aviso repetido", 101), ("aviso repetido", 102)],
+    check(routes == [("aviso repetido", by_title["Perguntas"]),
+                     ("aviso repetido", by_title["Novidades"])],
           f"envia inclusive conteúdos iguais a seus tópicos ({routes})")
 
 
@@ -502,10 +508,12 @@ def test_fluxo_destino_existente_cria_topicos_ausentes() -> None:
     asyncio.run(_guard(app._menu_copy()))
 
     titles = [topic.title for topic in client.topic_catalog[destino.id]]
-    check(titles == ["General", "Perguntas", "Novidades"],
-          f"destino existente ganha os tópicos ausentes ({titles})")
+    check(titles == ["General", "Novidades", "Perguntas"],
+          f"destino existente ganha os tópicos ausentes na ordem de atividade ({titles})")
+    by_title = {topic.title: topic.id for topic in client.topic_catalog[destino.id]}
     routes = [(item["text"], item["reply_to"]) for item in client.sent]
-    check(routes == [("aviso repetido", 101), ("aviso repetido", 102)],
+    check(routes == [("aviso repetido", by_title["Perguntas"]),
+                     ("aviso repetido", by_title["Novidades"])],
           f"mensagens repetidas vão aos tópicos novos ({routes})")
     check(all("@nao_deve_aparecer" not in (item.get("text") or "") for item in client.sent),
           "assinatura desativada na cópia fiel de fórum")

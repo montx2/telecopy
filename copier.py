@@ -1687,9 +1687,35 @@ class Copier:
 
     # ── Espelho em tempo real ───────────────────────────────────────────────
 
+    async def _mirror_topic(self, msg, dest_topic: Optional[int],
+                            topic_map: Optional[Dict[int, int]],
+                            ensure_topic=None) -> Optional[int]:
+        """Tópico do destino para uma mensagem nova do fórum de origem."""
+        if not topic_map:
+            return dest_topic
+        source_topic = self._source_topic_id(msg, set(topic_map)) or 1
+        target = topic_map.get(source_topic)
+        if target:
+            return target
+        if ensure_topic is not None and source_topic != 1:
+            # Tópico criado enquanto o espelho estava parado: cria agora.
+            created = await ensure_topic(msg)
+            if created:
+                topic_map[source_topic] = int(created)
+                return int(created)
+        raise RuntimeError(t("copy.topic_unmapped", topic=source_topic))
+
     async def mirror(self, source, dest, filter_code: str = "all",
                      source_topic: Optional[int] = None,
-                     dest_topic: Optional[int] = None) -> None:
+                     dest_topic: Optional[int] = None,
+                     topic_map: Optional[Dict[int, int]] = None,
+                     ensure_topic=None) -> None:
+        """Espelha mensagens novas; com ``topic_map`` roteia cada tópico.
+
+        ``ensure_topic`` é chamado quando aparece um tópico que ainda não está
+        no mapa (inclusive o serviço ``MessageActionTopicCreate``) e devolve o
+        ID do tópico criado no destino.
+        """
         source_id = int(getattr(source, "id", 0) or 0)
         dest_id = int(getattr(dest, "id", 0) or 0)
         self.dedup.warm_up(dest_id, limit=200_000)
@@ -1702,6 +1728,14 @@ class Copier:
         async def handler(event):  # noqa: ANN001
             msg = event.message
             try:
+                if type(getattr(msg, "action", None)).__name__ == "MessageActionTopicCreate":
+                    # Tópico novo na origem: replica a estrutura antes de
+                    # qualquer mensagem que chegue dentro dele.
+                    if topic_map is not None and ensure_topic is not None:
+                        created = await ensure_topic(msg)
+                        if created:
+                            topic_map[int(msg.id)] = int(created)
+                    return
                 roots = {int(source_topic)} if source_topic else set()
                 if source_topic and self._source_topic_id(msg, roots) != int(source_topic):
                     return
@@ -1709,16 +1743,24 @@ class Copier:
                     return
 
                 content_hash = hash_message(msg)
-                if self.dedup.check(content_hash, dest_id):
+                if self.cfg.use_dedup and self.dedup.check(content_hash, dest_id):
                     stats.skipped += 1
                     return
 
                 silent = ProgressDisplay(0, "", False)
                 payload = await self._prepare(0, msg, silent, source=source)
+                route_roots = set(topic_map or {})
+                if source_topic:
+                    route_roots.add(int(source_topic))
                 payload.update({
-                    "dest": dest, "dest_topic": dest_topic,
-                    "reply_to": self._reply_target(msg, source_id, dest_id,
-                                                   {root: root for root in roots}),
+                    "dest": dest,
+                    "dest_topic": await self._mirror_topic(
+                        msg, dest_topic, topic_map, ensure_topic
+                    ),
+                    "reply_to": self._reply_target(
+                        msg, source_id, dest_id,
+                        {root: root for root in route_roots},
+                    ),
                 })
                 try:
                     await self._send(payload, source_id, dest_id, stats, silent)

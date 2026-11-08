@@ -23,6 +23,10 @@ _DEFAULTS: Dict[str, Any] = {
     "last_dest_id": None,
     "check_updates": True,
     "config": RunConfig().to_dict(),
+    # Clone automático
+    "clone_suffix": " (Clone)",
+    "clone_copy_photo": True,
+    "clone_start_copy": True,
 }
 
 
@@ -71,6 +75,21 @@ class Preferences:
 
     def set_language(self, lang: str) -> None:
         self.set("language", lang)
+
+    # -- clone automático ---------------------------------------------------
+
+    @property
+    def clone_suffix(self) -> str:
+        value = self.data.get("clone_suffix")
+        return " (Clone)" if value is None else str(value)
+
+    @property
+    def clone_copy_photo(self) -> bool:
+        return bool(self.data.get("clone_copy_photo", True))
+
+    @property
+    def clone_start_copy(self) -> bool:
+        return bool(self.data.get("clone_start_copy", True))
 
     def reset(self) -> None:
         self.data = dict(_DEFAULTS)
