@@ -33,6 +33,8 @@ from telethon.errors import (
     ChatAdminRequiredError,
     ChannelPrivateError,
     ChatWriteForbiddenError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
     FloodWaitError,
     MessageAuthorRequiredError,
     MessageEditTimeExpiredError,
@@ -1166,6 +1168,7 @@ class Copier:
                 item_messages = items[index] if isinstance(items[index], list) else [items[index]]
                 payload.update({
                     "dest": dest,
+                    "source": source,
                     "dest_topic": self._destination_topic(items[index], dest_topic, topic_map),
                     "reply_to": self._reply_target(item_messages[0], source_id, dest_id, topic_map),
                 })
@@ -1264,7 +1267,8 @@ class Copier:
 
     async def _prepare(self, index: int, item: QueueItem,
                        progress: ProgressDisplay,
-                       source: Any = None, *, strong: bool = False) -> Dict[str, Any]:
+                       source: Any = None, *, strong: bool = False,
+                       force_upload: bool = False) -> Dict[str, Any]:
         messages = item if isinstance(item, list) else [item]
         plan: List[Dict[str, Any]] = []
 
@@ -1282,7 +1286,7 @@ class Copier:
                 "path": None, "downloadable": bool(has_media) and not native,
                 "native": native,
             }
-            if (has_media and not native and not unsupported and len(messages) == 1
+            if (has_media and not native and not unsupported and not force_upload
                     and self.cfg.server_copy and self.cfg.delivery == "reference"):
                 try:
                     tl_utils.get_input_media(raw_media, is_photo=media_type == "photo")
@@ -1481,23 +1485,35 @@ class Copier:
         failed_entries = [e for e in plan if e.get("failed")]
         text_entries = [
             e for e in plan
-            if not e["path"] and not e.get("failed") and not e.get("native")
-            and _caption(e["msg"])
+            if not e["path"] and not e.get("reference") and not e.get("failed")
+            and not e.get("native") and _caption(e["msg"])
         ]
         sent_ids: Dict[int, int] = {}
 
         try:
             if len(media_entries) > 1:
-                ids = await self._send_album(media_entries, dest, dest_topic, progress, stats, reply_to)
+                if all(e.get("reference") and not e.get("path") for e in media_entries):
+                    ids = await self._send_album_reference_cascade(
+                        media_entries, dest, dest_topic, reply_to, progress, stats,
+                        payload.get("source"),
+                    )
+                    stats.server_copies += len(media_entries)
+                    stats.bytes_saved += sum(int(e.get("size") or 0) for e in media_entries)
+                else:
+                    ids = await self._send_album(media_entries, dest, dest_topic, progress, stats, reply_to)
                 for entry, created_id in zip(media_entries, ids):
                     sent_ids[entry["msg"].id] = created_id
             elif len(media_entries) == 1:
                 entry = media_entries[0]
                 if entry.get("reference") and not entry.get("path"):
-                    created_id = await self._send_reference(entry, dest, dest_topic, reply_to)
-                    stats.server_copies += 1
-                    stats.bytes_saved += int(entry.get("size") or 0)
-                    logger.info(f"Entrega por referência msg {entry['msg'].id}")
+                    created_id = await self._send_reference_cascade(
+                        entry, dest, dest_topic, reply_to, progress, stats,
+                        payload.get("source"),
+                    )
+                    if entry.get("reference") and not entry.get("path"):
+                        stats.server_copies += 1
+                        stats.bytes_saved += int(entry.get("size") or 0)
+                        logger.info(f"Entrega por referência msg {entry['msg'].id}")
                 else:
                     created_id = await self._send_media(
                         entry, dest, dest_topic, progress, stats, reply_to
@@ -1669,6 +1685,110 @@ class Copier:
         for chunk, chunk_entities in parts[1:]:
             await self._send_chunk(dest, chunk, chunk_entities, dest_topic, None)
         return created_id
+
+    async def _refresh_reference(self, entry: Dict[str, Any], source) -> bool:
+        if source is None or not hasattr(self.client, "get_messages"):
+            return False
+        try:
+            refreshed = await self.client.get_messages(source, ids=entry["msg"].id)
+        except (RPCError, OSError, ValueError) as exc:
+            logger.warning(f"Refresh de referência msg {entry['msg'].id}: {exc}")
+            return False
+        if refreshed is None or getattr(refreshed, "media", None) is None:
+            return False
+        entry["msg"] = refreshed
+        return True
+
+    async def _upload_fallback(self, entry: Dict[str, Any], dest, dest_topic,
+                               reply_to, progress: ProgressDisplay, stats: TransferStats,
+                               source) -> int:
+        logger.warning(f"Referência esgotada msg {entry['msg'].id}; fallback upload")
+        payload = await self._prepare(0, entry["msg"], progress, source=source,
+                                      strong=True, force_upload=True)
+        try:
+            prepared = payload["plan"][0]
+            if prepared.get("failed") or not prepared.get("path"):
+                raise RuntimeError(prepared.get("reason") or t("copy.download_unavailable"))
+            prepared["dest_msg_id"] = entry.get("dest_msg_id")
+            created_id = await self._send_media(prepared, dest, dest_topic, progress, stats, reply_to)
+            entry["path"] = prepared.get("path")
+            entry["dest_msg_id"] = created_id
+            return created_id
+        finally:
+            self._cleanup(payload.get("plan", []))
+
+    async def _send_reference_cascade(self, entry: Dict[str, Any], dest, dest_topic,
+                                      reply_to, progress: ProgressDisplay, stats: TransferStats,
+                                      source) -> int:
+        try:
+            return await self._send_reference(entry, dest, dest_topic, reply_to)
+        except (FileReferenceExpiredError, FileReferenceInvalidError) as exc:
+            logger.warning(f"Referência expirada msg {entry['msg'].id}: {exc}")
+        if await self._refresh_reference(entry, source):
+            try:
+                return await self._send_reference(entry, dest, dest_topic, reply_to)
+            except (FileReferenceExpiredError, FileReferenceInvalidError) as exc:
+                logger.warning(f"Referência ainda inválida msg {entry['msg'].id}: {exc}")
+        return await self._upload_fallback(entry, dest, dest_topic, reply_to, progress, stats, source)
+
+    async def _send_album_reference(self, entries: List[Dict[str, Any]], dest, dest_topic,
+                                    reply_to: Optional[int]) -> List[int]:
+        peer = await self.client.get_input_entity(dest)
+        created_ids: List[int] = []
+        for start in range(0, len(entries), 10):
+            chunk = entries[start:start + 10]
+            multi_media = []
+            random_ids = []
+            for entry in chunk:
+                parts = self._parts(entry["msg"], CAPTION_LIMIT)
+                caption, entities = parts[0] if parts else ("", [])
+                input_media = tl_utils.get_input_media(
+                    entry["msg"].media, is_photo=entry["media_type"] == "photo"
+                )
+                random_id = generate_random_long()
+                random_ids.append(random_id)
+                multi_media.append(types.InputSingleMedia(
+                    media=input_media, random_id=random_id,
+                    message=caption or "", entities=entities or None,
+                ))
+            response = await self.client(functions.messages.SendMultiMediaRequest(
+                peer=peer, multi_media=multi_media,
+                reply_to=self._reply_header(dest_topic, reply_to),
+            ))
+            parsed = self.client._get_response_message(random_ids, response, peer)
+            if not isinstance(parsed, list) or len(parsed) != len(chunk):
+                raise RuntimeError(t("copy.send_unconfirmed"))
+            batch_ids = [self._created_id(item) for item in parsed]
+            if any(a >= b for a, b in zip(batch_ids, batch_ids[1:])):
+                raise RuntimeError(t("order.violation"))
+            created_ids.extend(batch_ids)
+            for entry, created_id in zip(chunk, batch_ids):
+                entry["dest_msg_id"] = created_id
+        for entry in entries:
+            parts = self._parts(entry["msg"], CAPTION_LIMIT)
+            for chunk_text, chunk_entities in parts[1:]:
+                await self._send_chunk(dest, chunk_text, chunk_entities, dest_topic, None)
+        return created_ids
+
+    async def _send_album_reference_cascade(self, entries: List[Dict[str, Any]], dest, dest_topic,
+                                            reply_to, progress: ProgressDisplay, stats: TransferStats,
+                                            source) -> List[int]:
+        try:
+            return await self._send_album_reference(entries, dest, dest_topic, reply_to)
+        except (FileReferenceExpiredError, FileReferenceInvalidError) as exc:
+            logger.warning(f"Referência de álbum expirada: {exc}")
+        refreshed = False
+        for entry in entries:
+            refreshed = await self._refresh_reference(entry, source) or refreshed
+        if refreshed:
+            try:
+                return await self._send_album_reference(entries, dest, dest_topic, reply_to)
+            except (FileReferenceExpiredError, FileReferenceInvalidError) as exc:
+                logger.warning(f"Referência de álbum ainda inválida: {exc}")
+        ids = []
+        for entry in entries:
+            ids.append(await self._upload_fallback(entry, dest, dest_topic, reply_to, progress, stats, source))
+        return ids
 
     async def _send_raw_media(self, entry: Dict[str, Any], dest, dest_topic,
                               reply_to, caption: str, entities, progress_callback=None) -> int:
@@ -2067,7 +2187,8 @@ class Copier:
                 roots = {self._source_topic_id(message, set()) or 1}
                 reply_to = self._reply_target(message, source_id, dest_id, {root: root for root in roots})
                 payload = await self._prepare(0, message, quiet, source=source)
-                payload.update({"dest": dest, "dest_topic": target_topic, "reply_to": reply_to})
+                payload.update({"dest": dest, "source": source, "dest_topic": target_topic,
+                                "reply_to": reply_to})
                 errors_before = stats.errors
                 try:
                     self._check_limit()
@@ -2159,6 +2280,7 @@ class Copier:
                     route_roots.add(int(source_topic))
                 payload.update({
                     "dest": dest,
+                    "source": source,
                     "dest_topic": await self._mirror_topic(
                         msg, dest_topic, topic_map, ensure_topic
                     ),

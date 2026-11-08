@@ -300,6 +300,8 @@ _s("copy.topic_unmapped", "A mensagem pertence ao tópico de origem {topic}, que
 _s("copy.unsupported_media", "Tipo de mensagem não reproduzível pela API ({kind}); registrado como falha, não como cópia concluída.", "Message type cannot be reproduced by the API ({kind}); recorded as a failure, not as a completed copy.")
 _s("copy.download_unavailable", "Download da mídia indisponível ou expirado.", "Media download unavailable or expired.")
 _s("copy.download_failed", "Não foi possível baixar a mídia: {reason}", "Could not download the media: {reason}")
+_s("order.violation", "Violação de ordem detectada; refaça o tópico/destino afetado.",
+   "Order violation detected; rebuild the affected topic/destination.")
 _s("placeholder.pending", "⚠️ Conteúdo em recuperação (mensagem {id}). Motivo: {reason}",
    "⚠️ Content being recovered (message {id}). Reason: {reason}")
 _s("placeholder.unrecoverable", "❌ Conteúdo indisponível (mensagem {id}). Motivo: {reason}",

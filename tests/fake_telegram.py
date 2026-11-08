@@ -156,6 +156,8 @@ class FakeClient:
         self.edits: List[Dict[str, Any]] = []
         self.edit_errors: Dict[int, List[Exception]] = {}
         self.edit_failures: Dict[int, Exception] = {}
+        self.reference_errors: Dict[int, List[Exception]] = {}
+        self.reference_attempts: List[int] = []
         self.forwarded: List[Dict[str, Any]] = []
         self.downloads: List[int] = []
         self.fail_ids = set(fail_ids or ())
@@ -217,9 +219,21 @@ class FakeClient:
             self._random_messages[int(random_id)] = msg
         return msg
 
+    def _check_reference(self, media) -> None:
+        media_id = getattr(getattr(media, "id", None), "id", None)
+        if media_id is None:
+            return
+        self.reference_attempts.append(int(media_id))
+        errors = self.reference_errors.get(int(media_id), [])
+        if errors:
+            raise errors.pop(0)
+
     async def send_file(self, entity, file=None, caption=None, reply_to=None,
                         progress_callback=None, **kwargs):
         files = file if isinstance(file, list) else [file]
+        for item in files:
+            if not isinstance(item, (str, Path)):
+                self._check_reference(item)
         captions = caption if isinstance(caption, list) else [caption] * len(files)
         entities = kwargs.get("formatting_entities")
         if entities and not isinstance(entities[0], list):
@@ -259,18 +273,24 @@ class FakeClient:
         record = next((item for item in self.sent if item["msg_id"] == msg_id), None)
         if record is None:
             raise AssertionError(f"mensagem enviada não encontrada para edição: {msg_id}")
-        path = str(file) if file is not None else None
+        is_path = isinstance(file, (str, Path))
+        path = str(file) if is_path else None
+        input_media = None if is_path else file
+        if input_media is not None:
+            self._check_reference(input_media)
         record.update({
-            "kind": "file" if path else "text",
+            "kind": "file" if path else ("reference" if input_media is not None else "text"),
             "path": path,
-            "text": text if not path else None,
-            "caption": text if path else None,
+            "input_media": input_media,
+            "text": text if not path and input_media is None else None,
+            "caption": text if path or input_media is not None else None,
             "size": os.path.getsize(path) if path and os.path.exists(path) else 0,
             "formatting_entities": formatting_entities,
         })
         self.edits.append({
             "dest": getattr(entity, "id", entity), "msg_id": msg_id,
-            "text": text, "path": path, "formatting_entities": formatting_entities,
+            "text": text, "path": path, "input_media": input_media,
+            "formatting_entities": formatting_entities,
             **kwargs,
         })
         return FakeMessage(id=msg_id, message=text or "", entities=formatting_entities)
@@ -297,6 +317,7 @@ class FakeClient:
             return request.media
         if name == "SendMediaRequest":
             media = request.media
+            self._check_reference(media)
             kind = "file" if type(media).__name__.startswith("InputMediaUploaded") else "native"
             path = getattr(getattr(media, "file", None), "path", None)
             self._record_send(
@@ -308,6 +329,8 @@ class FakeClient:
             )
             return SimpleNamespace()
         if name == "SendMultiMediaRequest":
+            for item in request.multi_media:
+                self._check_reference(item.media)
             for item in request.multi_media:
                 media = item.media
                 kind = "file" if type(media).__name__ == "InputMediaUploadedPhoto" or type(media).__name__ == "InputMediaUploadedDocument" else "native"

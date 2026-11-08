@@ -31,6 +31,7 @@ from config import RunConfig  # noqa: E402
 from copier import Copier  # noqa: E402
 from database import Repository  # noqa: E402
 from i18n import get_lang, set_lang  # noqa: E402
+from telethon.errors import FileReferenceExpiredError  # noqa: E402
 from telethon.tl import types as tl  # noqa: E402
 from utils import DailyLimit  # noqa: E402
 from tests.fake_telegram import FakeClient, FakeMessage, channel  # noqa: E402
@@ -125,6 +126,57 @@ def test_server_copy_false_usa_caminho_antigo(env) -> None:
     assert setup.client.downloads == [1]
     assert setup.client.sent[0]["kind"] == "file"
     assert setup.client.sent[0]["path"]
+
+
+def test_album_por_referencia_preserva_ordem_das_partes(env) -> None:
+    messages = [tl_video(i, f"parte {i}", grouped_id=77) for i in (1, 2, 3)]
+    setup = make_copier(env, messages)
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 3 and result["albums"] == 1
+    assert result["server_copies"] == 3
+    assert setup.client.downloads == []
+    assert [s["input_media"].id.id for s in setup.client.sent] == [1001, 1002, 1003]
+    assert all(s["album"] for s in setup.client.sent)
+    routes = [env.repo.checkpoint_route(setup.source.id, setup.dest.id, i)["dest_msg_id"] for i in (1, 2, 3)]
+    assert routes == sorted(routes) and len(set(routes)) == 3
+
+
+def test_referencia_expirada_refresh_succede(env) -> None:
+    message = tl_video(1)
+    setup = make_copier(env, [message])
+    setup.client.reference_errors[1001] = [FileReferenceExpiredError(request=None)]
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 1 and result["server_copies"] == 1
+    assert setup.client.reference_attempts == [1001, 1001]
+    assert setup.client.downloads == []
+
+
+def test_referencia_expirada_persistente_fallback_upload(env) -> None:
+    message = tl_video(1)
+    setup = make_copier(env, [message])
+    setup.client.reference_errors[1001] = [
+        FileReferenceExpiredError(request=None), FileReferenceExpiredError(request=None)
+    ]
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest))
+    assert result["done"] == 1
+    assert result["server_copies"] == 0
+    assert setup.client.downloads == [1]
+    assert setup.client.sent[0]["kind"] == "file"
+    assert result["bytes"] > 0
+
+
+def test_referencia_em_forum_usa_topico(env) -> None:
+    message = tl_video(1)
+    setup = make_copier(env, [message])
+    with fast_sleep():
+        result = asyncio.run(setup.copier.run(setup.source, setup.dest, dest_topic=911))
+    assert result["done"] == 1 and result["server_copies"] == 1
+    assert setup.client.sent[0]["top_msg_id"] == 911
+    assert setup.client.sent[0]["reply_to"] == 911
+    assert setup.client.downloads == []
 
 
 def test_config_delivery_server_copy_roundtrip(env) -> None:
