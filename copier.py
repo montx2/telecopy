@@ -1670,6 +1670,18 @@ class Copier:
                     )
                     index += 1
                     continue
+                confirmed_id = entry.get("dest_msg_id")
+                if confirmed_id:
+                    # Já aceito pelo Telegram numa tentativa anterior: reenviar
+                    # criaria duplicata e quebraria a ordem. Só faltam continuações.
+                    has_media = bool(entry.get("path") or entry.get("reference")
+                                     or entry.get("native"))
+                    limit = CAPTION_LIMIT if has_media else MESSAGE_LIMIT
+                    await self._send_continuations(entry, dest, dest_topic,
+                                                   self._parts(msg, limit))
+                    sent_ids[msg.id] = int(confirmed_id)
+                    index += 1
+                    continue
                 if entry.get("native"):
                     sent_ids[msg.id] = await self._send_native(
                         entry, dest, dest_topic, reply_to, stats
@@ -1680,6 +1692,7 @@ class Copier:
                     end = index + 1
                     while (end < len(plan) and not plan[end].get("failed")
                            and not plan[end].get("native")
+                           and not plan[end].get("dest_msg_id")
                            and (plan[end].get("path") or plan[end].get("reference"))):
                         end += 1
                     group = plan[index:end]
@@ -1722,6 +1735,22 @@ class Copier:
             if created_id is None:
                 raise RuntimeError(t("copy.send_unconfirmed"))
             self._record_delivered(entry, source_id, dest_id, created_id, dest_topic, stats)
+
+    async def _send_continuations(self, entry: Dict[str, Any], dest, dest_topic,
+                                  parts: List[Tuple[str, List[Any]]]) -> None:
+        """Envia apenas as continuações ainda não confirmadas do item.
+
+        O contador fica no entry para que uma retentativa depois de falha parcial
+        não reenvie o que o Telegram já aceitou. Cada continuação é um envio
+        confirmado e conta no limite diário.
+        """
+        already = int(entry.get("text_parts_sent") or 0)
+        for offset, (chunk, entities) in enumerate(parts[1:]):
+            if offset < already:
+                continue
+            await self._send_chunk(dest, chunk, entities, dest_topic, None)
+            entry["text_parts_sent"] = offset + 1
+            daily_limit.add(1)
 
     def _parts(self, msg, limit: int) -> List[Tuple[str, List[Any]]]:
         text = _caption(msg)
@@ -1838,8 +1867,7 @@ class Copier:
             )
             created_id = self._created_id(result)
         entry["dest_msg_id"] = created_id
-        for chunk, chunk_entities in parts[1:]:
-            await self._send_chunk(dest, chunk, chunk_entities, dest_topic, None)
+        await self._send_continuations(entry, dest, dest_topic, parts)
         return created_id
 
     async def _refresh_reference(self, entry: Dict[str, Any], source) -> bool:
@@ -1922,8 +1950,7 @@ class Copier:
                 entry["dest_msg_id"] = created_id
         for entry in entries:
             parts = self._parts(entry["msg"], CAPTION_LIMIT)
-            for chunk_text, chunk_entities in parts[1:]:
-                await self._send_chunk(dest, chunk_text, chunk_entities, dest_topic, None)
+            await self._send_continuations(entry, dest, dest_topic, parts)
         return created_ids
 
     async def _send_album_reference_cascade(self, entries: List[Dict[str, Any]], dest, dest_topic,
@@ -1995,8 +2022,7 @@ class Copier:
             progress.remove_transfer(task_id)
 
         entry["dest_msg_id"] = created_id
-        for chunk, entities in parts[1:]:
-            await self._send_chunk(dest, chunk, entities, dest_topic, None)
+        await self._send_continuations(entry, dest, dest_topic, parts)
         stats.bytes_uploaded += size
         return created_id
 
@@ -2047,8 +2073,7 @@ class Copier:
         # perder texto nem formatação.
         for entry in entries:
             parts = self._parts(entry["msg"], CAPTION_LIMIT)
-            for chunk, entities in parts[1:]:
-                await self._send_chunk(dest, chunk, entities, dest_topic, None)
+            await self._send_continuations(entry, dest, dest_topic, parts)
         stats.bytes_uploaded += sum(
             os.path.getsize(e["path"]) for e in entries if os.path.exists(e["path"])
         )
@@ -2077,15 +2102,18 @@ class Copier:
         parts = self._parts(msg, MESSAGE_LIMIT)
         if not parts:
             raise RuntimeError(t("copy.unsupported_media", kind="empty"))
-        first_id = None
-        for index, (chunk, entities) in enumerate(parts):
-            created_id = await self._send_chunk(
-                dest, chunk, entities, dest_topic, reply_to if index == 0 else None
-            )
-            if first_id is None:
-                first_id = created_id
-                if entry is not None:
-                    entry["dest_msg_id"] = created_id
+        first_id = int(entry["dest_msg_id"]) if entry and entry.get("dest_msg_id") else None
+        if first_id is None:
+            chunk, entities = parts[0]
+            first_id = await self._send_chunk(dest, chunk, entities, dest_topic, reply_to)
+            if entry is not None:
+                entry["dest_msg_id"] = first_id
+        if entry is not None:
+            await self._send_continuations(entry, dest, dest_topic, parts)
+        else:
+            for chunk, entities in parts[1:]:
+                await self._send_chunk(dest, chunk, entities, dest_topic, None)
+                daily_limit.add(1)
         return int(first_id)
 
     def _native_input_media(self, msg):
@@ -2160,8 +2188,7 @@ class Copier:
             )
             created_id = self._created_id(result)
         entry["dest_msg_id"] = created_id
-        for chunk, chunk_entities in parts[1:]:
-            await self._send_chunk(dest, chunk, chunk_entities, dest_topic, None)
+        await self._send_continuations(entry, dest, dest_topic, parts)
         return created_id
 
 
