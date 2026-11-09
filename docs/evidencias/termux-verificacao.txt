@@ -1,0 +1,48 @@
+# Instalador Termux — evidência (Linux)
+
+## shellcheck
+sem achados
+
+## bash -n
+sintaxe OK
+
+## verify-only (deps presentes)
+TELECOPY — instalação no Termux
+  ! Fora do Termux (modo de teste): etapas de pkg serão puladas.
+
+[1/3] Localizando projeto e interpretador
+  ✓ projeto: /home/user/telecopy
+
+[2/3] Verificação automática (imports + doctor)
+  ✓ import telethon
+  ✓ import cryptography
+  ✓ import psutil
+  ✓ import rich
+  ✓ telethon 1.45.0 (versão fixada pelo projeto)
+  ! Login (sessão): ainda não feito — será pedido ao abrir
+  ! Credenciais API: ainda não informadas — serão pedidas ao abrir
+  ✓ doctor: 19 checks, 0 falha(s) de instalação, 2 aviso(s)
+
+[3/3] Pronto — próximos passos
+
+  Instalação verificada. Projeto em: /home/user/telecopy
+
+  1) Primeiro uso (login — pede api_id/api_hash de my.telegram.org):
+       cd /home/user/telecopy && python main.py
+
+  2) Depois de logar, pode usar a CLI:
+       python -m telecopy_cli clone --src @origem --dst @destino --perfil recomendado
+
+  3) Só diagnosticar, sem instalar nada:
+       bash termux-setup.sh --verify-only
+
+  Para cópias longas no celular:
+    · mantenha o Termux em primeiro plano e o aparelho na tomada
+    · desative a otimização de bateria do Termux nas configurações do Android
+    · use Wi-Fi (clonar canal grande consome muitos dados)
+    · o Android pode matar o processo mesmo assim — para muitas horas,
+      o robusto é rodar num servidor e usar o celular só como controle
+
+  Este script foi validado em Linux; a execução em Android real ainda
+  não foi testada. Guia e solução de problemas: docs/TERMUX.md
+exit=0

@@ -31,6 +31,15 @@ jobs:
           name: coverage
           path: coverage.xml
 
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck (instalador Termux)
+        run: shellcheck termux-setup.sh
+      - name: Sintaxe bash
+        run: bash -n termux-setup.sh
+
   package:
     runs-on: ubuntu-latest
     steps:

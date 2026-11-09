@@ -8,7 +8,7 @@ O trabalho cobre auditoria, correções de integridade, CLI não interativa,
 recursos opt-in, testes de regressão/caos/soak, CI, empacotamento e
 documentação. A suíte final está verde:
 
-- **348 testes passaram** em ~67s, sem rede real (`docs/evidencias/doctor-json-suite.txt`).
+- **357 testes passaram** em ~67s, sem rede real (`docs/evidencias/termux-suite.txt`).
 - **Ruff limpo** nas regras configuradas (`docs/evidencias/ruff-final.txt`).
 - **Wheel/sdist construídos** e smoke test do wheel instalado (`docs/evidencias/build.txt`).
 - **Mutação**: `politica_erros.py` com **100/100 mutantes mortos**, 0 sobreviventes
@@ -56,6 +56,14 @@ Tudo que depende da rede real permanece não validado em produção.
 - `ui`: HTTP local somente leitura, token obrigatório, comparação constant-time,
   guarda contra path traversal, bind padrão `127.0.0.1`.
 
+### Instalação no Android (Termux)
+- `termux-setup.sh`: um comando, idempotente, com verificação automática via
+  `doctor --json` e fallbacks (pkg → compilação; pip global → venv com
+  `--system-site-packages`). Nativas via `pkg`, Python puro via pip.
+- Rede indisponível é tratada como aviso, não como falha de instalação.
+- Guia e solução de problemas em `docs/TERMUX.md`; shellcheck no CI.
+- **Validado em Linux; execução em Android real ainda não testada.**
+
 ### Qualidade e infraestrutura
 - Testes de regressão antes/depois para cada correção relevante, propriedades
   Hypothesis, caos com relógio simulado e soak local de 100k linhas/intenções.
@@ -72,7 +80,7 @@ Tudo que depende da rede real permanece não validado em produção.
 
 | Critério | Estado | Evidência |
 |---|---|---|
-| Suíte verde sem rede | **Atendido** | `doctor-json-suite.txt` (348 passed) |
+| Suíte verde sem rede | **Atendido** | `termux-suite.txt` (357 passed) |
 | Lint limpo | **Atendido** | `ruff-final.txt` |
 | Regressões antes/depois | **Atendido** | `docs/evidencias/*-antes.txt` / `*-depois.txt` |
 | Empacotamento + smoke | **Atendido local** | `build.txt` |

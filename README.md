@@ -722,11 +722,27 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**348 passed** (`python -m pytest -o addopts='' -q`, suíte isolada, sem rede).
+**357 passed** (`python -m pytest -o addopts='' -q`, suíte isolada, sem rede).
 Ruff: `All checks passed` (regras E9/F63/F7/F82/F401/F841, excluindo `data/`).
 Cobertura crítica medida: 86% no conjunto (`docs/evidencias/coverage-critica.txt`);
 a meta de 90% ainda não foi atingida no `copier.py` (82%). Mutação:
 `politica_erros.py` 100/100 mutantes mortos (`docs/evidencias/mutacao-politica.txt`).
+
+### Rodar no celular (Android / Termux)
+
+Um comando, dentro do Termux:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/montx2/telecopy/main/termux-setup.sh)
+```
+
+Ou, já dentro do repositório: `bash termux-setup.sh`. O script instala as
+dependências nativas via `pkg` (com fallback de compilação), instala o resto via
+pip, clona/reusa o projeto, **verifica automaticamente** com `doctor --json` e
+ativa o wake-lock. É idempotente; use `--verify-only` para só diagnosticar.
+
+Guia completo, opções e solução de problemas: [`docs/TERMUX.md`](docs/TERMUX.md).
+No iPhone não é prático — use um servidor com o celular como controle.
 
 ### CLI não interativa (Fase 4/5)
 
