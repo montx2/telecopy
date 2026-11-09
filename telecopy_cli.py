@@ -162,9 +162,19 @@ async def executar(args: argparse.Namespace, client: Any, repo: Repository) -> i
     source = await client.get_entity(args.src)
     dest = await client.get_entity(args.dst)
     if args.comando == "verify":
+        verify_map: Optional[dict[int, int]] = None
+        verify_order: Optional[list[int]] = None
+        if getattr(source, "forum", False) and getattr(dest, "forum", False):
+            from channel_clone import ChannelCloner
+
+            cloner = ChannelCloner(client, repo=repo)
+            plan, mapped, _missing = await cloner.plan_existing(source, dest)
+            verify_map = dict(mapped)
+            verify_order = [topic.id for topic in ChannelCloner._creation_order(plan.topics)]
         resultado = await verificar_par(client, repo, source, dest,
                                         reparar=args.reparar_confirmados,
-                                        limite=args.limite, filter_code=args.filtro)
+                                        limite=args.limite, filter_code=args.filtro,
+                                        topic_map=verify_map, topic_order=verify_order)
         data = resultado.como_dict()
         if args.json:
             print(json.dumps(data, ensure_ascii=False))
@@ -186,12 +196,50 @@ async def executar(args: argparse.Namespace, client: Any, repo: Repository) -> i
         return 2
     if args.forward:
         cfg.delivery = "forward"
+
+    topic_map: Optional[dict[int, int]] = None
+    topic_titles: Optional[dict[int, str]] = None
+    topic_order: Optional[list[int]] = None
+    dest_topic: Optional[int] = None
+    forum_plan = None
+    forum_cloner = None
+    if getattr(source, "forum", False):
+        from channel_clone import ChannelCloner
+        from config import DAILY_LIMIT
+
+        forum_cloner = ChannelCloner(client, repo=repo)
+        if not getattr(dest, "forum", False) and not getattr(dest, "broadcast", False):
+            await forum_cloner.enable_forum(dest)
+            dest = await client.get_entity(dest)
+        if getattr(dest, "forum", False):
+            forum_plan, initial_map, _missing = await forum_cloner.plan_existing(source, dest)
+            topic_map = await forum_cloner.ensure_topics(forum_plan, dest, dict(initial_map))
+            dest_topic = topic_map.get(1)
+            topic_titles = {1: "General", **{tp.id: tp.title for tp in forum_plan.topics}}
+            topic_order = [tp.id for tp in ChannelCloner._creation_order(forum_plan.topics)]
+            cfg.use_dedup = False
+            cfg.signature = ""
+            if cfg.daily_limit == DAILY_LIMIT:
+                cfg.daily_limit = 0
+
     copier = Copier(client, repo=repo, config=cfg, rich_ok=not args.json)
     if args.rehearsal > 0:
         if not args.json:
             print(t("cli.rehearsal", n=args.rehearsal))
         copier.max_messages = int(args.rehearsal)
-    resultado = await _com_sinais(copier.run(source, dest, filter_code=args.filtro), copier)
+    resultado = await _com_sinais(
+        copier.run(
+            source, dest,
+            filter_code=args.filtro,
+            dest_topic=dest_topic,
+            topic_map=topic_map,
+            topic_titles=topic_titles,
+            topic_order=topic_order,
+        ),
+        copier,
+    )
+    if forum_plan is not None and forum_cloner is not None and topic_map and resultado.get("complete"):
+        await forum_cloner.apply_topic_settings(forum_plan, dest, topic_map)
     if resultado.get("interrupted") and not resultado.get("errors"):
         code = 2
     else:
@@ -202,6 +250,9 @@ async def executar(args: argparse.Namespace, client: Any, repo: Repository) -> i
             client, repo, source, dest,
             max_messages=int(args.rehearsal) if args.rehearsal > 0 else None,
             filter_code=args.filtro,
+            dest_topic=dest_topic,
+            topic_map=topic_map,
+            topic_order=topic_order,
         )).como_dict()
         if not verificacao["complete"]:
             code = 1
