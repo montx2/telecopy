@@ -49,9 +49,9 @@ def test_runconfig_valida_e_persiste_campos_novos() -> None:
     assert RunConfig.from_dict(data).to_dict() == data
     bad = RunConfig.from_dict({"connections_per_file": "abc", "lookahead": "x",
                                "max_total_connections": None, "max_tmp_gb": "nan"})
-    assert bad.connections_per_file == 8
+    assert bad.connections_per_file == 2
     assert bad.lookahead == 0
-    assert bad.max_total_connections == 32
+    assert bad.max_total_connections == 4
     assert bad.max_tmp_gb == 16.0
 
 
@@ -65,7 +65,7 @@ def test_prefs_v2_ganham_campos_novos_sem_perder_escolhas(tmp_path) -> None:
     assert loaded.get("prefs_version") == 2
     assert loaded.config.workers == 3 and loaded.config.delay == 1.5
     assert loaded.config.fast_transfer is True
-    assert loaded.config.connections_per_file == 8
+    assert loaded.config.connections_per_file == 2
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["config"]["max_tmp_gb"] == 16.0
     assert saved["config"]["lookahead"] == 0

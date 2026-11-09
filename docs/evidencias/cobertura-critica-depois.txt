@@ -1,0 +1,19 @@
+...../home/user/telecopy/.venv/lib/python3.11/site-packages/coverage/inorout.py:560: CoverageWarning: Module prefs was never imported. (module-not-imported); see https://coverage.readthedocs.io/en/7.17.2/messages.html#warning-module-not-imported
+  self.warn(f"Module {pkg} was never imported.", slug="module-not-imported")
+/home/user/telecopy/.venv/lib/python3.11/site-packages/coverage/inorout.py:560: CoverageWarning: Module relatorio was never imported. (module-not-imported); see https://coverage.readthedocs.io/en/7.17.2/messages.html#warning-module-not-imported
+  self.warn(f"Module {pkg} was never imported.", slug="module-not-imported")
+                                                                    [100%]
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.11.2-final-0 ________________
+
+Name                Stmts   Miss Branch BrPart  Cover   Missing
+---------------------------------------------------------------
+database.py           391    240     54      3    37%   231-232, 242-243, 256, 266-273, 276-277, 281-295, 299->exit, 302-303, 306-307, 311-319, 322-335, 387-389, 411-416, 422-427, 430-431, 441-442, 452-458, 461-467, 471-478, 482-490, 493-506, 532-537, 549-556, 567-573, 576-581, 584-585, 606-619, 626-627, 640-641, 655-666, 669-680, 687-689, 702-703, 711-718, 721-725, 728-730, 747-766, 771-776, 781-791, 797-809, 814-832, 836-848, 854-872, 877-886, 889-894, 899-912, 917-930, 933-942, 945-965, 972-974, 992-993, 1003-1004, 1020-1026, 1031-1032, 1039-1041, 1044-1046, 1052-1067, 1070-1078, 1082-1089
+dedup.py              185     53     46     12    68%   62-64, 68, 76, 111, 114-115, 142, 145, 153-154, 171-177, 188, 192->exit, 197-198, 201-203, 209-211, 222-228, 242-245, 255-269, 288->291, 295->304, 298-302
+fasttransfer.py       561    395    148      6    24%   77-79, 84-95, 99-104, 108-112, 120-123, 132-147, 220, 224, 227, 232-239, 242-255, 258-263, 266-267, 270-273, 276-286, 290-325, 328-333, 341-350, 355-360, 392, 396, 400, 404, 408, 412, 415, 418, 421, 424, 427-432, 438-459, 463-486, 489-502, 505-508, 519, 523-538, 550-591, 596-608, 623-700, 716-776
+politica_erros.py      34     17     14      0    35%   41-56, 61
+security.py           143     30     22      6    77%   58->60, 65-66, 68-71, 82->81, 85-88, 150-151, 153-154, 162-163, 168, 175-177, 182-189, 204-205, 227
+verificacao.py         84     25     26      5    65%   42, 47-56, 86->97, 101-103, 106-115, 117-118
+---------------------------------------------------------------
+TOTAL                1398    760    310     32    42%
+5 passed in 1.51s

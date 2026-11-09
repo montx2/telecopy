@@ -1,0 +1,110 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+_________ test_queda_entre_envio_e_checkpoint_nao_duplica_na_retomada __________
+tests/test_intents.py:58: in test_queda_entre_envio_e_checkpoint_nao_duplica_na_retomada
+    asyncio.run(copier.run(source, dest))
+/usr/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+copier.py:868: in run
+    await self._copy_loop(items, source, dest, source_id, dest_id,
+copier.py:1741: in _copy_loop
+    await sender_task
+copier.py:1614: in sender
+    action = (self._prompt_failure(self._explain(error))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+copier.py:956: in _prompt_failure
+    choice = (ui.ask(t("menu.option"), required=False) or "a").strip().lower()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+config.py:579: in ask
+    value = input().strip()
+            ^^^^^^^
+.venv/lib/python3.11/site-packages/_pytest/capture.py:229: in read
+    raise OSError(
+E   OSError: pytest: reading from stdin while output is captured!  Consider using `-s`.
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  !  Ordem bloqueada no tópico 1, msg_id=1: queda simulada depois do efeito
+    remoto
+
+  [r]  Retomar tentativa neste ponto
+  [p]  Reservar posição e continuar
+  [a]  Abortar cópia
+
+  › Opção: 
+___________ test_intencao_persiste_antes_do_envio_e_confirma_depois ____________
+tests/test_intents.py:82: in test_intencao_persiste_antes_do_envio_e_confirma_depois
+    asyncio.run(copier.run(source, dest))
+/usr/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+copier.py:868: in run
+    await self._copy_loop(items, source, dest, source_id, dest_id,
+copier.py:1741: in _copy_loop
+    await sender_task
+copier.py:1614: in sender
+    action = (self._prompt_failure(self._explain(error))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+copier.py:956: in _prompt_failure
+    choice = (ui.ask(t("menu.option"), required=False) or "a").strip().lower()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+config.py:579: in ask
+    value = input().strip()
+            ^^^^^^^
+.venv/lib/python3.11/site-packages/_pytest/capture.py:229: in read
+    raise OSError(
+E   OSError: pytest: reading from stdin while output is captured!  Consider using `-s`.
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  !  Ordem bloqueada no tópico 1, msg_id=1: 'Repository' object has no
+    attribute 'pending_intents'
+
+  [r]  Retomar tentativa neste ponto
+  [p]  Reservar posição e continuar
+  [a]  Abortar cópia
+
+  › Opção: 
+___________ test_efeito_remoto_ausente_permite_retomar_sem_bloqueio ____________
+tests/test_intents.py:94: in test_efeito_remoto_ausente_permite_retomar_sem_bloqueio
+    env.repo.begin_intent(source.id, dest.id, 1, 0, fingerprint="ausente", random_id=123)
+    ^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Repository' object has no attribute 'begin_intent'
+______________ test_destino_ambiguo_bloqueia_em_vez_de_adivinhar _______________
+tests/test_intents.py:107: in test_destino_ambiguo_bloqueia_em_vez_de_adivinhar
+    env.repo.begin_intent(source.id, dest.id, 1, 0, fingerprint="repetida", random_id=123)
+    ^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Repository' object has no attribute 'begin_intent'
+_________ test_migracao_send_intents_preserva_dados_e_permite_rollback _________
+tests/test_intents.py:131: in test_migracao_send_intents_preserva_dados_e_permite_rollback
+    assert repo.schema_version() >= 1
+           ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Repository' object has no attribute 'schema_version'
+=========================== short test summary info ============================
+FAILED tests/test_intents.py::test_queda_entre_envio_e_checkpoint_nao_duplica_na_retomada
+FAILED tests/test_intents.py::test_intencao_persiste_antes_do_envio_e_confirma_depois
+FAILED tests/test_intents.py::test_efeito_remoto_ausente_permite_retomar_sem_bloqueio
+FAILED tests/test_intents.py::test_destino_ambiguo_bloqueia_em_vez_de_adivinhar
+FAILED tests/test_intents.py::test_migracao_send_intents_preserva_dados_e_permite_rollback
+5 failed in 1.10s

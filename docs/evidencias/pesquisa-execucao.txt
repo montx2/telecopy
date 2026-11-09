@@ -1,0 +1,40 @@
+Consultando aahnik/tgcf
+Consultando iyear/tdl
+Consultando knadh/tg-archive
+Consultando fabianonline/telegram_backup
+Consultando alfem/telegram-download-daemon
+Consultando klept0/Telegram-Forwarder-Bot-v2
+Consultando erfnzdeh/Telegram-CLI
+Consultando Illgot/Telegram-CLI
+Consultando tdlib/td
+Consultando LonamiWebs/Telethon
+Consultando pyrogram/pyrogram
+Consultando KurimuzonAkuma/pyrogram
+Consultando mautrix/telegram
+Consultando MiyukiKun/FastTelethonhelper
+Consultando Dineshkarthik/telegram_media_downloader
+Consultando Nekmo/telegram-upload
+Consultando expectocode/telegram-export
+Consultando danog/MadelineProto
+Consultando AbirHasan2005/Forward-Client
+Consultando EverythingSuckz/TG-FileStreamBot
+Consultando rfsbraz/telegram-downloader
+Consultando smilekevin/TGPorter
+Consultando odysseusmax/tg-index
+Consultando nktknshn/tgmount
+Consultando niubility6/telegram-backup
+Consultando SubhradeepSS/Telegram-Channel-Cloner
+Falha verificável em SubhradeepSS/Telegram-Channel-Cloner: gh: Not Found (HTTP 404)
+
+Consultando colinshark/Telegram-Channel-Mirror
+Falha verificável em colinshark/Telegram-Channel-Mirror: gh: Not Found (HTTP 404)
+
+Consultando GeiserX/Telegram-Archive
+Consultando botnick/telegram-media-downloader
+Consultando Normalizex/telegram-backup
+Consultando renkagod/tg-chat-dump
+Consultando warl0ckwraith/telegram-migrator
+Consultando xsukax/xsukax-Telegram-Backup
+Consultando plzhans/telegram-chat-exporter
+Consultando q909717714/TGArchiveManager
+Consultando N4rr34n6/TelegramBackup

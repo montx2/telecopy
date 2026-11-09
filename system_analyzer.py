@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from config import SystemProfile, detect_system, recommended_workers
+from config import SystemProfile, detect_system, recommended_workers, turbo_settings
 
 
 @dataclass
@@ -41,16 +41,14 @@ class SystemAnalyzer:
     # -- workers ------------------------------------------------------------
 
     def worker_bounds(self) -> tuple[int, int]:
-        p = self.profile
-        by_ram = max(1, int(p.ram_available_gb / self.RAM_PER_WORKER_GB))
-        by_disk = max(1, int(p.disk_free_gb / self.DISK_PER_WORKER_GB))
-        by_cpu = max(1, min(p.cpu_logical, self.MAX_WORKERS_HARD))
-        maximum = max(1, min(by_ram, by_disk, by_cpu, self.MAX_WORKERS_HARD))
-        return 1, maximum
+        """(mínimo, máximo) de workers: o máximo é o do perfil Turbo do config."""
+        return 1, max(1, int(turbo_settings()["workers"]))
 
     def recommended(self, memory_profile: float = 0.6) -> int:
         minimum, maximum = self.worker_bounds()
         value = recommended_workers(self.profile.ram_available_gb, memory_profile)
+        if self.profile.is_low_end:
+            value = min(value, 2)
         return max(minimum, min(value, maximum))
 
     def estimate_for_channel(self, size_gb: Optional[float] = None) -> ChannelEstimate:

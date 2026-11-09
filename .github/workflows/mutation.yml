@@ -1,0 +1,24 @@
+name: Mutation (manual)
+on:
+  workflow_dispatch:
+
+jobs:
+  mutmut:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev,fast]" "mutmut>=2.4,<3"
+      - name: Mutate critical pure logic
+        run: |
+          mutmut run --paths-to-mutate=politica_erros.py,dedup.py --runner="python -m pytest -o addopts='' -q --timeout=30 tests/test_politica_erros.py tests/test_cobertura_extra.py tests/test_cobertura_final.py" || true
+          mutmut results > mutation-results.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: |
+            mutation-results.txt
+            .mutmut-cache

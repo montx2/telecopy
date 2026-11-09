@@ -1,0 +1,59 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________ test_fallback_signal_restaura_handler_antigo _________________
+tests/test_sinais_cli.py:45: in test_fallback_signal_restaura_handler_antigo
+    assert signal.getsignal(signal.SIGTERM) is old
+E   assert <function _com_sinais.<locals>.pedir_parada at 0x7f6e4ec00900> is <Handlers.SIG_DFL: 0>
+E    +  where <function _com_sinais.<locals>.pedir_parada at 0x7f6e4ec00900> = <function getsignal at 0x7f6e50de6a20>(<Signals.SIGTERM: 15>)
+E    +    where <function getsignal at 0x7f6e50de6a20> = signal.getsignal
+E    +    and   <Signals.SIGTERM: 15> = signal.SIGTERM
+____________________ test_cli_nao_abre_prompt_em_erro_fatal ____________________
+tests/test_sinais_cli.py:70: in test_cli_nao_abre_prompt_em_erro_fatal
+    code = asyncio.run(telecopy_cli.executar(args, client, repo))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+telecopy_cli.py:136: in executar
+    resultado = await _com_sinais(copier.run(source, dest), copier)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+telecopy_cli.py:88: in _com_sinais
+    return await task
+           ^^^^^^^^^^
+copier.py:880: in run
+    await self._copy_loop(items, source, dest, source_id, dest_id,
+copier.py:1780: in _copy_loop
+    await sender_task
+copier.py:1653: in sender
+    action = (self._prompt_failure(self._explain(error))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+copier.py:970: in _prompt_failure
+    choice = (ui.ask(t("menu.option"), required=False) or "a").strip().lower()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_sinais_cli.py:53: in nao_interativo
+    raise AssertionError("CLI não pode pedir input")
+E   AssertionError: CLI não pode pedir input
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 2 workers · 1.0s
+
+
+  !  Ordem bloqueada no tópico 1, msg_id=1: Você precisa ser administrador no
+    destino e ter permissão para publicar mensagens.
+
+  [r]  Retomar tentativa neste ponto
+  [p]  Reservar posição e continuar
+  [a]  Abortar cópia
+
+=========================== short test summary info ============================
+FAILED tests/test_sinais_cli.py::test_fallback_signal_restaura_handler_antigo
+FAILED tests/test_sinais_cli.py::test_cli_nao_abre_prompt_em_erro_fatal - Ass...
+2 failed in 0.51s

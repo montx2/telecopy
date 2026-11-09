@@ -1,0 +1,135 @@
+Requirement already satisfied: telethon==1.45.0 in ./.venv/lib/python3.11/site-packages (from -r requirements.txt (line 2)) (1.45.0)
+Requirement already satisfied: cryptography>=42.0.0 in ./.venv/lib/python3.11/site-packages (from -r requirements.txt (line 3)) (50.0.2)
+Requirement already satisfied: psutil>=5.9.0 in ./.venv/lib/python3.11/site-packages (from -r requirements.txt (line 4)) (7.2.2)
+Requirement already satisfied: rich>=13.7.0 in ./.venv/lib/python3.11/site-packages (from -r requirements.txt (line 5)) (15.0.0)
+Requirement already satisfied: cryptg>=0.4.0 in ./.venv/lib/python3.11/site-packages (from -r requirements.txt (line 8)) (0.6.1)
+Requirement already satisfied: pytest<10,>=8.0.0 in ./.venv/lib/python3.11/site-packages (from -r requirements-dev.txt (line 3)) (9.2.0)
+Requirement already satisfied: icmplib>=3.0.4 in ./.venv/lib/python3.11/site-packages (from -r requirements-dev.txt (line 4)) (3.0.4)
+Collecting hypothesis<7,>=6.100
+  Downloading hypothesis-6.170.15-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.2 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 29.7 MB/s eta 0:00:00
+Collecting pytest-cov<8,>=5
+  Downloading pytest_cov-7.1.0-py3-none-any.whl (22 kB)
+Collecting pytest-timeout<3,>=2.3
+  Downloading pytest_timeout-2.4.0-py3-none-any.whl (14 kB)
+Collecting ruff<1,>=0.11
+  Downloading ruff-0.17.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.6 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.6/10.6 MB 123.3 MB/s eta 0:00:00
+Collecting mypy<2,>=1.15
+  Downloading mypy-1.20.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (14.6 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.6/14.6 MB 66.5 MB/s eta 0:00:00
+Collecting pip-audit<3,>=2.7
+  Downloading pip_audit-2.10.1-py3-none-any.whl (62 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 62.0/62.0 kB 28.7 MB/s eta 0:00:00
+Collecting mutmut<3,>=2.4
+  Downloading mutmut-2.5.1.tar.gz (50 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 50.5/50.5 kB 18.1 MB/s eta 0:00:00
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Requirement already satisfied: pyaes in ./.venv/lib/python3.11/site-packages (from telethon==1.45.0->-r requirements.txt (line 2)) (1.6.1)
+Requirement already satisfied: rsa in ./.venv/lib/python3.11/site-packages (from telethon==1.45.0->-r requirements.txt (line 2)) (4.9.1)
+Requirement already satisfied: cffi>=2.0.0 in ./.venv/lib/python3.11/site-packages (from cryptography>=42.0.0->-r requirements.txt (line 3)) (2.1.1)
+Requirement already satisfied: markdown-it-py>=2.2.0 in ./.venv/lib/python3.11/site-packages (from rich>=13.7.0->-r requirements.txt (line 5)) (4.2.0)
+Requirement already satisfied: pygments<3.0.0,>=2.13.0 in ./.venv/lib/python3.11/site-packages (from rich>=13.7.0->-r requirements.txt (line 5)) (2.21.0)
+Requirement already satisfied: iniconfig>=2 in ./.venv/lib/python3.11/site-packages (from pytest<10,>=8.0.0->-r requirements-dev.txt (line 3)) (2.3.1)
+Requirement already satisfied: packaging>=24 in ./.venv/lib/python3.11/site-packages (from pytest<10,>=8.0.0->-r requirements-dev.txt (line 3)) (26.3)
+Requirement already satisfied: pluggy<2,>=1.6 in ./.venv/lib/python3.11/site-packages (from pytest<10,>=8.0.0->-r requirements-dev.txt (line 3)) (1.7.0)
+Collecting sortedcontainers<3.0.0,>=2.1.0
+  Downloading sortedcontainers-2.4.0-py2.py3-none-any.whl (29 kB)
+Collecting coverage[toml]>=7.10.6
+  Downloading coverage-7.17.2-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (262 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 262.4/262.4 kB 78.2 MB/s eta 0:00:00
+Collecting typing_extensions>=4.6.0
+  Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 45.6/45.6 kB 15.6 MB/s eta 0:00:00
+Collecting mypy_extensions>=1.0.0
+  Downloading mypy_extensions-1.2.0-py3-none-any.whl (5.1 kB)
+Collecting pathspec>=1.0.0
+  Downloading pathspec-1.1.1-py3-none-any.whl (57 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.3/57.3 kB 22.3 MB/s eta 0:00:00
+Collecting librt>=0.8.0
+  Downloading librt-0.16.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (515 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 516.0/516.0 kB 94.2 MB/s eta 0:00:00
+Collecting CacheControl[filecache]>=0.13.0
+  Downloading cachecontrol-0.14.4-py3-none-any.whl (22 kB)
+Collecting cyclonedx-python-lib<12,>=5
+  Downloading cyclonedx_python_lib-11.12.0-py3-none-any.whl (529 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.5/529.5 kB 101.0 MB/s eta 0:00:00
+Collecting pip-api>=0.0.28
+  Downloading pip_api-0.0.35-py3-none-any.whl (123 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 123.9/123.9 kB 48.2 MB/s eta 0:00:00
+Collecting pip-requirements-parser>=32.0.0
+  Downloading pip_requirements_parser-32.0.1-py3-none-any.whl (35 kB)
+Collecting requests>=2.31.0
+  Downloading requests-2.34.2-py3-none-any.whl (73 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.1/73.1 kB 40.2 MB/s eta 0:00:00
+Collecting tomli>=2.2.1
+  Downloading tomli-2.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (276 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 276.4/276.4 kB 98.0 MB/s eta 0:00:00
+Collecting tomli-w>=1.2.0
+  Downloading tomli_w-1.2.0-py3-none-any.whl (6.7 kB)
+Collecting platformdirs>=4.2.0
+  Downloading platformdirs-4.14.5-py3-none-any.whl (35 kB)
+Collecting click
+  Downloading click-8.5.1-py3-none-any.whl (126 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 126.2/126.2 kB 60.5 MB/s eta 0:00:00
+Collecting glob2
+  Downloading glob2-0.7.tar.gz (10 kB)
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Collecting junit-xml<2,>=1.8
+  Downloading junit_xml-1.9-py2.py3-none-any.whl (7.1 kB)
+Collecting parso
+  Downloading parso-0.8.7-py2.py3-none-any.whl (107 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 107.0/107.0 kB 49.7 MB/s eta 0:00:00
+Collecting pony
+  Downloading pony-0.7.20-py3-none-any.whl (319 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 319.9/319.9 kB 55.2 MB/s eta 0:00:00
+Collecting toml
+  Downloading toml-0.10.2-py2.py3-none-any.whl (16 kB)
+Collecting msgpack<2.0.0,>=0.5.2
+  Downloading msgpack-1.2.4-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (480 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 480.2/480.2 kB 36.4 MB/s eta 0:00:00
+Collecting filelock>=3.8.0
+  Downloading filelock-4.2.9-py3-none-any.whl (164 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 164.7/164.7 kB 30.2 MB/s eta 0:00:00
+Requirement already satisfied: pycparser in ./.venv/lib/python3.11/site-packages (from cffi>=2.0.0->cryptography>=42.0.0->-r requirements.txt (line 3)) (3.12)
+Collecting license-expression<31,>=30
+  Downloading license_expression-30.4.4-py3-none-any.whl (120 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 120.6/120.6 kB 47.2 MB/s eta 0:00:00
+Collecting packageurl-python<2,>=0.11
+  Downloading packageurl_python-0.17.6-py3-none-any.whl (36 kB)
+Collecting py-serializable<3.0.0,>=2.1.0
+  Downloading py_serializable-2.2.0-py3-none-any.whl (23 kB)
+Collecting six
+  Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Requirement already satisfied: mdurl~=0.1 in ./.venv/lib/python3.11/site-packages (from markdown-it-py>=2.2.0->rich>=13.7.0->-r requirements.txt (line 5)) (0.1.2)
+Requirement already satisfied: pip in ./.venv/lib/python3.11/site-packages (from pip-api>=0.0.28->pip-audit<3,>=2.7->-r requirements-dev.txt (line 11)) (23.0.1)
+Collecting pyparsing
+  Downloading pyparsing-3.3.3-py3-none-any.whl (126 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 126.4/126.4 kB 48.5 MB/s eta 0:00:00
+Collecting charset_normalizer<4,>=2
+  Downloading charset_normalizer-3.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (269 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 270.0/270.0 kB 28.7 MB/s eta 0:00:00
+Collecting idna<4,>=2.5
+  Downloading idna-3.20-py3-none-any.whl (69 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 69.6/69.6 kB 9.6 MB/s eta 0:00:00
+Collecting urllib3<3,>=1.26
+  Downloading urllib3-2.8.0-py3-none-any.whl (135 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 135.7/135.7 kB 43.9 MB/s eta 0:00:00
+Collecting certifi>=2023.5.7
+  Downloading certifi-2026.10.23-py3-none-any.whl (135 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 135.1/135.1 kB 55.7 MB/s eta 0:00:00
+Requirement already satisfied: pyasn1>=0.1.3 in ./.venv/lib/python3.11/site-packages (from rsa->telethon==1.45.0->-r requirements.txt (line 2)) (0.6.5)
+Collecting boolean.py>=4.0
+  Downloading boolean_py-5.0-py3-none-any.whl (26 kB)
+Collecting defusedxml<0.8.0,>=0.7.1
+  Downloading defusedxml-0.7.1-py2.py3-none-any.whl (25 kB)
+Installing collected packages: sortedcontainers, glob2, boolean.py, urllib3, typing_extensions, tomli-w, tomli, toml, six, ruff, pyparsing, pony, platformdirs, pip-api, pathspec, parso, packageurl-python, mypy_extensions, msgpack, license-expression, librt, idna, hypothesis, filelock, defusedxml, coverage, click, charset_normalizer, certifi, requests, pytest-timeout, py-serializable, pip-requirements-parser, mypy, junit-xml, pytest-cov, mutmut, cyclonedx-python-lib, CacheControl, pip-audit
+  DEPRECATION: glob2 is being installed using the legacy 'setup.py install' method, because it does not have a 'pyproject.toml' and the 'wheel' package is not installed. pip 23.1 will enforce this behaviour change. A possible replacement is to enable the '--use-pep517' option. Discussion can be found at https://github.com/pypa/pip/issues/8559
+  Running setup.py install for glob2: started
+  Running setup.py install for glob2: finished with status 'done'
+  DEPRECATION: mutmut is being installed using the legacy 'setup.py install' method, because it does not have a 'pyproject.toml' and the 'wheel' package is not installed. pip 23.1 will enforce this behaviour change. A possible replacement is to enable the '--use-pep517' option. Discussion can be found at https://github.com/pypa/pip/issues/8559
+  Running setup.py install for mutmut: started
+  Running setup.py install for mutmut: finished with status 'done'
+Successfully installed CacheControl-0.14.4 boolean.py-5.0 certifi-2026.10.23 charset_normalizer-3.5.2 click-8.5.1 coverage-7.17.2 cyclonedx-python-lib-11.12.0 defusedxml-0.7.1 filelock-4.2.9 glob2-0.7 hypothesis-6.170.15 idna-3.20 junit-xml-1.9 librt-0.16.0 license-expression-30.4.4 msgpack-1.2.4 mutmut-2.5.1 mypy-1.20.2 mypy_extensions-1.2.0 packageurl-python-0.17.6 parso-0.8.7 pathspec-1.1.1 pip-api-0.0.35 pip-audit-2.10.1 pip-requirements-parser-32.0.1 platformdirs-4.14.5 pony-0.7.20 py-serializable-2.2.0 pyparsing-3.3.3 pytest-cov-7.1.0 pytest-timeout-2.4.0 requests-2.34.2 ruff-0.17.4 six-1.17.0 sortedcontainers-2.4.0 toml-0.10.2 tomli-2.5.0 tomli-w-1.2.0 typing_extensions-4.16.0 urllib3-2.8.0

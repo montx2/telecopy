@@ -7,11 +7,14 @@ para o cofre cifrado).  Qualquer chave desconhecida é preservada.
 
 from __future__ import annotations
 
+import json
+import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict
 
 from config import DATA_DIR, RunConfig
-from utils import read_json, write_json
+from utils import write_json
 
 PREFS_FILE = DATA_DIR / "prefs.json"
 
@@ -21,6 +24,7 @@ _DEFAULTS: Dict[str, Any] = {
     "prefs_version": _PREFS_VERSION,
     "language": None,          # None = perguntar na primeira execução
     "onboarding_done": False,
+    "auto_profile_done": False,  # perfil de hardware já aplicado uma vez
     "last_filter": "all",
     "last_source_id": None,
     "last_dest_id": None,
@@ -44,8 +48,34 @@ class Preferences:
         self.data: Dict[str, Any] = dict(_DEFAULTS)
         self.load()
 
+    def _preserve(self, suffix: str) -> Path:
+        backup = self.path.with_name(self.path.name + f".{suffix}-{int(time.time())}")
+        try:
+            shutil.copy2(self.path, backup)
+        except OSError:
+            backup = self.path
+        return backup
+
     def load(self) -> Dict[str, Any]:
-        saved = read_json(self.path, {})
+        saved: Any = {}
+        if self.path.exists():
+            try:
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                from i18n import t
+                backup = self._preserve("corrupt")
+                print(t("prefs.corrupt", path=backup))
+                saved = {}
+        if isinstance(saved, dict):
+            try:
+                future_version = int(saved.get("prefs_version", 1)) > _PREFS_VERSION
+            except (TypeError, ValueError):
+                future_version = False
+            if future_version:
+                from i18n import t
+                backup = self._preserve("future")
+                print(t("prefs.future", version=saved.get("prefs_version"), path=backup))
+                saved = {}
         if isinstance(saved, dict):
             merged = {**_DEFAULTS, **saved}
             saved_config = saved.get("config") or {}

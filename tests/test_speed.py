@@ -55,9 +55,9 @@ def payload(size: int) -> bytes:
     return (block * (size // len(block) + 1))[:size]
 
 
-# ── FLOOD_PREMIUM_WAIT não pode custar velocidade ─────────────────────────────
+# ── FLOOD_PREMIUM_WAIT reduz carga e preserva integridade ───────────────────
 
-def test_premium_wait_espera_sem_reduzir_conexoes_nem_cair_no_fallback(env, no_sleep) -> None:
+def test_premium_wait_espera_reduz_conexoes_e_preserva_caminho_rapido(env, no_sleep) -> None:
     size = 2 * PART_SIZE + 77
     data = payload(size)
     msg = tl_video(1, size=size)
@@ -77,13 +77,14 @@ def test_premium_wait_espera_sem_reduzir_conexoes_nem_cair_no_fallback(env, no_s
 
     asyncio.run(scenario())
     assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == hashlib.sha256(data).hexdigest()
-    # Esperou o teto da conta, mas manteve todo o paralelismo e o caminho rápido.
-    assert pool.capacity == 8
-    assert pool.halvings == 0
+    # Correção do contrato: FloodPremiumWait é tratado como flood real, corta
+    # pela metade e preserva o caminho rápido; não é ignorado como antes.
+    assert pool.capacity == 4
+    assert pool.halvings == 1
     assert client.downloads == []
 
 
-def test_premium_wait_no_upload_mantem_capacidade(env, no_sleep) -> None:
+def test_premium_wait_no_upload_reduz_capacidade_uma_vez(env, no_sleep) -> None:
     data = payload(PART_SIZE + 512)
     src = env.root / "in.bin"
     src.write_bytes(data)
@@ -101,7 +102,7 @@ def test_premium_wait_no_upload_mantem_capacidade(env, no_sleep) -> None:
 
     handle = asyncio.run(scenario())
     assert handle is not None
-    assert pool.capacity == 6 and pool.halvings == 0
+    assert pool.capacity == 3 and pool.halvings == 1
 
 
 def test_floodwait_comum_ainda_protege_e_depois_recupera(env, no_sleep) -> None:
@@ -182,9 +183,9 @@ def test_turbo_respeita_hardware_e_preserva_invariantes() -> None:
     cfg = RunConfig(**values)
     assert cfg.fast_transfer is True
     assert 2 <= cfg.workers <= WORKERS_HARD_CAP
-    assert 4 <= cfg.connections_per_file <= MAX_CONNECTIONS_PER_FILE
+    assert 1 <= cfg.connections_per_file <= 4
     assert cfg.max_total_connections >= cfg.connections_per_file
-    assert cfg.delay <= 0.2
+    assert cfg.delay >= 0.5
     assert cfg.daily_limit == 0
     # Velocidade nunca custa ordem, dedup nem retomada.
     assert cfg.strict_order is True and cfg.resume is True

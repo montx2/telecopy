@@ -35,7 +35,7 @@ from telethon.errors import (
 )
 from telethon.tl.types import Channel, Chat
 
-import __init__ as _app
+import app_meta as _app
 from config import (
     APP_AUTHOR,
     BACKUP_DIR,
@@ -330,6 +330,19 @@ class App:
         self.stats = Stats()
         self.config: RunConfig = prefs.config
         self.prefs = prefs
+        if not self.prefs.get("auto_profile_done", False):
+            # Autoconfiguração: aplica uma vez o perfil recomendado para este PC
+            # (só campos de hardware; modo de envio, dedup etc. não são tocados).
+            try:
+                from config import recommended_settings
+
+                for key, value in recommended_settings().items():
+                    setattr(self.config, key, value)
+                self.config.__post_init__()
+                self.prefs.save_config(self.config)
+            except Exception as exc:  # nunca impede o programa de abrir
+                logger.warning(f"Autoconfiguração de hardware ignorada: {exc}")
+            self.prefs.set("auto_profile_done", True)
         self.retry = RetryQueue(db)
         self.dedup = DedupEngine(db, enabled=True)
         self.picker: Optional[ChannelPicker] = None
@@ -2515,6 +2528,7 @@ class App:
             ui.menu([
                 ("1", t("settings.delay.option"), f"{cfg.delay:.1f}s"),
                 ("2", t("settings.workers.option"), str(cfg.workers)),
+                ("r", t("settings.recommended.option"), t("settings.recommended.desc")),
                 ("p", t("settings.turbo.option"), t("settings.turbo.desc")),
                 ("t", t("settings.fast_transfer.toggle"), t("settings.on") if cfg.fast_transfer else t("settings.off")),
                 ("n", t("settings.connections_per_file.option"), str(cfg.connections_per_file)),
@@ -2616,6 +2630,9 @@ class App:
                 self._save_config()
                 ui.ok(f"{t('settings.on_failure')}: {t(f'on_failure.{cfg.on_failure}')}")
                 await asyncio.sleep(0.7)
+            elif choice == "r":
+                self._apply_recommended()
+                await asyncio.sleep(1.5)
             elif choice == "p":
                 self._apply_turbo()
                 await asyncio.sleep(1.5)
@@ -2715,8 +2732,26 @@ class App:
         self._save_config()
         ui.ok(t("settings.delay.set", val=f"{value:.1f}"))
 
+    def _apply_recommended(self) -> None:
+        """Perfil recomendado: ponto de partida conservador, reduzido pelo hardware."""
+        from config import recommended_settings
+
+        values = recommended_settings()
+        for key, value in values.items():
+            setattr(self.config, key, value)
+        self.config.__post_init__()
+        self._save_config()
+        ui.blank()
+        ui.info(t("autoconfig.note"))
+        ui.ok(t("settings.recommended.applied",
+                workers=self.config.workers,
+                conn=self.config.connections_per_file,
+                total=self.config.max_total_connections,
+                tmp=f"{self.config.max_tmp_gb:g}",
+                delay=f"{self.config.delay:g}"))
+
     def _apply_turbo(self) -> None:
-        """Abre o paralelismo até o limite do hardware, sem tocar em ordem/dedup."""
+        """Perfil máximo explícito com teto conservador, sem tocar em ordem/dedup."""
         from config import turbo_settings
 
         values = turbo_settings()

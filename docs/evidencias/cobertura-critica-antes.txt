@@ -1,0 +1,21 @@
+F.FF.                                                                    [100%]
+=================================== FAILURES ===================================
+___________________ test_vault_roundtrip_delete_e_corrompido ___________________
+tests/test_cobertura_critica.py:31: in test_vault_roundtrip_delete_e_corrompido
+    vault.update({"lang": "en"})
+E   TypeError: Vault.update() takes 1 positional argument but 2 were given
+________________________ test_dedup_file_hash_e_engine _________________________
+tests/test_cobertura_critica.py:64: in test_dedup_file_hash_e_engine
+    assert engine.stats()["enabled"] is True
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'enabled'
+_____________________ test_verify_ausente_ambiguo_e_ordem ______________________
+tests/test_cobertura_critica.py:87: in test_verify_ausente_ambiguo_e_ordem
+    assert result.ordem_ok is False
+E   AssertionError: assert True is False
+E    +  where True = ResultadoVerificacao(source_id=-1, dest_id=-2, verificados=3, ok=1, ausentes=[1, 3], ambiguos=[], reparados=[], ordem_... confirmada no destino.'}, {'msg_id': 3, 'motivo': 'Checkpoint concluído sem correspondência confirmada no destino.'}]).ordem_ok
+=========================== short test summary info ============================
+FAILED tests/test_cobertura_critica.py::test_vault_roundtrip_delete_e_corrompido
+FAILED tests/test_cobertura_critica.py::test_dedup_file_hash_e_engine - KeyEr...
+FAILED tests/test_cobertura_critica.py::test_verify_ausente_ambiguo_e_ordem
+3 failed, 2 passed in 0.97s

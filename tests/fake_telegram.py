@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from telethon import types
 from telethon.errors import FloodWaitError
@@ -59,6 +59,8 @@ class FakeDocument:
     mime_type: str = "application/pdf"
     attributes: List[Any] = field(default_factory=list)
     access_hash: int = 0
+    file_reference: bytes = b""
+    dc_id: int = 1
 
 
 @dataclass
@@ -72,6 +74,8 @@ class FakePhoto:
     id: int
     sizes: List[FakePhotoSize] = field(default_factory=list)
     access_hash: int = 0
+    file_reference: bytes = b""
+    dc_id: int = 1
 
 
 @dataclass
@@ -167,9 +171,17 @@ class FakeSender:
 
         name = type(request).__name__
         key = getattr(request, "offset", None) if name == "GetFileRequest" else getattr(request, "file_part", None)
-        errors = self.client.part_errors.get((name, key), [])
+        identidade = (name, key)
+        tentativa = self.client.part_attempts.get(identidade, 0) + 1
+        self.client.part_attempts[identidade] = tentativa
+        self.client.part_attempt_times.append((self.client.clock(), name, key, tentativa))
+        errors = self.client.part_errors.get(identidade, [])
         if errors:
             raise errors.pop(0)
+        if self.client.part_error_factory is not None:
+            erro = self.client.part_error_factory(name, key, tentativa, request)
+            if erro is not None:
+                raise erro
         delay = self.client.part_delays.get((name, key), 0)
         self.client.active_parts += 1
         self.client.peak_parts = max(self.client.peak_parts, self.client.active_parts)
@@ -191,6 +203,8 @@ class FakeClient:
                  temp_dir: Optional[str] = None) -> None:
         self.messages = sorted(messages, key=lambda m: m.id)
         self.sent: List[Dict[str, Any]] = []
+        self.sent_messages: Dict[int, List[FakeMessage]] = {}
+        self._registered_ids: List[int] = []
         self.edits: List[Dict[str, Any]] = []
         self.edit_errors: Dict[int, List[Exception]] = {}
         self.edit_failures: Dict[int, Exception] = {}
@@ -217,6 +231,11 @@ class FakeClient:
         self.part_store: Dict[int, Dict[int, bytes]] = {}
         self.part_errors: Dict[Any, List[Exception]] = {}
         self.part_delays: Dict[Any, float] = {}
+        self.part_error_factory: Optional[Callable[[str, Any, int, Any], Optional[Exception]]] = None
+        self.part_attempts: Dict[Any, int] = {}
+        self.part_attempt_times: List[Any] = []
+        self.export_errors: Dict[int, List[Exception]] = {}
+        self.clock: Callable[[], float] = __import__("time").monotonic
         self.part_calls: List[Any] = []
         self.active_parts = 0
         self.peak_parts = 0
@@ -260,6 +279,9 @@ class FakeClient:
         return SimpleNamespace(path=str(path), name=file_name or os.path.basename(str(path)))
 
     async def _create_exported_sender(self, dc_id: int) -> FakeSender:
+        erros = self.export_errors.get(dc_id, [])
+        if erros:
+            raise erros.pop(0)
         sender = FakeSender(self, dc_id)
         self.created_senders.append(sender)
         return sender
@@ -313,6 +335,30 @@ class FakeClient:
             "msg_id": self._ids, **extra,
         }
         self.sent.append(record)
+        # Histórico consultável do destino, separado da origem. Necessário para
+        # reconciliar uma intenção cujo efeito remoto ocorreu antes do checkpoint.
+        dest_key = int(getattr(entity, "id", entity))
+        reply = None
+        if reply_id is not None or top_id is not None:
+            reply = SimpleNamespace(reply_to_msg_id=reply_id,
+                                    reply_to_top_id=top_id, forum_topic=top_id is not None)
+        history_msg = FakeMessage(id=msg.id, message=msg.message, reply_to=reply,
+                                  entities=extra.get("formatting_entities"))
+        input_media = extra.get("input_media")
+        if input_media is not None:
+            media_id = getattr(getattr(input_media, "id", None), "id", None)
+            if media_id is None:
+                media_id = getattr(input_media, "id", None)
+            if media_id is not None:
+                doc = FakeDocument(id=int(media_id), size=record["size"],
+                                   attributes=extra.get("attributes") or [])
+                history_msg.media = MessageMediaDocument(document=doc)
+        elif path:
+            attrs = extra.get("attributes") or [FakeDocAttribute(filename=os.path.basename(path))]
+            doc = FakeDocument(id=abs(hash(path)) % (10**12), size=record["size"],
+                               attributes=list(attrs), mime_type=extra.get("mime_type") or "application/pdf")
+            history_msg.media = MessageMediaDocument(document=doc)
+        self.sent_messages.setdefault(dest_key, []).append(history_msg)
         if random_id is not None:
             self._random_messages[int(random_id)] = msg
         return msg
@@ -412,6 +458,13 @@ class FakeClient:
                 request.peer, "text", text=request.message, reply_to=request.reply_to,
                 random_id=request.random_id, formatting_entities=request.entities,
             ) and SimpleNamespace()
+        if name == "ForwardMessagesRequest":
+            await self.forward_messages(
+                request.to_peer, request.id, from_peer=request.from_peer,
+                random_ids=request.random_id, reply_to=request.reply_to,
+                top_msg_id=request.top_msg_id,
+            )
+            return SimpleNamespace()
         if name == "UploadMediaRequest":
             self.upload_media_calls += 1
             # O cliente real devolve MessageMedia; para o fake, devolver a
@@ -450,15 +503,37 @@ class FakeClient:
 
     async def forward_messages(self, entity, messages, from_peer=None, **kwargs):
         ids = messages if isinstance(messages, list) else [messages]
+        random_ids = kwargs.get("random_ids") or []
+        reply_to = kwargs.get("reply_to")
+        if reply_to is None:
+            reply_to = kwargs.get("top_msg_id")
+        reply_id, top_id = self._reply_ids(reply_to)
+        reply = None
+        if reply_id is not None or top_id is not None:
+            reply = SimpleNamespace(reply_to_msg_id=reply_id,
+                                    reply_to_top_id=top_id, forum_topic=top_id is not None)
+        dest_key = int(getattr(entity, "id", entity))
         created = []
-        for _ in ids:
+        for offset, source_id in enumerate(ids):
+            orig = next((m for m in self.messages if int(m.id) == int(source_id)), None)
             self._ids += 1
-            created.append(FakeMessage(id=self._ids))
+            hist = FakeMessage(
+                id=self._ids,
+                message=getattr(orig, "message", "") if orig else "",
+                media=getattr(orig, "media", None) if orig else None,
+                entities=getattr(orig, "entities", None) if orig else None,
+                fwd_from=SimpleNamespace(from_id=getattr(from_peer, "id", None)),
+                reply_to=reply,
+            )
+            self.sent_messages.setdefault(dest_key, []).append(hist)
+            if offset < len(random_ids) and random_ids[offset] is not None:
+                self._random_messages[int(random_ids[offset])] = hist
+            created.append(hist)
         self.forwarded.append({
-            "dest": getattr(entity, "id", entity),
+            "dest": dest_key,
             "ids": ids,
             "as_album": len(ids) > 1,
-            "kwargs": dict(kwargs),
+            "kwargs": {k: v for k, v in kwargs.items() if k != "random_ids"},
             "created_ids": [m.id for m in created],
         })
         return created
@@ -467,7 +542,13 @@ class FakeClient:
 
     async def iter_messages(self, entity, reverse=False, **kwargs):
         topic = kwargs.get("reply_to")
-        items = list(self.messages)
+        dest_key = int(getattr(entity, "id", entity))
+        if dest_key in self.sent_messages:
+            items = list(self.sent_messages[dest_key])
+        elif self._registered_ids and dest_key != self._registered_ids[0]:
+            items = []
+        else:
+            items = list(self.messages)
         if topic:
             def in_topic(m):
                 reply = getattr(m, "reply_to", None)
@@ -475,16 +556,27 @@ class FakeClient:
                 rid = getattr(reply, "reply_to_msg_id", None) or m.reply_to_msg_id
                 return top == topic or rid == topic or (rid or 0) >= topic * 1000
             items = [m for m in items if in_topic(m)]
+        # Como na API real, o filtro de tópico é aplicado antes do limit.
+        limit = kwargs.get("limit")
+        if limit is not None:
+            items = items[-int(limit):] if not reverse else items[:int(limit)]
         for message in (items if reverse else reversed(items)):
             yield message
 
     async def get_messages(self, entity, ids=None, **_):
+        dest_key = int(getattr(entity, "id", entity))
+        if dest_key in self.sent_messages:
+            items = self.sent_messages[dest_key]
+        elif self._registered_ids and dest_key != self._registered_ids[0]:
+            items = []
+        else:
+            items = self.messages
         if isinstance(ids, int):
-            for message in self.messages:
-                if message.id == ids:
-                    return message
-            return None
-        return self.messages
+            return next((m for m in items if int(m.id) == ids), None)
+        if ids is not None:
+            wanted = {int(i) for i in ids}
+            return [m for m in items if int(m.id) in wanted]
+        return list(items)
 
     async def get_entity(self, value):
         if isinstance(value, (int, str)) and str(value) in self._entities:
@@ -492,6 +584,9 @@ class FakeClient:
         raise ValueError(f"entidade desconhecida: {value}")
 
     def register_entity(self, entity) -> None:
+        ident = int(getattr(entity, "id", 0))
+        if ident not in self._registered_ids:
+            self._registered_ids.append(ident)
         if not hasattr(self, "_entities"):
             self._entities: Dict[str, Any] = {}
         self._entities[str(entity.id)] = entity
@@ -514,6 +609,10 @@ class FakeClient:
 
     async def run_until_disconnected(self):
         return
+
+    async def iter_dialogs(self, limit=None):
+        for entity in list(getattr(self, "_entities", {}).values())[:limit or 5]:
+            yield entity
 
     async def get_me(self):
         @dataclass

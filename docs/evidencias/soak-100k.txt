@@ -1,0 +1,1 @@
+{"tipo": "rede simulada / banco local", "itens": 100000, "segundos": 2.802, "pico_memoria_mib": 8.42, "integridade": "ok"}

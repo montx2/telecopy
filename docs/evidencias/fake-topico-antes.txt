@@ -1,0 +1,26 @@
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+_______________ test_iter_messages_filtra_topico_antes_do_limit ________________
+
+    def test_iter_messages_filtra_topico_antes_do_limit() -> None:
+        # 5 mensagens gerais seguidas de 3 do tópico 7; limit=2 no tópico deve
+        # devolver as 2 primeiras do tópico, não vazio (bug: limit antes do filtro).
+        msgs = [text_message(i, f"g{i}") for i in range(1, 6)]
+        msgs += [_msg_topic(i, 7) for i in range(6, 9)]
+        client = FakeClient(msgs)
+        source = channel(-1, "S")
+        client.register_entity(source)
+    
+        async def coleta():
+            return [m.id async for m in client.iter_messages(source, reply_to=7, limit=2, reverse=True)]
+    
+>       assert asyncio.run(coleta()) == [6, 7]
+E       assert [] == [6, 7]
+E         
+E         Right contains 2 more items, first extra item: 6
+E         Use -v to get more diff
+
+tests/test_fake_iter_topico.py:29: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_fake_iter_topico.py::test_iter_messages_filtra_topico_antes_do_limit
+1 failed, 1 passed in 0.42s

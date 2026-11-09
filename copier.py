@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,7 @@ from config import (
     MAX_WORKERS_UP,
     MESSAGE_LIMIT,
     TEMP_DIR,
+    TRANSFER_LIMITS_FILE,
     RunConfig,
     ui,
 )
@@ -67,12 +69,14 @@ from dedup import DedupEngine, hash_message
 from fasttransfer import (
     PART_SIZE as FAST_PART_SIZE,
     FastTransferPool,
+    FloodController,
     fast_download,
     fast_upload,
     input_location,
 )
 from filters import apply as filter_apply
 from i18n import t
+from politica_erros import classificar
 from utils import Fmt, daily_limit, logger
 
 QueueItem = Union[Any, List[Any]]
@@ -321,25 +325,6 @@ def add_signature(caption: str, signature: str) -> str:
     return base + sig
 
 
-def split_text(text: str, limit: int = MESSAGE_LIMIT) -> List[str]:
-    """Divide textos longos em partes aceitas pelo Telegram."""
-    if len(text) <= limit:
-        return [text]
-    parts: List[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            parts.append(remaining)
-            break
-        cut = remaining.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = remaining.rfind(" ", 0, limit)
-        if cut <= 0:
-            cut = limit
-        parts.append(remaining[:cut])
-        remaining = remaining[cut:].lstrip("\n")
-    return parts
-
 
 # ── Estatísticas / progresso ──────────────────────────────────────────────────
 
@@ -413,6 +398,12 @@ class ProgressDisplay:
         self.transfer_totals: Dict[str, int] = {"download": 0, "upload": 0}
         self._progress_start = time.monotonic()
         self._aggregate_task = None
+        self.aggregate_text = t("progress.aggregate", down="0.0", up="0.0", speed="0.0")
+        self.wait_text = ""
+        self._wait_deadline = 0.0
+        self._wait_parts = 0
+        self._wait_printed_sec = -1
+        self._state_task = None
         try:
             if not rich_ok:
                 raise ImportError("rich desabilitado")
@@ -441,6 +432,7 @@ class ProgressDisplay:
                 Fmt.trunc(title or "Copiando", 32), total=self.total or None
             )
             self._aggregate_task = self._prog.add_task("[dim]↓ 0 MB · ↑ 0 MB[/dim]", total=None)
+            self._state_task = self._prog.add_task("", total=None)
         except Exception:
             self._prog = None
 
@@ -474,23 +466,30 @@ class ProgressDisplay:
         except Exception:
             return None
 
-    def update_transfer(self, task_id, current: int, total: int,
+    def update_transfer(self, task_id: Any, current_bytes: int, total_bytes: int,
                         description: Optional[str] = None) -> None:
+        """Recebe bytes reais; percentual é apenas uma apresentação da barra.
+
+        A marca d'água por tarefa torna callbacks atrasados idempotentes. A
+        remoção da barra não apaga os bytes já contabilizados no agregado.
+        """
         if task_id is None:
             return
+        current_bytes = max(0, int(current_bytes))
+        total_bytes = max(0, int(total_bytes))
+        if total_bytes:
+            current_bytes = min(current_bytes, total_bytes)
         state = self._transfer_last.get(task_id)
         if state is not None:
             phase, previous = state
-            current = max(0, int(current))
-            if current > previous:
-                self.transfer_totals[phase] += current - previous
-                self._transfer_last[task_id] = (phase, current)
+            if current_bytes > previous:
+                self.transfer_totals[phase] += current_bytes - previous
+                self._transfer_last[task_id] = (phase, current_bytes)
             self._update_aggregate()
         if not self._prog:
             return
-        kwargs: Dict[str, Any] = {"completed": current}
-        if total:
-            kwargs["total"] = total
+        percent = min(100.0, current_bytes / total_bytes * 100) if total_bytes else 0.0
+        kwargs: Dict[str, Any] = {"completed": percent, "total": 100}
         if description:
             kwargs["description"] = description
         try:
@@ -510,21 +509,42 @@ class ProgressDisplay:
             pass
 
     def _update_aggregate(self) -> None:
-        if not self._prog or self._aggregate_task is None:
-            return
         down = self.transfer_totals["download"] / 1048576.0
         up = self.transfer_totals["upload"] / 1048576.0
         elapsed = max(0.001, time.monotonic() - self._progress_start)
         speed = (down + up) / elapsed
+        self.aggregate_text = t("progress.aggregate", down=f"{down:.1f}",
+                                up=f"{up:.1f}", speed=f"{speed:.1f}")
+        if not self._prog or self._aggregate_task is None:
+            return
         try:
-            self._prog.update(
-                self._aggregate_task,
-                description=f"[dim]↓ {down:.1f} MB · ↑ {up:.1f} MB · {speed:.1f} MB/s[/dim]",
-            )
+            self._prog.update(self._aggregate_task,
+                              description=f"[dim]{self.aggregate_text}[/dim]")
         except Exception:
             pass
 
+    def set_wait_state(self, seconds: float, parts: int) -> None:
+        self._wait_deadline = time.monotonic() + max(0.0, float(seconds))
+        self._wait_parts = max(0, int(parts))
+        self.refresh_state()
+
+    def refresh_state(self) -> None:
+        remaining = max(0, int(self._wait_deadline - time.monotonic() + 0.999999))
+        texto = t("progress.wait_state", sec=remaining, parts=self._wait_parts) if remaining else ""
+        if texto == self.wait_text:
+            return
+        self.wait_text = texto
+        if self._prog and self._state_task is not None:
+            try:
+                self._prog.update(self._state_task, description=f"[yellow]{texto}[/yellow]")
+            except Exception:
+                pass
+        elif texto and remaining != self._wait_printed_sec:
+            self._wait_printed_sec = remaining
+            print(f"\r  {texto}   ", end="", flush=True)
+
     def update(self, done: int, status: str = "") -> None:
+        self.refresh_state()
         if self._prog:
             try:
                 self._prog.update(
@@ -681,8 +701,12 @@ class Copier:
         self._mirror_locks: Dict[Any, asyncio.Lock] = {}
         self._upload_gate: Optional[asyncio.Semaphore] = None
         self._transfer_pool: Optional[FastTransferPool] = None
+        self._standalone_flood: Optional[FloodController] = None
+        self._progress: Optional[ProgressDisplay] = None
         # Origem protegida derruba o forward para referência sem mexer nas prefs.
         self._force_reference = False
+        self.max_messages: Optional[int] = None
+        self._marker_attempted: set = set()
 
     # -- controle -----------------------------------------------------------
 
@@ -750,6 +774,7 @@ class Copier:
         topic_titles: Optional[Dict[int, str]] = None,
     ) -> Dict[str, Any]:
         self._stop = False
+        self._marker_attempted.clear()
         self._force_reference = False
         self._flood_penalty = 0.0
         self._flood_successes = 0
@@ -775,10 +800,17 @@ class Copier:
                   f"{t('copy.first_failure', reason=destination_error)}", flush=True)
             return blocked.as_result()
 
+        intent_error = await self._reconcile_intents(dest, source_id, dest_id)
+        if intent_error:
+            logger.error(f"Intent reconciliation source={source_id} dest={dest_id}: {intent_error}")
+            return TransferStats(errors=1, first_error=intent_error).as_result()
+
         self.dedup.warm_up(dest_id, limit=200_000)
 
         print(f"\n  {C.CYAN}·{C.RST}  {t('copy.indexing')}…", end="", flush=True)
         messages = await self._collect(source, filter_code, source_topic, topic_map)
+        if self.max_messages is not None and self.max_messages > 0:
+            messages = messages[:int(self.max_messages)]
         print(f"\r  {C.GREEN}✓{C.RST}  {Fmt.number(len(messages))} {t('copy.found')}            ")
 
         if not messages:
@@ -839,12 +871,16 @@ class Copier:
 
         with ProgressDisplay(planned, getattr(source, "title", "") or "Copiando",
                              self.rich_ok) as progress:
-            if forward:
-                await self._forward_loop(items, source, dest, source_id, dest_id,
-                                         dest_topic, topic_map, stats, progress)
-            else:
-                await self._copy_loop(items, source, dest, source_id, dest_id,
-                                      dest_topic, topic_map, stats, progress)
+            self._progress = progress
+            try:
+                if forward:
+                    await self._forward_loop(items, source, dest, source_id, dest_id,
+                                             dest_topic, topic_map, stats, progress)
+                else:
+                    await self._copy_loop(items, source, dest, source_id, dest_id,
+                                          dest_topic, topic_map, stats, progress)
+            finally:
+                self._progress = None
 
         stats.interrupted = self._stop
         self._audit(stats, messages, source_id, dest_id, topic_map, topic_titles, topic_roots)
@@ -857,9 +893,11 @@ class Copier:
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
-        if isinstance(exc, (FloodError, ValueError, OSError, asyncio.TimeoutError)):
+        politica = classificar(exc)
+        if politica.transitório:
             return True
-        return type(exc).__name__ in {"ServerError", "RpcCallFailError", "TimedOutError"}
+        # ValueError/OSError históricos do transporte padrão ainda são transitórios.
+        return isinstance(exc, (ValueError, OSError, asyncio.TimeoutError))
 
     @staticmethod
     def _position_resolved(row: Optional[Dict[str, Any]]) -> bool:
@@ -922,6 +960,9 @@ class Copier:
         return violations
 
     def _prompt_failure(self, reason: str) -> str:
+        if not getattr(self.cfg, "interactive", True):
+            logger.warning(t("failure.noninteractive", reason=reason))
+            return "a"
         ui.blank()
         ui.warn(reason)
         ui.menu([
@@ -1236,6 +1277,7 @@ class Copier:
             ids = [m.id for m in messages]
 
             try:
+                await self._wait_schedule()
                 self._check_limit()
             except DailyLimitReached as exc:
                 stats.first_error = str(exc)
@@ -1250,7 +1292,29 @@ class Copier:
             ambiguous = False
             errors_before_item = stats.errors
             sent_ids: List[Optional[int]] = []
+            routes = [self.repo.checkpoint_route(source_id, dest_id, m.id) for m in messages]
+            if all(r.get("dest_msg_id") and r.get("status") in {Status.PENDING.value, Status.ERROR.value}
+                   for r in routes):
+                for msg, route in zip(messages, routes):
+                    self._mark_done(msg, source_id, dest_id, stats,
+                                    dest_msg_id=int(route["dest_msg_id"]), dest_topic=item_topic)
+                if isinstance(item, list):
+                    stats.albums += 1
+                progress.update(stats.done + stats.skipped + stats.errors,
+                                self._progress_status(stats))
+                await asyncio.sleep(self.delay)
+                continue
             attempts = self.cfg.max_retries + 1
+            if not force_copy_fallback:
+                for msg in messages:
+                    has_media, media_type, size = media_info(msg)
+                    entry = {"msg": msg, "_source_id": source_id, "_dest_id": dest_id}
+                    self._begin_intent(
+                        entry, 0, item_topic, kind="forward", text=_caption(msg),
+                        entities=_entities(msg),
+                        filename=original_filename(msg, media_type) if has_media else "",
+                        size=size,
+                    )
 
             for attempt in range(attempts):
                 try:
@@ -1394,6 +1458,9 @@ class Copier:
             return False
         if isinstance(exc, FloodError):
             return True
+        politica = classificar(exc)
+        if politica.fatal:
+            return True
         return type(exc).__name__ in {
             "ChatAdminRequiredError",
             "ChatForbiddenError",
@@ -1426,10 +1493,19 @@ class Copier:
         if getattr(self.cfg, "fast_transfer", True) and self.cfg.delivery == "upload":
             max_total = min(int(getattr(self.cfg, "max_total_connections", 12)),
                             max(1, BUFFER_RAM_MAX // FAST_PART_SIZE))
+            try:
+                conta = await self.client.get_me()
+                account_id = str(getattr(conta, "id", "")) or None
+            except Exception as exc:
+                logger.warning(t("transfer.account_unknown", reason=exc))
+                account_id = None
             self._transfer_pool = FastTransferPool(
                 self.client, max_total_connections=max_total,
-                connections_per_file=int(getattr(self.cfg, "connections_per_file", 4)),
+                connections_per_file=int(getattr(self.cfg, "connections_per_file", 2)),
+                controller_path=TRANSFER_LIMITS_FILE, account_id=account_id,
+                bandwidth_limit_bps=int(getattr(self.cfg, "bandwidth_limit_bps", 0)),
             )
+            self._transfer_pool.controller.observer = self._show_flood
 
         async def downloader() -> None:
             while not self._stop:
@@ -1522,6 +1598,7 @@ class Copier:
                     attempts = self.cfg.max_retries + 1
                     for attempt in range(attempts):
                         try:
+                            await self._wait_schedule()
                             self._check_limit()
                             await self._send(payload, source_id, dest_id, stats, progress)
                             error = None
@@ -1818,9 +1895,9 @@ class Copier:
                 mb = 1048576.0
                 progress.update_transfer(
                     _tid,
-                    int(current / total * 100) if total else 0,
-                    100,
-                    f"[cyan]↓ {_name} {current / mb:.1f}/{(total or 0) / mb:.1f} MB",
+                    current, total,
+                    t("progress.file_transfer", direction="↓", name=_name,
+                      current=f"{current / mb:.1f}", total=f"{(total or 0) / mb:.1f}"),
                 )
 
             downloaded = None
@@ -1922,6 +1999,13 @@ class Copier:
         existing = self.repo.get_placeholder(source_id, dest_id, msg.id)
         if existing is not None:
             return int(existing["dest_msg_id"])
+        marker_key = (source_id, dest_id, msg.id)
+        pending_marker = self.repo.intent_for(source_id, dest_id, msg.id, 0)
+        if (pending_marker.get("kind") == "marker"
+                and pending_marker.get("state") == "sending"
+                and marker_key in self._marker_attempted):
+            return None
+        self._marker_attempted.add(marker_key)
         caption, entities_json = self._placeholder_caption(msg)
         unsupported = bool(entry.get("unsupported"))
         key = "placeholder.unrecoverable" if unsupported else "placeholder.pending"
@@ -1933,12 +2017,17 @@ class Copier:
             text, entities = combined, _entities(msg) or None
         else:
             text, entities = warning, None
+        entry["_source_id"] = source_id
+        entry["_dest_id"] = dest_id
         try:
             created_id = None
             for attempt in range(3):
                 try:
                     self._check_limit()
-                    created_id = await self._send_chunk(dest, text, entities, dest_topic, reply_to)
+                    created_id = await self._send_chunk(
+                        dest, text, entities, dest_topic, reply_to,
+                        intent_entry=entry, part_index=0, intent_kind="marker",
+                    )
                     break
                 except FloodError as exc:
                     if attempt == 2:
@@ -1962,7 +2051,11 @@ class Copier:
                     for attempt in range(3):
                         try:
                             self._check_limit()
-                            slot_id = await self._send_chunk(dest, slot_text, None, dest_topic, None)
+                            slot_id = await self._send_chunk(
+                                dest, slot_text, None, dest_topic, None,
+                                intent_entry=entry, part_index=part_index,
+                                intent_kind="marker_part",
+                            )
                             break
                         except FloodError as exc:
                             if attempt == 2:
@@ -2015,12 +2108,13 @@ class Copier:
         msg = entry["msg"]
         content_hash = hash_message(msg)
         size = entry["size"] if entry.get("path") or entry.get("already_sent") else 0
-        self.dedup.register(content_hash, dest_id, dest_msg_id, size, source_id)
-        self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
-        self.repo.mark_done(source_id, dest_id, msg.id, content_hash, size,
-                            entry["media_type"], dest_msg_id=dest_msg_id,
-                            dest_topic=dest_topic)
-        self.repo.clear_failure(source_id, dest_id, msg.id)
+        self.repo.record_delivery(
+            source_id, dest_id, msg.id, int(dest_msg_id), content_hash=content_hash,
+            bytes_done=size, media_type=entry["media_type"], dest_topic=dest_topic,
+            dedup_enabled=self.dedup.enabled,
+            continuation_parts_sent=int(entry.get("text_parts_sent") or 0) or None,
+        )
+        self.dedup.remember(content_hash, dest_id, dest_msg_id)
         stats.done += 1
         self._note_successful_send()
         if count_daily:
@@ -2197,6 +2291,115 @@ class Copier:
             continuation_parts_sent=int(entry.get("text_parts_sent") or 0),
         )
 
+    @staticmethod
+    def _canonical_entities(entities) -> str:
+        rows = []
+        for ent in entities or []:
+            row = {"type": type(ent).__name__}
+            for key in ("offset", "length", "url", "user_id", "language", "document_id"):
+                value = getattr(ent, key, None)
+                if value is not None:
+                    row[key] = value
+            rows.append(row)
+        return json.dumps(rows, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _intent_fingerprint(*, kind: str, text: str, entities, dest_topic,
+                            part_index: int, filename: str = "", size: int = 0) -> str:
+        payload = {
+            "kind": kind, "text": text or "", "entities": Copier._canonical_entities(entities),
+            "topic": dest_topic, "part": int(part_index),
+            "filename": filename, "size": int(size or 0),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _begin_intent(self, entry: Dict[str, Any], part_index: int, dest_topic,
+                      *, kind: str, text: str = "", entities=None,
+                      filename: str = "", size: int = 0, random_id: Optional[int] = None) -> None:
+        source_id = entry.get("_source_id")
+        dest_id = entry.get("_dest_id")
+        if source_id is None or dest_id is None:
+            return
+        fingerprint = self._intent_fingerprint(
+            kind=kind, text=text, entities=entities, dest_topic=dest_topic,
+            part_index=part_index, filename=filename, size=size,
+        )
+        self.repo.begin_intent(int(source_id), int(dest_id), entry["msg"].id, part_index,
+                               fingerprint=fingerprint, random_id=random_id,
+                               dest_topic=dest_topic, kind=kind)
+
+    def _confirm_intent(self, entry: Dict[str, Any], part_index: int, dest_msg_id: int) -> None:
+        source_id = entry.get("_source_id")
+        dest_id = entry.get("_dest_id")
+        if source_id is None or dest_id is None:
+            return
+        self.repo.confirm_intent(int(source_id), int(dest_id), entry["msg"].id,
+                                 part_index, int(dest_msg_id))
+
+    @staticmethod
+    def _destination_fingerprint(msg, intent: Dict[str, Any]) -> str:
+        kind = intent.get("kind") or "text"
+        text = getattr(msg, "message", "") or ""
+        entities = getattr(msg, "entities", None)
+        filename, size = "", 0
+        if kind in {"media", "forward"}:
+            has_media, media_type, size = media_info(msg)
+            filename = original_filename(msg, media_type) if has_media else ""
+        return Copier._intent_fingerprint(
+            kind=kind, text=text, entities=entities, dest_topic=intent.get("dest_topic"),
+            part_index=int(intent.get("part_index") or 0), filename=filename, size=size,
+        )
+
+    async def _reconcile_intents(self, dest, source_id: int, dest_id: int) -> Optional[str]:
+        pending = self.repo.pending_intents(source_id, dest_id)
+        if not pending:
+            return None
+        if any(row["state"] == "blocked" for row in pending):
+            return t("intent.blocked")
+        topics = {row.get("dest_topic") for row in pending}
+        history: Dict[Any, List[Any]] = {}
+        for topic in topics:
+            kwargs = {}
+            if topic:
+                kwargs["reply_to"] = int(topic)
+            history[topic] = [msg async for msg in self.client.iter_messages(dest, **kwargs)]
+        for intent in pending:
+            matches = [msg for msg in history.get(intent.get("dest_topic"), [])
+                       if self._destination_fingerprint(msg, intent) == intent["fingerprint"]]
+            if len(matches) > 1:
+                self.repo.block_intent(source_id, dest_id, intent["msg_id"], intent["part_index"],
+                                       "múltiplas correspondências no destino")
+                return t("intent.ambiguous", id=intent["msg_id"])
+            if len(matches) == 1:
+                dest_msg_id = int(matches[0].id)
+                self.repo.confirm_intent(source_id, dest_id, intent["msg_id"],
+                                         intent["part_index"], dest_msg_id)
+                kind = intent.get("kind") or "text"
+                if kind == "marker":
+                    self.repo.add_placeholder(
+                        source_id, dest_id, intent["msg_id"], dest_msg_id,
+                        dest_topic=intent.get("dest_topic"), caption=None, entities=None,
+                        reason=t("intent.marker_recovered"), state="open",
+                    )
+                elif kind == "marker_part":
+                    self.repo.add_placeholder_part(
+                        source_id, dest_id, intent["msg_id"], int(intent["part_index"]),
+                        dest_msg_id, dest_topic=intent.get("dest_topic"),
+                    )
+                elif int(intent["part_index"]) == 0:
+                    self.repo.upsert_checkpoint(source_id, dest_id, intent["msg_id"],
+                                                Status.PENDING, dest_msg_id=dest_msg_id,
+                                                dest_topic=intent.get("dest_topic"))
+                else:
+                    route = self.repo.checkpoint_route(source_id, dest_id, intent["msg_id"])
+                    self.repo.upsert_checkpoint(
+                        source_id, dest_id, intent["msg_id"], Status.PENDING,
+                        dest_msg_id=route.get("dest_msg_id"), dest_topic=intent.get("dest_topic"),
+                        continuation_parts_sent=max(int(route.get("continuation_parts_sent") or 0),
+                                                    int(intent["part_index"])),
+                    )
+        return None
+
     async def _send_continuations(self, entry: Dict[str, Any], dest, dest_topic,
                                   parts: List[Tuple[str, List[Any]]]) -> None:
         """Envia apenas as continuações ainda não confirmadas do item.
@@ -2209,7 +2412,8 @@ class Copier:
         for offset, (chunk, entities) in enumerate(parts[1:]):
             if offset < already:
                 continue
-            await self._send_chunk(dest, chunk, entities, dest_topic, None)
+            await self._send_chunk(dest, chunk, entities, dest_topic, None,
+                                   intent_entry=entry, part_index=offset + 1)
             entry["text_parts_sent"] = offset + 1
             self._persist_partial_entry(entry, dest_topic)
             daily_limit.add(1)
@@ -2217,6 +2421,13 @@ class Copier:
     def _parts(self, msg, limit: int) -> List[Tuple[str, List[Any]]]:
         text = _caption(msg)
         entities = _entities(msg) or []
+        de = getattr(self.cfg, "rewrite_from", "")
+        if de:
+            from opcional import reescrever_texto
+            novo = reescrever_texto(text, de, getattr(self.cfg, "rewrite_to", ""))
+            if novo != text:
+                text = novo
+                entities = []  # offsets originais não sobrevivem a reescrita arbitrária
         if self.cfg.signature:
             signed = add_signature(text, self.cfg.signature)
             # A assinatura pode truncar a legenda; não reaproveitar entidades
@@ -2301,8 +2512,9 @@ class Copier:
 
         def callback(current, total, _tid=task_id, _name=display):
             progress.update_transfer(
-                _tid, int(current / total * 100) if total else 0, 100,
-                f"[blue]↑ {_name} {current / 1048576.0:.1f}/{(total or 0) / 1048576.0:.1f} MB",
+                _tid, current, total,
+                t("progress.file_transfer", direction="↑", name=_name,
+                  current=f"{current / 1048576.0:.1f}", total=f"{(total or 0) / 1048576.0:.1f}"),
             )
 
         try:
@@ -2331,12 +2543,13 @@ class Copier:
             try:
                 return await fast_download(
                     pool, msg, path, refresh=refresh,
-                    progress_callback=callback, on_flood=self._handle_flood,
+                    progress_callback=callback, on_flood=self._record_flood,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning(f"{t('transfer.fast_fallback')} Download msg {msg.id}: {exc}")
+        await self._wait_transfer_gate()
         # Fallback também em partes grandes: o padrão do Telethon usa 128–256 KiB
         # para estes tamanhos, o que multiplica as idas e voltas por arquivo.
         if hasattr(self.client, "download_file"):
@@ -2361,7 +2574,7 @@ class Copier:
             try:
                 handle = await fast_upload(
                     pool, entry["path"], file_name,
-                    progress_callback=progress_callback, on_flood=self._handle_flood,
+                    progress_callback=progress_callback, on_flood=self._record_flood,
                 )
                 # Metadado local para diagnóstico/fakes; não faz parte do TL.
                 try:
@@ -2373,6 +2586,7 @@ class Copier:
                 raise
             except Exception as exc:
                 logger.warning(f"{t('transfer.fast_fallback')} Upload msg {entry['msg'].id}: {exc}")
+        await self._wait_transfer_gate()
         return await self.client.upload_file(
             entry["path"], file_name=file_name, progress_callback=progress_callback,
             part_size_kb=FAST_PART_SIZE // 1024,
@@ -2416,9 +2630,13 @@ class Copier:
         input_media = tl_utils.get_input_media(msg.media, is_photo=entry["media_type"] == "photo")
         parts = self._parts(msg, CAPTION_LIMIT)
         caption, entities = parts[0] if parts else ("", [])
-        if self._needs_raw_reply(dest_topic, reply_to):
-            peer = await self.client.get_input_entity(dest)
-            random_id = generate_random_long()
+        needs_raw = self._needs_raw_reply(dest_topic, reply_to)
+        peer = await self.client.get_input_entity(dest) if needs_raw else None
+        random_id = generate_random_long() if needs_raw else None
+        self._begin_intent(entry, 0, dest_topic, kind="media", text=caption, entities=entities,
+                           filename=original_filename(msg, entry["media_type"]),
+                           size=entry.get("size") or 0, random_id=random_id)
+        if needs_raw:
             response = await self.client(functions.messages.SendMediaRequest(
                 peer=peer, media=input_media, message=caption or "",
                 entities=entities or None, reply_to=self._reply_header(dest_topic, reply_to),
@@ -2433,6 +2651,7 @@ class Copier:
                 parse_mode=None,
             )
             created_id = self._created_id(result)
+        self._confirm_intent(entry, 0, created_id)
         entry["dest_msg_id"] = created_id
         self._persist_partial_entry(entry, dest_topic)
         await self._send_continuations(entry, dest, dest_topic, parts)
@@ -2551,6 +2770,9 @@ class Copier:
         if input_media is None:
             input_media = await self._upload_media(entry, progress_callback)
         random_id = generate_random_long()
+        self._begin_intent(entry, 0, dest_topic, kind="media", text=caption, entities=entities,
+                           filename=original_filename(entry["msg"], entry["media_type"]),
+                           size=entry.get("size") or 0, random_id=random_id)
         request = functions.messages.SendMediaRequest(
             peer=peer, media=input_media, message=caption or "",
             entities=entities or None, reply_to=self._reply_header(dest_topic, reply_to),
@@ -2558,7 +2780,9 @@ class Copier:
         )
         response = await self.client(request)
         parsed = self.client._get_response_message(random_id, response, peer)
-        return self._created_id(parsed)
+        created_id = self._created_id(parsed)
+        self._confirm_intent(entry, 0, created_id)
+        return created_id
 
     async def _send_media(self, entry: Dict[str, Any], dest, dest_topic,
                           progress: ProgressDisplay, stats: TransferStats,
@@ -2574,7 +2798,7 @@ class Copier:
         def callback(current, total, _tid=task_id, _name=Fmt.trunc(fname, 16)):
             mb = 1048576.0
             progress.update_transfer(
-                _tid, int(current / total * 100) if total else 0, 100,
+                _tid, current, total,
                 f"[blue]↑ {_name} {current / mb:.1f}/{(total or 0) / mb:.1f} MB",
             )
 
@@ -2586,6 +2810,8 @@ class Copier:
                     if entry.get("uploaded") is not None else None,
                 )
             else:
+                self._begin_intent(entry, 0, dest_topic, kind="media", text=caption,
+                                   entities=cap_entities, filename=fname, size=size)
                 result = await self.client.send_file(
                     dest, file=path, caption=caption or None,
                     formatting_entities=cap_entities or None,
@@ -2593,6 +2819,7 @@ class Copier:
                     progress_callback=callback, **self._media_options(entry),
                 )
                 created_id = self._created_id(result)
+                self._confirm_intent(entry, 0, created_id)
         finally:
             progress.remove_transfer(task_id)
 
@@ -2633,6 +2860,10 @@ class Copier:
                 random_ids = []
                 for entry, input_media, caption, entities in chunk:
                     random_id = generate_random_long()
+                    self._begin_intent(entry, 0, dest_topic, kind="media", text=caption,
+                                       entities=entities,
+                                       filename=original_filename(entry["msg"], entry["media_type"]),
+                                       size=entry.get("size") or 0, random_id=random_id)
                     random_ids.append(random_id)
                     multi_media.append(types.InputSingleMedia(
                         media=input_media, random_id=random_id,
@@ -2649,6 +2880,7 @@ class Copier:
                 created_ids.extend(batch_ids)
                 for (entry, _, _, _), created_id in zip(chunk, batch_ids):
                     entry["dest_msg_id"] = created_id
+                    self._confirm_intent(entry, 0, created_id)
                     self._persist_partial_entry(entry, dest_topic)
         finally:
             progress.remove_transfer(task_id)
@@ -2664,21 +2896,29 @@ class Copier:
         return created_ids
 
     async def _send_chunk(self, dest, text: str, entities, dest_topic,
-                          reply_to: Optional[int]) -> int:
+                          reply_to: Optional[int], *, intent_entry: Optional[Dict[str, Any]] = None,
+                          part_index: int = 0, intent_kind: str = "text") -> int:
+        random_id = generate_random_long() if self._needs_raw_reply(dest_topic, reply_to) else None
+        if intent_entry is not None:
+            self._begin_intent(intent_entry, part_index, dest_topic, kind=intent_kind,
+                               text=text, entities=entities, random_id=random_id)
         if self._needs_raw_reply(dest_topic, reply_to):
             peer = await self.client.get_input_entity(dest)
-            random_id = generate_random_long()
             response = await self.client(functions.messages.SendMessageRequest(
                 peer=peer, message=text, entities=entities or None,
                 reply_to=self._reply_header(dest_topic, reply_to), random_id=random_id,
             ))
             parsed = self.client._get_response_message(random_id, response, peer)
-            return self._created_id(parsed)
-        result = await self.client.send_message(
-            dest, text, formatting_entities=entities or None,
-            reply_to=reply_to if reply_to is not None else dest_topic,
-        )
-        return self._created_id(result)
+            created_id = self._created_id(parsed)
+        else:
+            result = await self.client.send_message(
+                dest, text, formatting_entities=entities or None,
+                reply_to=reply_to if reply_to is not None else dest_topic,
+            )
+            created_id = self._created_id(result)
+        if intent_entry is not None:
+            self._confirm_intent(intent_entry, part_index, created_id)
+        return created_id
 
     async def _send_text(self, msg, dest, dest_topic,
                          reply_to: Optional[int] = None,
@@ -2689,7 +2929,8 @@ class Copier:
         first_id = int(entry["dest_msg_id"]) if entry and entry.get("dest_msg_id") else None
         if first_id is None:
             chunk, entities = parts[0]
-            first_id = await self._send_chunk(dest, chunk, entities, dest_topic, reply_to)
+            first_id = await self._send_chunk(dest, chunk, entities, dest_topic, reply_to,
+                                              intent_entry=entry, part_index=0)
             if entry is not None:
                 entry["dest_msg_id"] = first_id
                 self._persist_partial_entry(entry, dest_topic)
@@ -2756,9 +2997,12 @@ class Copier:
             logger.warning(
                 "Enquete recriada como nova votação; votos/resultado do original não são transferíveis."
             )
-        if dest_topic:
-            peer = await self.client.get_input_entity(dest)
-            random_id = generate_random_long()
+        needs_raw = bool(dest_topic)
+        peer = await self.client.get_input_entity(dest) if needs_raw else None
+        random_id = generate_random_long() if needs_raw else None
+        self._begin_intent(entry, 0, dest_topic, kind="native", text=caption,
+                           entities=entities, random_id=random_id)
+        if needs_raw:
             response = await self.client(functions.messages.SendMediaRequest(
                 peer=peer, media=input_media, message=caption or "",
                 entities=entities or None, reply_to=self._reply_header(dest_topic, reply_to),
@@ -2772,6 +3016,7 @@ class Copier:
                 formatting_entities=entities or None, reply_to=reply_to,
             )
             created_id = self._created_id(result)
+        self._confirm_intent(entry, 0, created_id)
         entry["dest_msg_id"] = created_id
         self._persist_partial_entry(entry, dest_topic)
         await self._send_continuations(entry, dest, dest_topic, parts)
@@ -3321,11 +3566,12 @@ class Copier:
             # Invariante: DONE só existe com ID de destino confirmado.
             raise RuntimeError(t("copy.send_unconfirmed"))
         content_hash = hash_message(msg)
-        self.repo.mark_done(source_id, dest_id, msg.id, content_hash,
-                            dest_msg_id=dest_msg_id, dest_topic=dest_topic)
-        self.repo.mark_processed(source_id, msg.id, content_hash, dest_id)
-        self.repo.clear_failure(source_id, dest_id, msg.id)
-        self.dedup.register(content_hash, dest_id, dest_msg_id or msg.id, 0, source_id)
+        self.repo.record_delivery(
+            source_id, dest_id, msg.id, int(dest_msg_id), content_hash=content_hash,
+            media_type=media_info(msg)[1], dest_topic=dest_topic,
+            dedup_enabled=self.dedup.enabled,
+        )
+        self.dedup.remember(content_hash, dest_id, dest_msg_id)
         stats.done += 1
         self._note_successful_send()
         daily_limit.add(1)
@@ -3346,26 +3592,53 @@ class Copier:
                                         dest_topic=dest_topic)
             self.repo.add_failure(source_id, dest_id, msg.id, reason)
 
+    async def _wait_schedule(self) -> None:
+        from datetime import datetime
+        from opcional import segundos_ate_janela
+        inicio = getattr(self.cfg, "schedule_start", None)
+        fim = getattr(self.cfg, "schedule_end", None)
+        if not inicio and not fim:
+            return
+        wait = segundos_ate_janela(datetime.now(), inicio, fim)
+        if wait > 0:
+            logger.info(t("schedule.wait", seconds=int(wait)))
+        while wait > 0 and not self._stop:
+            await asyncio.sleep(min(30.0, wait))
+            wait = segundos_ate_janela(datetime.now(), inicio, fim)
+
     def _check_limit(self) -> None:
         cap = int(getattr(self.cfg, "daily_limit", DAILY_LIMIT))
         level, _, _ = daily_limit.status(cap)
         if level == "limit":
             raise DailyLimitReached(t("copy.limit_reached", limit=cap))
 
+    def _flood_controller(self) -> FloodController:
+        if self._transfer_pool is not None:
+            return self._transfer_pool.controller
+        if self._standalone_flood is None:
+            self._standalone_flood = FloodController(1)
+            self._standalone_flood.observer = self._show_flood
+        return self._standalone_flood
+
+    def _show_flood(self, remaining: float, parts: int, first: bool) -> None:
+        if first:
+            ui.warn(t("transfer.cooldown", sec=max(0, int(remaining + 0.999999)), parts=parts))
+        if self._progress is not None:
+            self._progress.set_wait_state(remaining, parts)
+
+    async def _record_flood(self, exc: FloodError) -> None:
+        """Callback de observação: não dorme; o transporte espera o portão comum."""
+        self._flood_controller().note_flood(exc)
+
+    async def _wait_transfer_gate(self) -> None:
+        controller = self._transfer_pool.controller if self._transfer_pool is not None else self._standalone_flood
+        if controller is not None:
+            await controller.wait_cooldown()
+
     async def _handle_flood(self, exc: FloodError) -> None:
-        wait = int(getattr(exc, "seconds", 30) or 30) + 3
-        if isinstance(exc, FloodPremiumWaitError):
-            # Teto de velocidade da conta, não excesso de envios: esperar sem
-            # aumentar a penalidade nem cortar o paralelismo.
-            logger.warning(t("transfer.premium_wait", sec=wait))
-            print(f"\n  {C.YELLOW}!{C.RST}  {t('transfer.premium_wait', sec=wait)}", flush=True)
-            await asyncio.sleep(wait)
-            return
-        self._flood_penalty = min(self._flood_penalty + 1.5, 12.0)
-        logger.warning(f"{type(exc).__name__} {wait}s "
-                       f"(penalidade {self._flood_penalty:.1f}s)")
-        print(f"\n  {C.YELLOW}!{C.RST}  {t('progress.flood', sec=wait)}", flush=True)
-        await asyncio.sleep(wait)
+        controller = self._flood_controller()
+        controller.note_flood(exc)
+        await controller.wait_cooldown()
 
     @staticmethod
     def _explain(exc: Exception) -> str:

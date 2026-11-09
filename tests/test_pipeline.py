@@ -213,18 +213,21 @@ def test_progresso_agregado_soma_deltas_sem_duplo_contagem() -> None:
     a = progress.add_transfer("↓ a", phase="download")
     b = progress.add_transfer("↓ b", phase="download")
     up = progress.add_transfer("↑ a", phase="upload")
-    progress.update_transfer(a, 40, 100)
-    progress.update_transfer(b, 30, 100)
-    progress.update_transfer(a, 20, 100)  # callback atrasado não subtrai nem duplica
-    progress.update_transfer(a, 100, 100)
-    progress.update_transfer(up, 50, 100)
+    mib = 1024 * 1024
+    # Unidades abstratas passavam mesmo quando produção enviava percentuais.
+    # O contrato agora é explícito: bytes reais, inclusive no teste antigo.
+    progress.update_transfer(a, 40 * mib, 100 * mib)
+    progress.update_transfer(b, 30 * mib, 100 * mib)
+    progress.update_transfer(a, 20 * mib, 100 * mib)
+    progress.update_transfer(a, 100 * mib, 100 * mib)
+    progress.update_transfer(up, 50 * mib, 100 * mib)
     progress.remove_transfer(a)
-    progress.update_transfer(b, 100, 100)
-    progress.update_transfer(up, 100, 100)
+    progress.update_transfer(b, 100 * mib, 100 * mib)
+    progress.update_transfer(up, 100 * mib, 100 * mib)
     progress.remove_transfer(b)
     progress.remove_transfer(up)
 
-    assert progress.transfer_totals == {"download": 200, "upload": 100}
+    assert progress.transfer_totals == {"download": 200 * mib, "upload": 100 * mib}
 
 
 def test_janela_estima_album_como_um_item() -> None:

@@ -46,3 +46,13 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Bases locais geradas pelo Hypothesis
+.hypothesis/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+coverage.xml
+.mutmut-cache

@@ -11,6 +11,7 @@ Uso:
     python main.py              inicia normalmente
     python main.py --version    mostra a versão
     python main.py --check      testa dependências e integridade
+    python main.py --doctor     diagnóstico detalhado (use quando "não copia nada")
     python main.py --lang en    inicia em inglês
     python main.py --reset      apaga o histórico de cópias (mantém login)
 """
@@ -107,6 +108,48 @@ def _migrate_legacy_data(session_file) -> None:
         pass
 
 
+def _sinais_interrupcao() -> tuple:
+    """Sinais que devem virar interrupção limpa (Ctrl+C, kill, Ctrl+Break)."""
+    import signal
+
+    sigs = [signal.SIGTERM]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        sigs.append(sigbreak)
+    return tuple(sigs)
+
+
+def _instalar_sinais_interrupcao() -> dict:
+    """Converte SIGTERM/SIGBREAK em KeyboardInterrupt, guardando handlers antigos.
+
+    SIGINT já vira KeyboardInterrupt pelo handler padrão do Python/asyncio.
+    Deve ser chamado na thread principal; fora dela, não instala nada.
+    """
+    import signal
+
+    antigos: dict = {}
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    for sig in _sinais_interrupcao():
+        try:
+            antigos[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+    return antigos
+
+
+def _restaurar_sinais(antigos: dict) -> None:
+    import signal
+
+    for sig, old in antigos.items():
+        try:
+            signal.signal(sig, old)
+        except (ValueError, OSError, TypeError):
+            pass
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="telecopy",
@@ -115,6 +158,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--version", action="store_true", help="mostra a versão")
     parser.add_argument("--check", action="store_true", help="testa o ambiente")
+    parser.add_argument("--doctor", action="store_true",
+                        help="diagnóstico detalhado (versões, Telethon, sessão, último erro)")
     parser.add_argument("--lang", choices=("pt", "en"), help="força o idioma")
     parser.add_argument("--reset", action="store_true",
                         help="apaga o histórico de cópias (mantém o login)")
@@ -125,11 +170,16 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
-    import __init__ as app_meta
+    import app_meta
 
     if args.version:
         print(f"TELECOPY v{app_meta.__version__} — {app_meta.__author__}")
         return 0
+
+    if args.doctor:
+        from doctor import run_doctor
+
+        return run_doctor()
 
     if not check_dependencies(verbose=args.check):
         return 1
@@ -213,6 +263,7 @@ def main() -> int:
     from core import App
 
     app = App()
+    sinais_antigos = _instalar_sinais_interrupcao()
     try:
         import asyncio
 
@@ -230,6 +281,7 @@ def main() -> int:
                 pass
         return 1
     finally:
+        _restaurar_sinais(sinais_antigos)
         try:
             if lock_handle is not None:
                 lock_handle.close()

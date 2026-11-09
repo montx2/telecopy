@@ -4,6 +4,7 @@ utils.py — Logging com rotação, estatísticas persistentes e formatadores.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -72,7 +73,7 @@ class Logger:
         (re.compile(r"\b[a-f0-9]{40,}\b", re.I), "[HASH]"),
     ]
 
-    def __init__(self, path: Optional[Path] = None, level: str = "INFO") -> None:
+    def __init__(self, path: Optional[Path] = None, level: str = "DEBUG") -> None:
         self.path = path or LOG_FILE
         self.level = level.upper()
         self._lock = threading.RLock()
@@ -146,6 +147,27 @@ class Logger:
 
 
 logger = Logger()
+
+
+class LimitadorBanda:
+    """Token bucket simples por bytes/segundo; 0 desliga. Não mede a rede real."""
+
+    def __init__(self, bytes_por_segundo: int = 0) -> None:
+        self.bps = max(0, int(bytes_por_segundo or 0))
+        self._next_free = 0.0
+        self._lock = asyncio.Lock()
+
+    async def consumir(self, nbytes: int) -> None:
+        if self.bps <= 0 or nbytes <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            start = max(now, self._next_free)
+            self._next_free = start + float(nbytes) / self.bps
+            delay = start - now
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 # ── Limite diário ─────────────────────────────────────────────────────────────

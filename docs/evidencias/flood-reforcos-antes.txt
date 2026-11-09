@@ -1,0 +1,59 @@
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+__________ test_callback_duplicado_apos_prazo_nao_cria_outro_episodio __________
+tests/test_flood_control.py:249: in test_callback_duplicado_apos_prazo_nao_cria_outro_episodio
+    loop.run_until_complete(cenario(loop))
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_flood_control.py:242: in cenario
+    assert repetido.episode_id == primeiro.episode_id
+E   assert 2 == 1
+E    +  where 2 = FloodNotice(episode_id=2, first=True, remaining=1.0, parts=1).episode_id
+E    +  and   1 = FloodNotice(episode_id=1, first=True, remaining=1.0, parts=1).episode_id
+______ test_falha_no_observer_durante_countdown_nao_derruba_transferencia ______
+/usr/lib/python3.11/asyncio/tasks.py:490: in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/locks.py:267: in wait
+    await fut
+E   asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+fasttransfer.py:338: in wait_cooldown
+    await asyncio.wait_for(self._cond.wait(), timeout=min(remaining, 1.0))
+/usr/lib/python3.11/asyncio/tasks.py:492: in wait_for
+    raise exceptions.TimeoutError() from exc
+E   TimeoutError
+
+During handling of the above exception, another exception occurred:
+tests/test_flood_control.py:266: in test_falha_no_observer_durante_countdown_nao_derruba_transferencia
+    loop.run_until_complete(cenario())
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_flood_control.py:262: in cenario
+    await pool.wait_cooldown()
+fasttransfer.py:418: in wait_cooldown
+    await self.controller.wait_cooldown()
+fasttransfer.py:341: in wait_cooldown
+    self.observer(max(0.0, self._cooldown_until - self._now()),
+tests/test_flood_control.py:257: in observer_quebrado
+    raise OSError("terminal indisponível")
+E   OSError: terminal indisponível
+______________ test_detalhes_do_episodio_chegam_ao_arquivo_de_log ______________
+tests/test_flood_ui.py:86: in test_detalhes_do_episodio_chegam_ao_arquivo_de_log
+    assert "episódio=7" in caminho.read_text(encoding="utf-8")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/pathlib.py:1059: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/pathlib.py:1045: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-user/pytest-16/test_detalhes_do_episodio_cheg0/detalhes.log'
+=========================== short test summary info ============================
+FAILED tests/test_flood_control.py::test_callback_duplicado_apos_prazo_nao_cria_outro_episodio
+FAILED tests/test_flood_control.py::test_falha_no_observer_durante_countdown_nao_derruba_transferencia
+FAILED tests/test_flood_ui.py::test_detalhes_do_episodio_chegam_ao_arquivo_de_log
+3 failed in 0.52s

@@ -1,0 +1,306 @@
+<?xml version="1.0" ?>
+<testsuites disabled="0" errors="0" failures="0" tests="100" time="0.0">
+	<testsuite disabled="0" errors="0" failures="0" name="mutmut" skipped="0" tests="100" time="0">
+		<testcase name="Mutant #1" file="politica_erros.py" line="12">
+			<system-out>@dataclass(frozen=True)</system-out>
+		</testcase>
+		<testcase name="Mutant #2" file="politica_erros.py" line="12">
+			<system-out>@dataclass(frozen=True)</system-out>
+		</testcase>
+		<testcase name="Mutant #3" file="politica_erros.py" line="15">
+			<system-out>    transitório: bool = False</system-out>
+		</testcase>
+		<testcase name="Mutant #4" file="politica_erros.py" line="15">
+			<system-out>    transitório: bool = False</system-out>
+		</testcase>
+		<testcase name="Mutant #5" file="politica_erros.py" line="16">
+			<system-out>    fatal: bool = False</system-out>
+		</testcase>
+		<testcase name="Mutant #6" file="politica_erros.py" line="16">
+			<system-out>    fatal: bool = False</system-out>
+		</testcase>
+		<testcase name="Mutant #7" file="politica_erros.py" line="17">
+			<system-out>    motivo: str = &quot;&quot;</system-out>
+		</testcase>
+		<testcase name="Mutant #8" file="politica_erros.py" line="17">
+			<system-out>    motivo: str = &quot;&quot;</system-out>
+		</testcase>
+		<testcase name="Mutant #9" file="politica_erros.py" line="21">
+			<system-out>    &quot;AuthKeyUnregisteredError&quot;, &quot;AuthKeyInvalidError&quot;, &quot;SessionRevokedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #10" file="politica_erros.py" line="21">
+			<system-out>    &quot;AuthKeyUnregisteredError&quot;, &quot;AuthKeyInvalidError&quot;, &quot;SessionRevokedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #11" file="politica_erros.py" line="21">
+			<system-out>    &quot;AuthKeyUnregisteredError&quot;, &quot;AuthKeyInvalidError&quot;, &quot;SessionRevokedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #12" file="politica_erros.py" line="22">
+			<system-out>    &quot;SessionExpiredError&quot;, &quot;UserDeactivatedBanError&quot;, &quot;UserDeactivatedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #13" file="politica_erros.py" line="22">
+			<system-out>    &quot;SessionExpiredError&quot;, &quot;UserDeactivatedBanError&quot;, &quot;UserDeactivatedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #14" file="politica_erros.py" line="22">
+			<system-out>    &quot;SessionExpiredError&quot;, &quot;UserDeactivatedBanError&quot;, &quot;UserDeactivatedError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #15" file="politica_erros.py" line="23">
+			<system-out>    &quot;AccessTokenExpiredError&quot;, &quot;AccessTokenInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #16" file="politica_erros.py" line="23">
+			<system-out>    &quot;AccessTokenExpiredError&quot;, &quot;AccessTokenInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #17" file="politica_erros.py" line="24">
+			<system-out>}</system-out>
+		</testcase>
+		<testcase name="Mutant #18" file="politica_erros.py" line="26">
+			<system-out>    &quot;ChatAdminRequiredError&quot;, &quot;ChatForbiddenError&quot;, &quot;ChatWriteForbiddenError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #19" file="politica_erros.py" line="26">
+			<system-out>    &quot;ChatAdminRequiredError&quot;, &quot;ChatForbiddenError&quot;, &quot;ChatWriteForbiddenError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #20" file="politica_erros.py" line="26">
+			<system-out>    &quot;ChatAdminRequiredError&quot;, &quot;ChatForbiddenError&quot;, &quot;ChatWriteForbiddenError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #21" file="politica_erros.py" line="27">
+			<system-out>    &quot;ChatSendMediaForbiddenError&quot;, &quot;ChatSendPlainForbiddenError&quot;, &quot;ChannelInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #22" file="politica_erros.py" line="27">
+			<system-out>    &quot;ChatSendMediaForbiddenError&quot;, &quot;ChatSendPlainForbiddenError&quot;, &quot;ChannelInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #23" file="politica_erros.py" line="27">
+			<system-out>    &quot;ChatSendMediaForbiddenError&quot;, &quot;ChatSendPlainForbiddenError&quot;, &quot;ChannelInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #24" file="politica_erros.py" line="28">
+			<system-out>    &quot;ChannelPrivateError&quot;, &quot;PeerIdInvalidError&quot;, &quot;UserBannedInChannelError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #25" file="politica_erros.py" line="28">
+			<system-out>    &quot;ChannelPrivateError&quot;, &quot;PeerIdInvalidError&quot;, &quot;UserBannedInChannelError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #26" file="politica_erros.py" line="28">
+			<system-out>    &quot;ChannelPrivateError&quot;, &quot;PeerIdInvalidError&quot;, &quot;UserBannedInChannelError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #27" file="politica_erros.py" line="29">
+			<system-out>    &quot;UserNotParticipantError&quot;, &quot;ChatIdInvalidError&quot;, &quot;MsgIdInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #28" file="politica_erros.py" line="29">
+			<system-out>    &quot;UserNotParticipantError&quot;, &quot;ChatIdInvalidError&quot;, &quot;MsgIdInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #29" file="politica_erros.py" line="29">
+			<system-out>    &quot;UserNotParticipantError&quot;, &quot;ChatIdInvalidError&quot;, &quot;MsgIdInvalidError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #30" file="politica_erros.py" line="30">
+			<system-out>}</system-out>
+		</testcase>
+		<testcase name="Mutant #31" file="politica_erros.py" line="32">
+			<system-out>    &quot;ServerError&quot;, &quot;RpcCallFailError&quot;, &quot;TimedOutError&quot;, &quot;ServiceUnavailableError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #32" file="politica_erros.py" line="32">
+			<system-out>    &quot;ServerError&quot;, &quot;RpcCallFailError&quot;, &quot;TimedOutError&quot;, &quot;ServiceUnavailableError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #33" file="politica_erros.py" line="32">
+			<system-out>    &quot;ServerError&quot;, &quot;RpcCallFailError&quot;, &quot;TimedOutError&quot;, &quot;ServiceUnavailableError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #34" file="politica_erros.py" line="32">
+			<system-out>    &quot;ServerError&quot;, &quot;RpcCallFailError&quot;, &quot;TimedOutError&quot;, &quot;ServiceUnavailableError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #35" file="politica_erros.py" line="33">
+			<system-out>    &quot;InternalError&quot;, &quot;NetworkMigrateError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #36" file="politica_erros.py" line="33">
+			<system-out>    &quot;InternalError&quot;, &quot;NetworkMigrateError&quot;,</system-out>
+		</testcase>
+		<testcase name="Mutant #37" file="politica_erros.py" line="34">
+			<system-out>}</system-out>
+		</testcase>
+		<testcase name="Mutant #38" file="politica_erros.py" line="35">
+			<system-out>_REFERENCIA = {&quot;FileReferenceExpiredError&quot;, &quot;FileReferenceInvalidError&quot;, &quot;FilerefUpgradeNeededError&quot;}</system-out>
+		</testcase>
+		<testcase name="Mutant #39" file="politica_erros.py" line="35">
+			<system-out>_REFERENCIA = {&quot;FileReferenceExpiredError&quot;, &quot;FileReferenceInvalidError&quot;, &quot;FilerefUpgradeNeededError&quot;}</system-out>
+		</testcase>
+		<testcase name="Mutant #40" file="politica_erros.py" line="35">
+			<system-out>_REFERENCIA = {&quot;FileReferenceExpiredError&quot;, &quot;FileReferenceInvalidError&quot;, &quot;FilerefUpgradeNeededError&quot;}</system-out>
+		</testcase>
+		<testcase name="Mutant #41" file="politica_erros.py" line="35">
+			<system-out>_REFERENCIA = {&quot;FileReferenceExpiredError&quot;, &quot;FileReferenceInvalidError&quot;, &quot;FilerefUpgradeNeededError&quot;}</system-out>
+		</testcase>
+		<testcase name="Mutant #42" file="politica_erros.py" line="39">
+			<system-out>    nome = type(exc).__name__</system-out>
+		</testcase>
+		<testcase name="Mutant #43" file="politica_erros.py" line="41">
+			<system-out>        return PoliticaErro(&quot;esperar_portao&quot;, transitório=True, motivo=&quot;flood&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #44" file="politica_erros.py" line="41">
+			<system-out>        return PoliticaErro(&quot;esperar_portao&quot;, transitório=True, motivo=&quot;flood&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #45" file="politica_erros.py" line="41">
+			<system-out>        return PoliticaErro(&quot;esperar_portao&quot;, transitório=True, motivo=&quot;flood&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #46" file="politica_erros.py" line="42">
+			<system-out>    if nome in _TERMINAIS_AUTH:</system-out>
+		</testcase>
+		<testcase name="Mutant #47" file="politica_erros.py" line="43">
+			<system-out>        return PoliticaErro(&quot;parar_autenticacao&quot;, fatal=True, motivo=&quot;auth&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #48" file="politica_erros.py" line="43">
+			<system-out>        return PoliticaErro(&quot;parar_autenticacao&quot;, fatal=True, motivo=&quot;auth&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #49" file="politica_erros.py" line="43">
+			<system-out>        return PoliticaErro(&quot;parar_autenticacao&quot;, fatal=True, motivo=&quot;auth&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #50" file="politica_erros.py" line="44">
+			<system-out>    if nome in _TERMINAIS_DESTINO:</system-out>
+		</testcase>
+		<testcase name="Mutant #51" file="politica_erros.py" line="45">
+			<system-out>        return PoliticaErro(&quot;parar_destino&quot;, fatal=True, motivo=&quot;destino&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #52" file="politica_erros.py" line="45">
+			<system-out>        return PoliticaErro(&quot;parar_destino&quot;, fatal=True, motivo=&quot;destino&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #53" file="politica_erros.py" line="45">
+			<system-out>        return PoliticaErro(&quot;parar_destino&quot;, fatal=True, motivo=&quot;destino&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #54" file="politica_erros.py" line="46">
+			<system-out>    if nome in _REFERENCIA:</system-out>
+		</testcase>
+		<testcase name="Mutant #55" file="politica_erros.py" line="47">
+			<system-out>        return PoliticaErro(&quot;refresh_ou_fallback&quot;, transitório=True, motivo=&quot;referencia&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #56" file="politica_erros.py" line="47">
+			<system-out>        return PoliticaErro(&quot;refresh_ou_fallback&quot;, transitório=True, motivo=&quot;referencia&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #57" file="politica_erros.py" line="47">
+			<system-out>        return PoliticaErro(&quot;refresh_ou_fallback&quot;, transitório=True, motivo=&quot;referencia&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #58" file="politica_erros.py" line="48">
+			<system-out>    if nome == &quot;FileMigrateError&quot;:</system-out>
+		</testcase>
+		<testcase name="Mutant #59" file="politica_erros.py" line="48">
+			<system-out>    if nome == &quot;FileMigrateError&quot;:</system-out>
+		</testcase>
+		<testcase name="Mutant #60" file="politica_erros.py" line="49">
+			<system-out>        return PoliticaErro(&quot;migrar_dc&quot;, transitório=True, motivo=&quot;migracao&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #61" file="politica_erros.py" line="49">
+			<system-out>        return PoliticaErro(&quot;migrar_dc&quot;, transitório=True, motivo=&quot;migracao&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #62" file="politica_erros.py" line="49">
+			<system-out>        return PoliticaErro(&quot;migrar_dc&quot;, transitório=True, motivo=&quot;migracao&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #63" file="politica_erros.py" line="50">
+			<system-out>    if nome in _TRANSIENTES or isinstance(exc, (ConnectionError, TimeoutError, OSError)):</system-out>
+		</testcase>
+		<testcase name="Mutant #64" file="politica_erros.py" line="50">
+			<system-out>    if nome in _TRANSIENTES or isinstance(exc, (ConnectionError, TimeoutError, OSError)):</system-out>
+		</testcase>
+		<testcase name="Mutant #65" file="politica_erros.py" line="51">
+			<system-out>        return PoliticaErro(&quot;retentar_com_orcamento&quot;, transitório=True, motivo=&quot;transporte&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #66" file="politica_erros.py" line="51">
+			<system-out>        return PoliticaErro(&quot;retentar_com_orcamento&quot;, transitório=True, motivo=&quot;transporte&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #67" file="politica_erros.py" line="51">
+			<system-out>        return PoliticaErro(&quot;retentar_com_orcamento&quot;, transitório=True, motivo=&quot;transporte&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #68" file="politica_erros.py" line="53">
+			<system-out>        return PoliticaErro(&quot;parar_sem_retry_cego&quot;, fatal=True, motivo=&quot;rpc_desconhecido&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #69" file="politica_erros.py" line="53">
+			<system-out>        return PoliticaErro(&quot;parar_sem_retry_cego&quot;, fatal=True, motivo=&quot;rpc_desconhecido&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #70" file="politica_erros.py" line="53">
+			<system-out>        return PoliticaErro(&quot;parar_sem_retry_cego&quot;, fatal=True, motivo=&quot;rpc_desconhecido&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #71" file="politica_erros.py" line="54">
+			<system-out>    return PoliticaErro(&quot;avaliar_chamador&quot;, motivo=&quot;nao_telegram&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #72" file="politica_erros.py" line="54">
+			<system-out>    return PoliticaErro(&quot;avaliar_chamador&quot;, motivo=&quot;nao_telegram&quot;)</system-out>
+		</testcase>
+		<testcase name="Mutant #73" file="politica_erros.py" line="60">
+			<system-out>        {&quot;classe&quot;: &quot;FloodWait/FloodPremiumWait&quot;, &quot;acao&quot;: &quot;esperar portão compartilhado; AIMD; fallback após orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #74" file="politica_erros.py" line="60">
+			<system-out>        {&quot;classe&quot;: &quot;FloodWait/FloodPremiumWait&quot;, &quot;acao&quot;: &quot;esperar portão compartilhado; AIMD; fallback após orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #75" file="politica_erros.py" line="60">
+			<system-out>        {&quot;classe&quot;: &quot;FloodWait/FloodPremiumWait&quot;, &quot;acao&quot;: &quot;esperar portão compartilhado; AIMD; fallback após orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #76" file="politica_erros.py" line="60">
+			<system-out>        {&quot;classe&quot;: &quot;FloodWait/FloodPremiumWait&quot;, &quot;acao&quot;: &quot;esperar portão compartilhado; AIMD; fallback após orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #77" file="politica_erros.py" line="61">
+			<system-out>        {&quot;classe&quot;: &quot;AuthKey*/Session*/UserDeactivated*&quot;, &quot;acao&quot;: &quot;parar; não trocar conta nem contornar ban&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #78" file="politica_erros.py" line="61">
+			<system-out>        {&quot;classe&quot;: &quot;AuthKey*/Session*/UserDeactivated*&quot;, &quot;acao&quot;: &quot;parar; não trocar conta nem contornar ban&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #79" file="politica_erros.py" line="61">
+			<system-out>        {&quot;classe&quot;: &quot;AuthKey*/Session*/UserDeactivated*&quot;, &quot;acao&quot;: &quot;parar; não trocar conta nem contornar ban&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #80" file="politica_erros.py" line="61">
+			<system-out>        {&quot;classe&quot;: &quot;AuthKey*/Session*/UserDeactivated*&quot;, &quot;acao&quot;: &quot;parar; não trocar conta nem contornar ban&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #81" file="politica_erros.py" line="62">
+			<system-out>        {&quot;classe&quot;: &quot;Chat*/Channel*/Peer*/UserBanned*&quot;, &quot;acao&quot;: &quot;parar item/destino; sem retry cego&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #82" file="politica_erros.py" line="62">
+			<system-out>        {&quot;classe&quot;: &quot;Chat*/Channel*/Peer*/UserBanned*&quot;, &quot;acao&quot;: &quot;parar item/destino; sem retry cego&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #83" file="politica_erros.py" line="62">
+			<system-out>        {&quot;classe&quot;: &quot;Chat*/Channel*/Peer*/UserBanned*&quot;, &quot;acao&quot;: &quot;parar item/destino; sem retry cego&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #84" file="politica_erros.py" line="62">
+			<system-out>        {&quot;classe&quot;: &quot;Chat*/Channel*/Peer*/UserBanned*&quot;, &quot;acao&quot;: &quot;parar item/destino; sem retry cego&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #85" file="politica_erros.py" line="63">
+			<system-out>        {&quot;classe&quot;: &quot;FileReference*&quot;, &quot;acao&quot;: &quot;refresh limitado; fallback upload se permitido&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #86" file="politica_erros.py" line="63">
+			<system-out>        {&quot;classe&quot;: &quot;FileReference*&quot;, &quot;acao&quot;: &quot;refresh limitado; fallback upload se permitido&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #87" file="politica_erros.py" line="63">
+			<system-out>        {&quot;classe&quot;: &quot;FileReference*&quot;, &quot;acao&quot;: &quot;refresh limitado; fallback upload se permitido&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #88" file="politica_erros.py" line="63">
+			<system-out>        {&quot;classe&quot;: &quot;FileReference*&quot;, &quot;acao&quot;: &quot;refresh limitado; fallback upload se permitido&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #89" file="politica_erros.py" line="64">
+			<system-out>        {&quot;classe&quot;: &quot;FileMigrateError&quot;, &quot;acao&quot;: &quot;migrar DC preservando parte/ordem&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #90" file="politica_erros.py" line="64">
+			<system-out>        {&quot;classe&quot;: &quot;FileMigrateError&quot;, &quot;acao&quot;: &quot;migrar DC preservando parte/ordem&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #91" file="politica_erros.py" line="64">
+			<system-out>        {&quot;classe&quot;: &quot;FileMigrateError&quot;, &quot;acao&quot;: &quot;migrar DC preservando parte/ordem&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #92" file="politica_erros.py" line="64">
+			<system-out>        {&quot;classe&quot;: &quot;FileMigrateError&quot;, &quot;acao&quot;: &quot;migrar DC preservando parte/ordem&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #93" file="politica_erros.py" line="65">
+			<system-out>        {&quot;classe&quot;: &quot;ServerError/RpcCallFail/TimedOut/ConnectionError&quot;, &quot;acao&quot;: &quot;retry limitado com orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #94" file="politica_erros.py" line="65">
+			<system-out>        {&quot;classe&quot;: &quot;ServerError/RpcCallFail/TimedOut/ConnectionError&quot;, &quot;acao&quot;: &quot;retry limitado com orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #95" file="politica_erros.py" line="65">
+			<system-out>        {&quot;classe&quot;: &quot;ServerError/RpcCallFail/TimedOut/ConnectionError&quot;, &quot;acao&quot;: &quot;retry limitado com orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #96" file="politica_erros.py" line="65">
+			<system-out>        {&quot;classe&quot;: &quot;ServerError/RpcCallFail/TimedOut/ConnectionError&quot;, &quot;acao&quot;: &quot;retry limitado com orçamento&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #97" file="politica_erros.py" line="66">
+			<system-out>        {&quot;classe&quot;: &quot;RPCError desconhecido&quot;, &quot;acao&quot;: &quot;parar e registrar; não retentar cegamente&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #98" file="politica_erros.py" line="66">
+			<system-out>        {&quot;classe&quot;: &quot;RPCError desconhecido&quot;, &quot;acao&quot;: &quot;parar e registrar; não retentar cegamente&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #99" file="politica_erros.py" line="66">
+			<system-out>        {&quot;classe&quot;: &quot;RPCError desconhecido&quot;, &quot;acao&quot;: &quot;parar e registrar; não retentar cegamente&quot;},</system-out>
+		</testcase>
+		<testcase name="Mutant #100" file="politica_erros.py" line="66">
+			<system-out>        {&quot;classe&quot;: &quot;RPCError desconhecido&quot;, &quot;acao&quot;: &quot;parar e registrar; não retentar cegamente&quot;},</system-out>
+		</testcase>
+	</testsuite>
+</testsuites>
+

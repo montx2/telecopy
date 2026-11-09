@@ -1,0 +1,34 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+__________ test_verificacao_inclui_mensagens_da_origem_sem_checkpoint __________
+tests/test_verificacao_completa.py:36: in test_verificacao_inclui_mensagens_da_origem_sem_checkpoint
+    assert result.verificados == 2
+E   assert 1 == 2
+E    +  where 1 = ResultadoVerificacao(source_id=-1, dest_id=-2, verificados=1, ok=1, ausentes=[], ambiguos=[], reparados=[], ordem_ok=True, detalhes=[]).verificados
+__________________ test_verificacao_nao_trunca_destino_em_500 __________________
+tests/test_verificacao_completa.py:55: in test_verificacao_nao_trunca_destino_em_500
+    assert result.ok == 1 and result.ausentes == []
+E   AssertionError: assert (0 == 1)
+E    +  where 0 = ResultadoVerificacao(source_id=-1, dest_id=-2, verificados=1, ok=0, ausentes=[1], ambiguos=[], reparados=[], ordem_ok=True, detalhes=[{'msg_id': 1, 'motivo': 'Checkpoint concluído sem correspondência confirmada no destino.'}]).ok
+__________ test_verificacao_detecta_conteudo_divergente_do_confirmado __________
+tests/test_verificacao_completa.py:71: in test_verificacao_detecta_conteudo_divergente_do_confirmado
+    assert result.divergentes == [1]
+           ^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'ResultadoVerificacao' object has no attribute 'divergentes'
+__________ test_verificacao_parcial_e_marcada_quando_limite_explicito __________
+tests/test_verificacao_completa.py:80: in test_verificacao_parcial_e_marcada_quando_limite_explicito
+    assert result.parcial is True
+           ^^^^^^^^^^^^^^
+E   AttributeError: 'ResultadoVerificacao' object has no attribute 'parcial'
+___________________ test_verificacao_rehearsal_limita_origem ___________________
+tests/test_verificacao_completa.py:95: in test_verificacao_rehearsal_limita_origem
+    result = asyncio.run(verificar_par(client, env.repo, source, dest, max_messages=2))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: verificar_par() got an unexpected keyword argument 'max_messages'
+=========================== short test summary info ============================
+FAILED tests/test_verificacao_completa.py::test_verificacao_inclui_mensagens_da_origem_sem_checkpoint
+FAILED tests/test_verificacao_completa.py::test_verificacao_nao_trunca_destino_em_500
+FAILED tests/test_verificacao_completa.py::test_verificacao_detecta_conteudo_divergente_do_confirmado
+FAILED tests/test_verificacao_completa.py::test_verificacao_parcial_e_marcada_quando_limite_explicito
+FAILED tests/test_verificacao_completa.py::test_verificacao_rehearsal_limita_origem
+5 failed in 0.53s

@@ -1,0 +1,45 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+__________ test_record_delivery_rollback_nao_deixa_estado_pela_metade __________
+tests/test_persistencia_atomica.py:43: in test_record_delivery_rollback_nao_deixa_estado_pela_metade
+    assert not repo.is_done(1, 2, 1)
+E   assert not True
+E    +  where True = is_done(1, 2, 1)
+E    +    where is_done = <database.Repository object at 0x7f33d0d93090>.is_done
+_____ test_record_delivery_confirma_checkpoint_processed_dedup_e_intencao ______
+tests/test_persistencia_atomica.py:62: in test_record_delivery_confirma_checkpoint_processed_dedup_e_intencao
+    assert repo.intent_for(1, 2, 1, 0)["state"] == "confirmed"
+E   AssertionError: assert 'sending' == 'confirmed'
+E     
+E     - confirmed
+E     + sending
+_______ test_reset_pair_e_reset_all_apagam_intencoes_e_partes_de_reserva _______
+tests/test_persistencia_atomica.py:74: in test_reset_pair_e_reset_all_apagam_intencoes_e_partes_de_reserva
+    assert repo.intent_for(1, 2, 1, 0) == {}
+E   AssertionError: assert {'source_id':...ndex': 0, ...} == {}
+E     
+E     Left contains 12 more items:
+E     {'created_at': 1794186225.1502876}
+E     {'dest_id': 2}
+E     {'dest_msg_id': None}
+E     {'dest_topic': None}
+E     {'fingerprint': 'a'}...
+E     
+E     ...Full output truncated, use '-vv' to show
+__________________ test_prune_preserva_evidencia_de_retomada ___________________
+tests/test_persistencia_atomica.py:99: in test_prune_preserva_evidencia_de_retomada
+    assert repo.is_done(1, 2, 1)
+E   assert False
+E    +  where False = is_done(1, 2, 1)
+E    +    where is_done = <database.Repository object at 0x7f33d0d93290>.is_done
+_________________ test_close_fecha_conexoes_de_outras_threads __________________
+tests/test_persistencia_atomica.py:116: in test_close_fecha_conexoes_de_outras_threads
+    with pytest.raises(sqlite3.ProgrammingError):
+E   Failed: DID NOT RAISE ProgrammingError
+=========================== short test summary info ============================
+FAILED tests/test_persistencia_atomica.py::test_record_delivery_rollback_nao_deixa_estado_pela_metade
+FAILED tests/test_persistencia_atomica.py::test_record_delivery_confirma_checkpoint_processed_dedup_e_intencao
+FAILED tests/test_persistencia_atomica.py::test_reset_pair_e_reset_all_apagam_intencoes_e_partes_de_reserva
+FAILED tests/test_persistencia_atomica.py::test_prune_preserva_evidencia_de_retomada
+FAILED tests/test_persistencia_atomica.py::test_close_fecha_conexoes_de_outras_threads
+5 failed in 0.77s
