@@ -3,13 +3,11 @@
   - setuptools>=68
 * Getting build dependencies for sdist...
 running egg_info
-creating telecopy.egg-info
 writing telecopy.egg-info/PKG-INFO
 writing dependency_links to telecopy.egg-info/dependency_links.txt
 writing entry points to telecopy.egg-info/entry_points.txt
 writing requirements to telecopy.egg-info/requires.txt
 writing top-level names to telecopy.egg-info/top_level.txt
-writing manifest file 'telecopy.egg-info/SOURCES.txt'
 reading manifest file 'telecopy.egg-info/SOURCES.txt'
 writing manifest file 'telecopy.egg-info/SOURCES.txt'
 * Installed build dependency versions:
@@ -67,6 +65,7 @@ copying tests/test_cobertura_final.py -> telecopy-4.1.0/tests
 copying tests/test_cobertura_infra.py -> telecopy-4.1.0/tests
 copying tests/test_cobertura_seguranca.py -> telecopy-4.1.0/tests
 copying tests/test_core.py -> telecopy-4.1.0/tests
+copying tests/test_fake_iter_topico.py -> telecopy-4.1.0/tests
 copying tests/test_fase4_cli.py -> telecopy-4.1.0/tests
 copying tests/test_fasttransfer.py -> telecopy-4.1.0/tests
 copying tests/test_flood_control.py -> telecopy-4.1.0/tests
@@ -75,6 +74,7 @@ copying tests/test_forum_copy.py -> telecopy-4.1.0/tests
 copying tests/test_forward_ordem.py -> telecopy-4.1.0/tests
 copying tests/test_intents.py -> telecopy-4.1.0/tests
 copying tests/test_janelas_restantes.py -> telecopy-4.1.0/tests
+copying tests/test_main_sinais.py -> telecopy-4.1.0/tests
 copying tests/test_mirror_ordem.py -> telecopy-4.1.0/tests
 copying tests/test_motor_upload.py -> telecopy-4.1.0/tests
 copying tests/test_opcional.py -> telecopy-4.1.0/tests
@@ -176,7 +176,7 @@ running install_egg_info
 Copying telecopy.egg-info to build/bdist.linux-x86_64/wheel/./telecopy-4.1.0-py3.11.egg-info
 running install_scripts
 creating build/bdist.linux-x86_64/wheel/telecopy-4.1.0.dist-info/WHEEL
-creating '/home/user/telecopy/dist/.tmp-q3_e9n3n/telecopy-4.1.0-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+creating '/home/user/telecopy/dist/.tmp-gu3_pjqm/telecopy-4.1.0-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
 adding 'channel_clone.py'
 adding 'config.py'
 adding 'copier.py'
