@@ -170,7 +170,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
-    import __init__ as app_meta
+    import app_meta
 
     if args.version:
         print(f"TELECOPY v{app_meta.__version__} — {app_meta.__author__}")

@@ -52,8 +52,7 @@ jobs:
       - name: Smoke test wheel
         run: |
           python -m pip install dist/*.whl
-          telecopy --help
-          telecopy doctor --json
+          python tools/smoke_wheel.py
       - uses: actions/upload-artifact@v4
         with:
           name: dist

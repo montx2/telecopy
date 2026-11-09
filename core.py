@@ -35,7 +35,7 @@ from telethon.errors import (
 )
 from telethon.tl.types import Channel, Chat
 
-import __init__ as _app
+import app_meta as _app
 from config import (
     APP_AUTHOR,
     BACKUP_DIR,

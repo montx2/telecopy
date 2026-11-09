@@ -34,7 +34,7 @@ dev = [
 telecopy = "telecopy_cli:main"
 
 [tool.setuptools]
-py-modules = ["config", "copier", "core", "database", "dedup", "doctor", "fasttransfer",
+py-modules = ["app_meta", "config", "copier", "core", "database", "dedup", "doctor", "fasttransfer",
               "filters", "i18n", "main", "politica_erros", "prefs", "relatorio",
               "retry_queue", "security", "system_analyzer", "telecopy_cli", "utils",
               "verificacao", "channel_clone", "opcional"]

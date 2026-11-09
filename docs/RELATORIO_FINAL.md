@@ -8,7 +8,7 @@ O trabalho cobre auditoria, correções de integridade, CLI não interativa,
 recursos opt-in, testes de regressão/caos/soak, CI, empacotamento e
 documentação. A suíte final está verde:
 
-- **357 testes passaram** em ~67s, sem rede real (`docs/evidencias/termux-suite.txt`).
+- **364 testes passaram** em ~67s, sem rede real (`docs/evidencias/empacotamento-suite.txt`).
 - **Ruff limpo** nas regras configuradas (`docs/evidencias/ruff-final.txt`).
 - **Wheel/sdist construídos** e smoke test do wheel instalado (`docs/evidencias/build.txt`).
 - **Mutação**: `politica_erros.py` com **100/100 mutantes mortos**, 0 sobreviventes
@@ -64,14 +64,20 @@ Tudo que depende da rede real permanece não validado em produção.
 - Guia e solução de problemas em `docs/TERMUX.md`; shellcheck no CI.
 - **Validado em Linux; execução em Android real ainda não testada.**
 
+### Empacotamento
+- `app_meta.py` substitui o `import __init__` (não instalável): o wheel quebrava o
+  menu interativo com `ModuleNotFoundError`. Versão unificada em 4.1.0.
+- `tools/smoke_wheel.py` valida o wheel instalado a partir de fora do checkout;
+  alcance de rede é aviso, não falha de empacotamento.
+
 ### Qualidade e infraestrutura
 - Testes de regressão antes/depois para cada correção relevante, propriedades
   Hypothesis, caos com relógio simulado e soak local de 100k linhas/intenções.
 - `FakeClient.iter_messages` aplica o filtro de tópico **antes** do `limit`, como
   a API real (regressão em `tests/test_fake_iter_topico.py`).
 - CI GitHub Actions: matriz Ubuntu/Windows × Python 3.10/3.11/3.12, lint, suíte,
-  cobertura, build e smoke test de wheel. **Configurado, não executado no GitHub
-  neste ambiente.**
+  cobertura, build e smoke test de wheel. **Executado no GitHub: os 6 jobs de
+  teste e o shellcheck passaram** (inclusive Windows, antes não validado).
 - Workflow manual de mutação (`mutmut<3`) para lógica crítica pura.
 - `pyproject.toml` com extras `dev`, `fast`, `socks`; módulo `opcional` no wheel.
 - README atualizado para 4.1 com CLI, recursos opt-in e estado real de testes.
@@ -80,13 +86,13 @@ Tudo que depende da rede real permanece não validado em produção.
 
 | Critério | Estado | Evidência |
 |---|---|---|
-| Suíte verde sem rede | **Atendido** | `termux-suite.txt` (357 passed) |
+| Suíte verde sem rede | **Atendido** | `empacotamento-suite.txt` (364 passed) |
 | Lint limpo | **Atendido** | `ruff-final.txt` |
 | Regressões antes/depois | **Atendido** | `docs/evidencias/*-antes.txt` / `*-depois.txt` |
 | Empacotamento + smoke | **Atendido local** | `build.txt` |
 | Mutação em lógica crítica | **Parcial** | `politica_erros.py` 100/100; `dedup.py` não executado |
 | Cobertura crítica ≥90% | **Não atingido** | 86% total; `copier.py` 82% |
-| CI multi-plataforma | **Configurado, não executado** | `.github/workflows/ci.yml` |
+| CI multi-plataforma | **Executado e verde** | 6 jobs: Ubuntu+Windows × 3.10/3.11/3.12 |
 | Validação real no Telegram | **Não executada** | sem credenciais/rede real |
 | Exactly-once distribuído | **Impossível/ não prometido** | reconciliação conservadora; ambiguidade bloqueia |
 
@@ -106,8 +112,8 @@ Tudo que depende da rede real permanece não validado em produção.
    cancelamento no menu depende do `KeyboardInterrupt` propagar pelo asyncio.
 6. **FakeClient**: não modela paginação real do Telegram (offset_id/offset_rate),
    apenas ordem/limit/tópico; suficiente para os testes atuais.
-7. **Windows**: guardas de plataforma adicionadas; execução real em Windows não
-   foi feita neste ambiente.
+7. **Windows**: a suíte passou no CI em Windows × 3.10/3.11/3.12. Uso interativo
+   real (console, fechar janela, .exe) ainda não foi exercitado.
 8. **Segurança administrativa**: `assinatura.pfx` foi removido do índice, mas o
    histórico não foi reescrito; revogação/reemissão e limpeza de histórico exigem
    ação do proprietário (`docs/SEGURANCA.md`).

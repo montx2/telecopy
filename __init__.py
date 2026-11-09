@@ -1,9 +1,10 @@
 """
 TELECOPY — Replicador de Canais Telegram
 by montx2
+
+Os metadados canônicos vivem em app_meta (instalável como wheel).
 """
 
-__version__ = "4.0.0"
-__author__ = "montx2"
-__license__ = "MIT"
+from app_meta import __author__, __license__, __version__
+
 __all__ = ["__version__", "__author__", "__license__"]

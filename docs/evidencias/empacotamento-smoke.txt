@@ -1,0 +1,12 @@
+# Empacotamento — evidência
+
+## bug: core importava __init__ (não instalável)
+corrigido via app_meta.py
+
+## smoke do wheel instalado (fora do checkout)
+✓ console script `telecopy` responde e lista subcomandos
+✓ `doctor --json` emitiu JSON puro
+✓ módulos importam do wheel: /tmp/tc-smoke/telecopy_cli.py
+
+Smoke test OK — 19 checks, 0 falhas de instalação.
+exit=0

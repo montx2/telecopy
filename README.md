@@ -722,7 +722,7 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**357 passed** (`python -m pytest -o addopts='' -q`, suíte isolada, sem rede).
+**364 passed** (`python -m pytest -o addopts='' -q`, suíte isolada, sem rede).
 Ruff: `All checks passed` (regras E9/F63/F7/F82/F401/F841, excluindo `data/`).
 Cobertura crítica medida: 86% no conjunto (`docs/evidencias/coverage-critica.txt`);
 a meta de 90% ainda não foi atingida no `copier.py` (82%). Mutação:
