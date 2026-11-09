@@ -1,0 +1,44 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+______________ test_main_instala_e_restaura_sinais_de_interrupcao ______________
+
+    def test_main_instala_e_restaura_sinais_de_interrupcao() -> None:
+        antigos = {}
+        try:
+>           antigos = main._instalar_sinais_interrupcao()
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'main' has no attribute '_instalar_sinais_interrupcao'
+
+tests/test_main_sinais.py:14: AttributeError
+
+During handling of the above exception, another exception occurred:
+
+    def test_main_instala_e_restaura_sinais_de_interrupcao() -> None:
+        antigos = {}
+        try:
+            antigos = main._instalar_sinais_interrupcao()
+            for sig in (signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+                if sig is None:
+                    continue
+                handler = signal.getsignal(sig)
+                assert callable(handler)
+                with pytest.raises(KeyboardInterrupt):
+                    handler(sig, None)
+        finally:
+>           main._restaurar_sinais(antigos)
+            ^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'main' has no attribute '_restaurar_sinais'
+
+tests/test_main_sinais.py:23: AttributeError
+_________________ test_main_restauracao_tolera_sinal_invalido __________________
+
+    def test_main_restauracao_tolera_sinal_invalido() -> None:
+>       main._restaurar_sinais({})
+        ^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'main' has no attribute '_restaurar_sinais'
+
+tests/test_main_sinais.py:28: AttributeError
+=========================== short test summary info ============================
+FAILED tests/test_main_sinais.py::test_main_instala_e_restaura_sinais_de_interrupcao
+FAILED tests/test_main_sinais.py::test_main_restauracao_tolera_sinal_invalido
+2 failed in 0.11s

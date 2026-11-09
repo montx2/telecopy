@@ -12,7 +12,7 @@
 **Replicador de canais Telegram — rápido, limpo e sem duplicatas.**
 **Telegram channel replicator — fast, clean and duplicate-free.**
 
-`v4.0.0` · Python 3.10+ · Windows / Linux / macOS
+`v4.1.0` · Python 3.10+ · Windows / Linux / macOS
 
 ---
 
@@ -722,9 +722,31 @@ WP1/WP2 acrescentam `tests/test_ordem.py`, `tests/test_ui_order.py`,
 `tests/test_retry_parcial.py`, `tests/test_forward_ordem.py` e
 `tests/test_ordem_preflight.py` e `tests/test_mirror_ordem.py`. Estado verificado
 nesta entrega:
-**241 passed** (`python -m pytest -q`, suíte isolada, sem rede).
-Pyflakes: apenas os achados pré-existentes confirmados no baseline —
-`split_text` duplicado em `copier.py` e `exc` não usado em `security.py`.
+**344 passed** (`python -m pytest -o addopts='' -q`, suíte isolada, sem rede).
+Ruff: `All checks passed` (regras E9/F63/F7/F82/F401/F841, excluindo `data/`).
+Cobertura crítica medida: 86% no conjunto (`docs/evidencias/coverage-critica.txt`);
+a meta de 90% ainda não foi atingida no `copier.py` (82%). Mutação:
+`politica_erros.py` 100/100 mutantes mortos (`docs/evidencias/mutacao-politica.txt`).
+
+### CLI não interativa (Fase 4/5)
+
+```bash
+telecopy clone --src @origem --dst @destino --perfil recomendado --retomar --json
+telecopy clone --src @origem --dst @destino --filtro photos --inicio 22:00 --fim 06:00   --bandwidth 5000000 --report-dir data/relatorios
+telecopy verify --src @origem --dst @destino --reparar-confirmados --json
+telecopy archive --src @origem --out data/arquivo --limite 1000
+telecopy ui --report-dir data/relatorios --token SEU_TOKEN   # somente leitura, 127.0.0.1
+telecopy doctor --auth --json
+telecopy --proxy socks5://user:pass@host:1080 clone ...
+```
+
+Recursos P1 são **opt-in** e expostos apenas pela CLI (não pelo menu interativo):
+proxy SOCKS/HTTP, janela de horário (`--inicio/--fim`, inclusive virando meia-noite),
+limitador local de banda (`--bandwidth`, token bucket — não mede a rede real),
+reescrita de texto (`--reescrever-de/-para`; remove entidades quando altera o texto e é
+recusada em modo forward), webhook de conclusão (`--notificar-url`; falha só registra log),
+arquivo offline (`archive`: `manifest.jsonl` + `media/`) e UI local somente leitura com token.
+Códigos de saída: `0` sucesso, `1` erros/incompleto, `2` interrupção/credenciais/uso inválido.
 
 A auditoria final (`AUDITORIA.md`) encontrou 7 defeitos que a suíte anterior não
 cobria. A verificação posterior achou mais 2 da mesma classe no espelho e na fila

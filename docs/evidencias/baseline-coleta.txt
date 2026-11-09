@@ -1,0 +1,19 @@
+tests/test_app_flow.py: 17
+tests/test_auto_clone.py: 29
+tests/test_core.py: 49
+tests/test_fasttransfer.py: 9
+tests/test_forum_copy.py: 11
+tests/test_forward_ordem.py: 7
+tests/test_mirror_ordem.py: 6
+tests/test_motor_upload.py: 4
+tests/test_ordem.py: 20
+tests/test_ordem_curso.py: 5
+tests/test_ordem_preflight.py: 6
+tests/test_pipeline.py: 9
+tests/test_placeholder.py: 37
+tests/test_prefs_migration.py: 4
+tests/test_retry_parcial.py: 6
+tests/test_speed.py: 12
+tests/test_transfer_config.py: 6
+tests/test_ui_order.py: 4
+

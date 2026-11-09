@@ -197,6 +197,15 @@ class DedupEngine:
             except Exception:
                 pass
 
+    def remember(self, content_hash: str, dest_id: int, sent_msg_id: int) -> None:
+        """Atualiza só o cache depois de o SQLite confirmar a entrega."""
+        if not self.enabled or not content_hash:
+            return
+        key = f"{content_hash}:{dest_id}"
+        with self._lock:
+            self._lru.put(key, int(sent_msg_id))
+            self._bloom.add(key)
+
     def reset(self) -> None:
         self._lru.clear()
         self._bloom.clear()

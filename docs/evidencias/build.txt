@@ -1,0 +1,207 @@
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=68
+* Getting build dependencies for sdist...
+running egg_info
+creating telecopy.egg-info
+writing telecopy.egg-info/PKG-INFO
+writing dependency_links to telecopy.egg-info/dependency_links.txt
+writing entry points to telecopy.egg-info/entry_points.txt
+writing requirements to telecopy.egg-info/requires.txt
+writing top-level names to telecopy.egg-info/top_level.txt
+writing manifest file 'telecopy.egg-info/SOURCES.txt'
+reading manifest file 'telecopy.egg-info/SOURCES.txt'
+writing manifest file 'telecopy.egg-info/SOURCES.txt'
+* Installed build dependency versions:
+  - setuptools==84.2.1
+* Building sdist...
+running sdist
+running egg_info
+writing telecopy.egg-info/PKG-INFO
+writing dependency_links to telecopy.egg-info/dependency_links.txt
+writing entry points to telecopy.egg-info/entry_points.txt
+writing requirements to telecopy.egg-info/requires.txt
+writing top-level names to telecopy.egg-info/top_level.txt
+reading manifest file 'telecopy.egg-info/SOURCES.txt'
+writing manifest file 'telecopy.egg-info/SOURCES.txt'
+running check
+creating telecopy-4.1.0
+creating telecopy-4.1.0/telecopy.egg-info
+creating telecopy-4.1.0/tests
+copying files to telecopy-4.1.0...
+copying README.md -> telecopy-4.1.0
+copying channel_clone.py -> telecopy-4.1.0
+copying config.py -> telecopy-4.1.0
+copying copier.py -> telecopy-4.1.0
+copying core.py -> telecopy-4.1.0
+copying database.py -> telecopy-4.1.0
+copying dedup.py -> telecopy-4.1.0
+copying doctor.py -> telecopy-4.1.0
+copying fasttransfer.py -> telecopy-4.1.0
+copying filters.py -> telecopy-4.1.0
+copying i18n.py -> telecopy-4.1.0
+copying main.py -> telecopy-4.1.0
+copying opcional.py -> telecopy-4.1.0
+copying politica_erros.py -> telecopy-4.1.0
+copying prefs.py -> telecopy-4.1.0
+copying pyproject.toml -> telecopy-4.1.0
+copying relatorio.py -> telecopy-4.1.0
+copying retry_queue.py -> telecopy-4.1.0
+copying security.py -> telecopy-4.1.0
+copying system_analyzer.py -> telecopy-4.1.0
+copying telecopy_cli.py -> telecopy-4.1.0
+copying utils.py -> telecopy-4.1.0
+copying verificacao.py -> telecopy-4.1.0
+copying telecopy.egg-info/PKG-INFO -> telecopy-4.1.0/telecopy.egg-info
+copying telecopy.egg-info/SOURCES.txt -> telecopy-4.1.0/telecopy.egg-info
+copying telecopy.egg-info/dependency_links.txt -> telecopy-4.1.0/telecopy.egg-info
+copying telecopy.egg-info/entry_points.txt -> telecopy-4.1.0/telecopy.egg-info
+copying telecopy.egg-info/requires.txt -> telecopy-4.1.0/telecopy.egg-info
+copying telecopy.egg-info/top_level.txt -> telecopy-4.1.0/telecopy.egg-info
+copying tests/test_app_flow.py -> telecopy-4.1.0/tests
+copying tests/test_auto_clone.py -> telecopy-4.1.0/tests
+copying tests/test_caos_seeded.py -> telecopy-4.1.0/tests
+copying tests/test_cobertura_critica.py -> telecopy-4.1.0/tests
+copying tests/test_cobertura_extra.py -> telecopy-4.1.0/tests
+copying tests/test_cobertura_final.py -> telecopy-4.1.0/tests
+copying tests/test_cobertura_infra.py -> telecopy-4.1.0/tests
+copying tests/test_cobertura_seguranca.py -> telecopy-4.1.0/tests
+copying tests/test_core.py -> telecopy-4.1.0/tests
+copying tests/test_fase4_cli.py -> telecopy-4.1.0/tests
+copying tests/test_fasttransfer.py -> telecopy-4.1.0/tests
+copying tests/test_flood_control.py -> telecopy-4.1.0/tests
+copying tests/test_flood_ui.py -> telecopy-4.1.0/tests
+copying tests/test_forum_copy.py -> telecopy-4.1.0/tests
+copying tests/test_forward_ordem.py -> telecopy-4.1.0/tests
+copying tests/test_intents.py -> telecopy-4.1.0/tests
+copying tests/test_janelas_restantes.py -> telecopy-4.1.0/tests
+copying tests/test_mirror_ordem.py -> telecopy-4.1.0/tests
+copying tests/test_motor_upload.py -> telecopy-4.1.0/tests
+copying tests/test_opcional.py -> telecopy-4.1.0/tests
+copying tests/test_ordem.py -> telecopy-4.1.0/tests
+copying tests/test_ordem_curso.py -> telecopy-4.1.0/tests
+copying tests/test_ordem_preflight.py -> telecopy-4.1.0/tests
+copying tests/test_perfis_conservadores.py -> telecopy-4.1.0/tests
+copying tests/test_persistencia_atomica.py -> telecopy-4.1.0/tests
+copying tests/test_pipeline.py -> telecopy-4.1.0/tests
+copying tests/test_placeholder.py -> telecopy-4.1.0/tests
+copying tests/test_politica_erros.py -> telecopy-4.1.0/tests
+copying tests/test_prefs_migration.py -> telecopy-4.1.0/tests
+copying tests/test_profiles.py -> telecopy-4.1.0/tests
+copying tests/test_progresso_bytes.py -> telecopy-4.1.0/tests
+copying tests/test_retry_parcial.py -> telecopy-4.1.0/tests
+copying tests/test_sinais_cli.py -> telecopy-4.1.0/tests
+copying tests/test_speed.py -> telecopy-4.1.0/tests
+copying tests/test_transfer_config.py -> telecopy-4.1.0/tests
+copying tests/test_ui_order.py -> telecopy-4.1.0/tests
+copying tests/test_verificacao_completa.py -> telecopy-4.1.0/tests
+Writing telecopy-4.1.0/setup.cfg
+Creating tar archive
+removing 'telecopy-4.1.0' (and everything under it)
+* Building wheel from sdist
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=68
+* Getting build dependencies for wheel...
+running egg_info
+writing telecopy.egg-info/PKG-INFO
+writing dependency_links to telecopy.egg-info/dependency_links.txt
+writing entry points to telecopy.egg-info/entry_points.txt
+writing requirements to telecopy.egg-info/requires.txt
+writing top-level names to telecopy.egg-info/top_level.txt
+reading manifest file 'telecopy.egg-info/SOURCES.txt'
+writing manifest file 'telecopy.egg-info/SOURCES.txt'
+* Installed build dependency versions:
+  - setuptools==84.2.1
+* Building wheel...
+running bdist_wheel
+running build
+running build_py
+creating build/lib
+copying config.py -> build/lib
+copying copier.py -> build/lib
+copying core.py -> build/lib
+copying database.py -> build/lib
+copying dedup.py -> build/lib
+copying doctor.py -> build/lib
+copying fasttransfer.py -> build/lib
+copying filters.py -> build/lib
+copying i18n.py -> build/lib
+copying main.py -> build/lib
+copying politica_erros.py -> build/lib
+copying prefs.py -> build/lib
+copying relatorio.py -> build/lib
+copying retry_queue.py -> build/lib
+copying security.py -> build/lib
+copying system_analyzer.py -> build/lib
+copying telecopy_cli.py -> build/lib
+copying utils.py -> build/lib
+copying verificacao.py -> build/lib
+copying channel_clone.py -> build/lib
+copying opcional.py -> build/lib
+running egg_info
+writing telecopy.egg-info/PKG-INFO
+writing dependency_links to telecopy.egg-info/dependency_links.txt
+writing entry points to telecopy.egg-info/entry_points.txt
+writing requirements to telecopy.egg-info/requires.txt
+writing top-level names to telecopy.egg-info/top_level.txt
+reading manifest file 'telecopy.egg-info/SOURCES.txt'
+writing manifest file 'telecopy.egg-info/SOURCES.txt'
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64/wheel
+copying build/lib/config.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/copier.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/core.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/database.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/dedup.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/doctor.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/fasttransfer.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/filters.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/i18n.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/main.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/politica_erros.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/prefs.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/relatorio.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/retry_queue.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/security.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/system_analyzer.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/telecopy_cli.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/utils.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/verificacao.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/channel_clone.py -> build/bdist.linux-x86_64/wheel/.
+copying build/lib/opcional.py -> build/bdist.linux-x86_64/wheel/.
+running install_egg_info
+Copying telecopy.egg-info to build/bdist.linux-x86_64/wheel/./telecopy-4.1.0-py3.11.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/telecopy-4.1.0.dist-info/WHEEL
+creating '/home/user/telecopy/dist/.tmp-q3_e9n3n/telecopy-4.1.0-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'channel_clone.py'
+adding 'config.py'
+adding 'copier.py'
+adding 'core.py'
+adding 'database.py'
+adding 'dedup.py'
+adding 'doctor.py'
+adding 'fasttransfer.py'
+adding 'filters.py'
+adding 'i18n.py'
+adding 'main.py'
+adding 'opcional.py'
+adding 'politica_erros.py'
+adding 'prefs.py'
+adding 'relatorio.py'
+adding 'retry_queue.py'
+adding 'security.py'
+adding 'system_analyzer.py'
+adding 'telecopy_cli.py'
+adding 'utils.py'
+adding 'verificacao.py'
+adding 'telecopy-4.1.0.dist-info/METADATA'
+adding 'telecopy-4.1.0.dist-info/WHEEL'
+adding 'telecopy-4.1.0.dist-info/entry_points.txt'
+adding 'telecopy-4.1.0.dist-info/top_level.txt'
+adding 'telecopy-4.1.0.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
+Successfully built telecopy-4.1.0.tar.gz and telecopy-4.1.0-py3-none-any.whl

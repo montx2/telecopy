@@ -1,0 +1,84 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+__________________ test_forward_crash_nao_duplica_na_retomada __________________
+tests/test_janelas_restantes.py:57: in test_forward_crash_nao_duplica_na_retomada
+    assert len(client.forwarded) == 1
+E   AssertionError: assert 2 == 1
+E    +  where 2 = len([{'dest': -2, 'ids': [1], 'as_album': False, 'kwargs': {}, ...}, {'dest': -2, 'ids': [1], 'as_album': False, 'kwargs': {}, ...}])
+E    +    where [{'dest': -2, 'ids': [1], 'as_album': False, 'kwargs': {}, ...}, {'dest': -2, 'ids': [1], 'as_album': False, 'kwargs': {}, ...}] = <telecopy.tests.test_janelas_restantes.ForwardCrash object at 0x7f0a1626cf50>.forwarded
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Encaminhar (mais rápido, mantém 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  ✗  Primeira falha no envio: queda após forward
+  [█████████████████████████] 100%  1/1  0 enviadas · 1 erros    
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Encaminhar (mais rápido, mantém 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+  [█████████████████████████] 100%  1/1  1 enviadas · 60000/min    
+________________ test_referencia_crash_nao_duplica_na_retomada _________________
+tests/test_janelas_restantes.py:80: in test_referencia_crash_nao_duplica_na_retomada
+    assert len(client.sent) == 1
+E   AssertionError: assert 2 == 1
+E    +  where 2 = len([{'kind': 'file', 'dest': -2, 'path': '/tmp/pytest-of-user/pytest-56/test_referencia_crash_nao_dupl0/tmp/m1_26683_1794.../tmp/pytest-of-user/pytest-56/test_referencia_crash_nao_dupl0/tmp/m1_26683_1794186757605_a.pdf', 'caption': None, ...}])
+E    +    where [{'kind': 'file', 'dest': -2, 'path': '/tmp/pytest-of-user/pytest-56/test_referencia_crash_nao_dupl0/tmp/m1_26683_1794.../tmp/pytest-of-user/pytest-56/test_referencia_crash_nao_dupl0/tmp/m1_26683_1794186757605_a.pdf', 'caption': None, ...}] = <telecopy.tests.test_janelas_restantes.SendFileCrash object at 0x7f0a1626c3d0>.sent
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  ✗  Primeira falha no envio: Ordem bloqueada no tópico 1, msg_id=1: queda após send_file
+  [█████████████████████████] 100%  1/1  0 enviadas · 1 erros    
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+  [█████████████████████████] 100%  1/1  1 enviadas · 47278/min    
+__________________ test_nativo_crash_nao_duplica_na_retomada ___________________
+tests/test_janelas_restantes.py:97: in test_nativo_crash_nao_duplica_na_retomada
+    assert len(client.sent) == 1
+E   AssertionError: assert 2 == 1
+E    +  where 2 = len([{'kind': 'native', 'dest': -2, 'path': None, 'caption': 'contato', ...}, {'kind': 'native', 'dest': -2, 'path': None, 'caption': 'contato', ...}])
+E    +    where [{'kind': 'native', 'dest': -2, 'path': None, 'caption': 'contato', ...}, {'kind': 'native', 'dest': -2, 'path': None, 'caption': 'contato', ...}] = <telecopy.tests.test_janelas_restantes.SendFileCrash object at 0x7f0a16294cd0>.sent
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  ✗  Primeira falha no envio: Ordem bloqueada no tópico 1, msg_id=1: queda após send_file
+  [█████████████████████████] 100%  1/1  0 enviadas · 1 erros    
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+  [█████████████████████████] 100%  1/1  1 enviadas · 60000/min    
+___________________ test_reserva_crash_nao_duplica_marcador ____________________
+tests/test_janelas_restantes.py:115: in test_reserva_crash_nao_duplica_marcador
+    assert result["errors"] >= 1 and len(client.sent) == 1
+E   AssertionError: assert (1 >= 1 and 2 == 1)
+E    +  where 2 = len([{'kind': 'text', 'dest': -2, 'path': None, 'caption': None, ...}, {'kind': 'text', 'dest': -2, 'path': None, 'caption': None, ...}])
+E    +    where [{'kind': 'text', 'dest': -2, 'path': None, 'caption': None, ...}, {'kind': 'text', 'dest': -2, 'path': None, 'caption': None, ...}] = <telecopy.tests.test_janelas_restantes.PlaceholderCrash object at 0x7f0a16232f50>.sent
+----------------------------- Captured stdout call -----------------------------
+
+  ·  Lendo mensagens da origem…  ✓  1 mensagens encontradas            
+  ·  Modo de envio: Reenviar (cópia limpa, sem 'encaminhado de')
+  ·  1 msgs · 1 workers · 0.0s
+
+
+  ✗  Primeira falha no envio: Não foi possível reservar a posição; a cópia foi interrompida sem avançar.
+  !  Cópia interrompida: essa falha bloqueia o envio. Confira a origem, o destino e suas permissões antes de tentar novamente.
+  [█████████████████████████] 100%  1/1  0 enviadas · 1 erros    
+=========================== short test summary info ============================
+FAILED tests/test_janelas_restantes.py::test_forward_crash_nao_duplica_na_retomada
+FAILED tests/test_janelas_restantes.py::test_referencia_crash_nao_duplica_na_retomada
+FAILED tests/test_janelas_restantes.py::test_nativo_crash_nao_duplica_na_retomada
+FAILED tests/test_janelas_restantes.py::test_reserva_crash_nao_duplica_marcador
+4 failed in 1.94s

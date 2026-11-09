@@ -1,0 +1,40 @@
+FFFFF..FFF                                                               [100%]
+=================================== FAILURES ===================================
+E   TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'rng'
+/home/user/telecopy/tests/test_flood_control.py:43: TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'rng'
+E   TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'controller_path'
+/home/user/telecopy/tests/test_flood_control.py:76: TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'controller_path'
+E   TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'controller_path'
+/home/user/telecopy/tests/test_flood_control.py:89: TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'controller_path'
+E   TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'block_wait_budget'
+/home/user/telecopy/tests/test_flood_control.py:109: TypeError: FastTransferPool.__init__() got an unexpected keyword argument 'block_wait_budget'
+E   assert (1000.0 - 1000.0) >= 7
+     +  where 1000.0 = time()
+     +    where time = <EventLoopSimulado running=False closed=False debug=False>.time
+/home/user/telecopy/tests/test_flood_control.py:149: assert (1000.0 - 1000.0) >= 7
+E   AttributeError: 'ProgressDisplay' object has no attribute 'set_wait_state'
+/home/user/telecopy/tests/test_flood_ui.py:21: AttributeError: 'ProgressDisplay' object has no attribute 'set_wait_state'
+E   AttributeError: 'Copier' object has no attribute '_show_flood'
+/home/user/telecopy/tests/test_flood_ui.py:47: AttributeError: 'Copier' object has no attribute '_show_flood'
+E   AttributeError: 'ProgressDisplay' object has no attribute 'set_wait_state'
+/home/user/telecopy/tests/test_flood_ui.py:68: AttributeError: 'ProgressDisplay' object has no attribute 'set_wait_state'
+=========================== short test summary info ============================
+FAILED tests/test_flood_control.py::test_32_partes_premium_compartilham_uma_espera_e_recuperam
+FAILED tests/test_flood_control.py::test_um_episodio_nao_penaliza_duas_vezes
+FAILED tests/test_flood_control.py::test_persistencia_por_conta_dc_nao_expoe_identificador
+FAILED tests/test_flood_control.py::test_orcamento_esgotado_cai_para_padroes_sem_burlar_cooldown
+FAILED tests/test_flood_control.py::test_flood_na_exportacao_de_autorizacao_nao_vira_referencia_expirada
+FAILED tests/test_flood_ui.py::test_estado_de_espera_e_agregado_sao_traduzidos
+FAILED tests/test_flood_ui.py::test_32_erros_produzem_um_aviso_e_contador_agregado
+FAILED tests/test_flood_ui.py::test_countdown_nao_fica_congelado_no_valor_inicial
+8 failed, 2 passed in 0.50s
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_premium_reduz_capacidade_e_nao_repete_callback_por_parte _________
+tests/test_flood_control.py:94: in test_premium_reduz_capacidade_e_nao_repete_callback_por_parte
+    assert len(avisos) == 1
+E   AssertionError: assert 4 == 1
+E    +  where 4 = len([FloodPremiumWaitError('A wait of 10 seconds is required in non-premium accounts (caused by NoneType)'), FloodPremiumW...by NoneType)'), FloodPremiumWaitError('A wait of 10 seconds is required in non-premium accounts (caused by NoneType)')])
+=========================== short test summary info ============================
+FAILED tests/test_flood_control.py::test_premium_reduz_capacidade_e_nao_repete_callback_por_parte
+1 failed in 0.43s

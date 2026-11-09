@@ -1,0 +1,20 @@
+FFF.                                                                     [100%]
+=================================== FAILURES ===================================
+______________ test_padrao_do_motor_nao_abre_dezenas_de_conexoes _______________
+tests/test_perfis_conservadores.py:9: in test_padrao_do_motor_nao_abre_dezenas_de_conexoes
+    assert cfg.delay >= 1.0
+E   assert 0.35 >= 1.0
+E    +  where 0.35 = RunConfig(delay=0.35, workers=2, memory_profile=0.6, resume=True, use_dedup=True, forward_mode=False, skip_text=False,..., fast_transfer=True, connections_per_file=8, lookahead=0, max_tmp_gb=16.0, max_total_connections=32, daily_limit=1000).delay
+_______________ test_recomendado_e_conservador_mesmo_em_pc_forte _______________
+tests/test_perfis_conservadores.py:19: in test_recomendado_e_conservador_mesmo_em_pc_forte
+    assert rec["delay"] >= 1.0
+E   assert 0.35 >= 1.0
+______ test_maximo_explicito_ainda_tem_piso_de_intervalo_e_teto_de_partes ______
+tests/test_perfis_conservadores.py:28: in test_maximo_explicito_ainda_tem_piso_de_intervalo_e_teto_de_partes
+    assert turbo["delay"] >= 0.5
+E   assert 0.2 >= 0.5
+=========================== short test summary info ============================
+FAILED tests/test_perfis_conservadores.py::test_padrao_do_motor_nao_abre_dezenas_de_conexoes
+FAILED tests/test_perfis_conservadores.py::test_recomendado_e_conservador_mesmo_em_pc_forte
+FAILED tests/test_perfis_conservadores.py::test_maximo_explicito_ainda_tem_piso_de_intervalo_e_teto_de_partes
+3 failed, 1 passed in 0.32s

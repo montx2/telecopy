@@ -628,7 +628,10 @@ def test_floodwait_na_edicao_mantem_reserva_aberta(env) -> None:
         result = asyncio.run(setup.copier.recover_placeholders(setup.source, setup.dest))
     assert result["failed"] == 1
     assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "open"
-    assert 4 in delays
+    # O prazo vem do FloodController: exatamente o solicitado, sem +3s por
+    # camada. A reserva continua aberta e não há um segundo marcador.
+    assert delays == [setup.copier.cfg.delay]  # só o intervalo normal; flood espera no portão
+    assert sum(1 for sent in setup.client.sent if sent["msg_id"] == marker) == 1
 
 
 def test_retry_repetido_apos_recuperacao_nao_duplica(env) -> None:
@@ -754,3 +757,22 @@ def test_cli_flags_e_instancia_unica_isolados(env) -> None:
         proc = subprocess.run([sys.executable, "main.py"], cwd=app_dir,
                               env=env_vars, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 2
+
+
+def test_flood_na_edicao_espera_no_relogio_real_do_loop_sem_duplicar_reserva(env) -> None:
+    """A espera deixou de aparecer em asyncio.sleep; precisa existir no loop."""
+    from telethon.errors import FloodWaitError
+    from tests.relogio_simulado import relogio_simulado
+
+    setup = _create_marker(env)
+    marker = setup.client.sent[0]["msg_id"]
+    setup.client.fail_ids.clear()
+    setup.client.edit_failures[marker] = FloodWaitError(request=None, capture=1)
+    with fast_sleep():
+        with relogio_simulado() as loop:
+            result = loop.run_until_complete(
+                setup.copier.recover_placeholders(setup.source, setup.dest))
+            assert loop.time() >= 1
+    assert result["failed"] == 1
+    assert env.repo.get_placeholder(setup.source.id, setup.dest.id, 2)["state"] == "open"
+    assert sum(1 for sent in setup.client.sent if sent["msg_id"] == marker) == 1

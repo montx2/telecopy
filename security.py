@@ -50,25 +50,39 @@ def _local_key_path(vault_dir: Path) -> Path:
 
 
 def _load_or_create_local_key(vault_dir: Path) -> bytes:
-    """Chave aleatória guardada no disco, criada na primeira execução."""
+    """Chave aleatória de 32 bytes; falha de disco é erro, nunca chave previsível."""
     path = _local_key_path(vault_dir)
     try:
         if path.exists():
             data = path.read_bytes()
             if len(data) >= 32:
-                return data
+                return data[:32]
         vault_dir.mkdir(parents=True, exist_ok=True)
         key = secrets.token_bytes(32)
-        path.write_bytes(key)
+        # Criação exclusiva evita corrida entre processos na primeira execução.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(key)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except BaseException:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return key
+    except FileExistsError:
+        data = path.read_bytes()
+        if len(data) >= 32:
+            return data[:32]
+        raise VaultError("Chave local inválida; restaure o arquivo ou use TELECOPY_VAULT_KEY")
     except OSError as exc:
-        # último recurso: segredo derivado do usuário + máquina
-        anchor = f"{os.environ.get('USERNAME') or os.environ.get('USER') or 'user'}"
-        return hashlib.sha256(anchor.encode() + sys.platform.encode()).digest()
+        raise VaultError(
+            "Não foi possível criar/ler a chave local do cofre. "
+            "Defina TELECOPY_VAULT_KEY ou corrija as permissões do diretório."
+        ) from exc
 
 
 def _legacy_hardware_secret() -> bytes:

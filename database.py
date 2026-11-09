@@ -170,6 +170,26 @@ CREATE TABLE IF NOT EXISTS placeholder_parts (
 CREATE INDEX IF NOT EXISTS idx_ph_parts_msg ON placeholder_parts (source_id, dest_id, msg_id);
 """
 
+_SCHEMA_V1 = """
+CREATE TABLE IF NOT EXISTS send_intents (
+    source_id   INTEGER NOT NULL,
+    dest_id     INTEGER NOT NULL,
+    msg_id      INTEGER NOT NULL,
+    part_index  INTEGER NOT NULL DEFAULT 0,
+    state       TEXT NOT NULL DEFAULT 'sending',
+    random_id   INTEGER,
+    fingerprint TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'content',
+    dest_msg_id INTEGER,
+    dest_topic  INTEGER,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (source_id, dest_id, msg_id, part_index)
+);
+CREATE INDEX IF NOT EXISTS idx_intents_pending ON send_intents (source_id, dest_id, state);
+"""
+SCHEMA_VERSION = 1
+
 
 class Repository:
     """
@@ -182,13 +202,15 @@ class Repository:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._lock = threading.RLock()
+        self._connections: List[sqlite3.Connection] = []
+        self._generation = 0
         self._init_schema()
 
     # ── conexão ───────────────────────────────────────────────────────────────
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
-        if conn is not None:
+        if conn is not None and getattr(self._local, "generation", None) == self._generation:
             return conn
         conn = sqlite3.connect(
             str(self.path),
@@ -211,6 +233,8 @@ class Repository:
             except sqlite3.Error:
                 pass
         self._local.conn = conn
+        self._local.generation = self._generation
+        self._connections.append(conn)
         return conn
 
     @contextmanager
@@ -222,8 +246,24 @@ class Repository:
             except sqlite3.Error:
                 raise
 
+    @contextmanager
+    def _transaction(self):
+        """Transação explícita: ou todas as writes persistem, ou nenhuma."""
+        with self._db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+
     def _init_schema(self) -> None:
         with self._db() as conn:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < SCHEMA_VERSION:
+                self._backup_before_migration(conn, version)
             conn.executescript(_SCHEMA)
             # Bancos da v4.0 não tinham o vínculo origem→destino necessário
             # para reconstruir respostas e retomar retries no tópico certo.
@@ -231,10 +271,53 @@ class Repository:
             for column in ("dest_msg_id", "dest_topic", "continuation_parts_sent"):
                 if column not in columns:
                     conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {column} INTEGER")
+            if version < 1:
+                conn.executescript(_SCHEMA_V1)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _backup_before_migration(self, conn: sqlite3.Connection, version: int) -> None:
+        """Cópia consistente antes de migrar; falha de backup impede a migração."""
+        tables = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+        if not tables:
+            return
+        backup = self.path.with_name(self.path.name + f".bak-v{version}")
+        if backup.exists():
+            return
+        target = sqlite3.connect(str(backup))
+        try:
+            conn.backup(target)
+        finally:
+            target.close()
+
+    def schema_version(self) -> int:
+        with self._db() as conn:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+    def rollback_schema(self, target_version: int) -> None:
+        """Rollback explícito e testado; preserva dados das tabelas comuns."""
+        if target_version < 0 or target_version > SCHEMA_VERSION:
+            raise ValueError("versão de schema inválida")
+        with self._db() as conn:
+            current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if target_version == current:
+                return
+            backup = self.path.with_name(self.path.name + f".bak-v{current}-rollback")
+            dest = sqlite3.connect(str(backup))
+            try:
+                conn.backup(dest)
+            finally:
+                dest.close()
+            if target_version < 1:
+                conn.execute("DROP TABLE IF EXISTS send_intents")
+            conn.execute(f"PRAGMA user_version = {int(target_version)}")
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
+        with self._lock:
+            connections = list(self._connections)
+            self._connections.clear()
+            self._generation += 1
+            self._local.conn = None
+        for conn in connections:
             try:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except sqlite3.Error:
@@ -243,7 +326,6 @@ class Repository:
                 conn.close()
             except sqlite3.Error:
                 pass
-            self._local.conn = None
 
     def size_bytes(self) -> int:
         total = 0
@@ -274,6 +356,47 @@ class Repository:
 
     # ── checkpoints ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _write_checkpoint(
+        conn: sqlite3.Connection,
+        source_id: int,
+        dest_id: int,
+        msg_id: int,
+        status: Status | str = Status.PENDING,
+        content_hash: Optional[str] = None,
+        bytes_done: int = 0,
+        media_type: str = "",
+        dest_msg_id: Optional[int] = None,
+        dest_topic: Optional[int] = None,
+        continuation_parts_sent: Optional[int] = None,
+        increment_attempts: bool = False,
+    ) -> None:
+        status_value = status.value if isinstance(status, Status) else str(status)
+        now = time.time()
+        conn.execute(
+            """
+            INSERT INTO checkpoints
+                (source_id, dest_id, msg_id, status, content_hash,
+                 bytes_done, media_type, timestamp, dest_msg_id, dest_topic,
+                 continuation_parts_sent, attempts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source_id, dest_id, msg_id) DO UPDATE SET
+                status       = excluded.status,
+                content_hash = COALESCE(excluded.content_hash, checkpoints.content_hash),
+                bytes_done   = excluded.bytes_done,
+                media_type   = excluded.media_type,
+                timestamp    = excluded.timestamp,
+                dest_msg_id  = COALESCE(excluded.dest_msg_id, checkpoints.dest_msg_id),
+                dest_topic   = COALESCE(excluded.dest_topic, checkpoints.dest_topic),
+                continuation_parts_sent = COALESCE(
+                    excluded.continuation_parts_sent, checkpoints.continuation_parts_sent),
+                attempts = checkpoints.attempts + excluded.attempts
+            """,
+            (source_id, dest_id, msg_id, status_value, content_hash,
+             bytes_done, media_type, now, dest_msg_id, dest_topic,
+             continuation_parts_sent, 1 if increment_attempts else 0),
+        )
+
     def upsert_checkpoint(
         self,
         source_id: int,
@@ -287,30 +410,10 @@ class Repository:
         dest_topic: Optional[int] = None,
         continuation_parts_sent: Optional[int] = None,
     ) -> None:
-        status_value = status.value if isinstance(status, Status) else str(status)
-        now = time.time()
         with self._db() as conn:
-            conn.execute(
-                """
-                INSERT INTO checkpoints
-                    (source_id, dest_id, msg_id, status, content_hash,
-                     bytes_done, media_type, timestamp, dest_msg_id, dest_topic,
-                     continuation_parts_sent)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (source_id, dest_id, msg_id) DO UPDATE SET
-                    status       = excluded.status,
-                    content_hash = COALESCE(excluded.content_hash, checkpoints.content_hash),
-                    bytes_done   = excluded.bytes_done,
-                    media_type   = excluded.media_type,
-                    timestamp    = excluded.timestamp,
-                    dest_msg_id  = COALESCE(excluded.dest_msg_id, checkpoints.dest_msg_id),
-                    dest_topic   = COALESCE(excluded.dest_topic, checkpoints.dest_topic),
-                    continuation_parts_sent = COALESCE(
-                        excluded.continuation_parts_sent, checkpoints.continuation_parts_sent)
-                """,
-                (source_id, dest_id, msg_id, status_value, content_hash,
-                 bytes_done, media_type, now, dest_msg_id, dest_topic,
-                 continuation_parts_sent),
+            self._write_checkpoint(
+                conn, source_id, dest_id, msg_id, status, content_hash, bytes_done,
+                media_type, dest_msg_id, dest_topic, continuation_parts_sent,
             )
 
     def update_status(
@@ -346,14 +449,59 @@ class Repository:
         dest_msg_id: Optional[int] = None,
         dest_topic: Optional[int] = None,
     ) -> None:
-        self.upsert_checkpoint(
-            source_id, dest_id, msg_id, Status.DONE, content_hash, bytes_done, media_type,
-            dest_msg_id=dest_msg_id, dest_topic=dest_topic,
-        )
-        with self._db() as conn:
+        with self._transaction() as conn:
+            self._write_checkpoint(
+                conn, source_id, dest_id, msg_id, Status.DONE, content_hash, bytes_done,
+                media_type, dest_msg_id, dest_topic, increment_attempts=True,
+            )
+
+    def record_delivery(
+        self,
+        source_id: int,
+        dest_id: int,
+        msg_id: int,
+        dest_msg_id: int,
+        *,
+        content_hash: Optional[str] = None,
+        bytes_done: int = 0,
+        media_type: str = "",
+        dest_topic: Optional[int] = None,
+        dedup_enabled: bool = True,
+        continuation_parts_sent: Optional[int] = None,
+    ) -> None:
+        """Checkpoint + processed + dedup + limpeza de falha + intenção num COMMIT."""
+        now = time.time()
+        with self._transaction() as conn:
+            self._write_checkpoint(
+                conn, source_id, dest_id, msg_id, Status.DONE, content_hash, bytes_done,
+                media_type, dest_msg_id, dest_topic, continuation_parts_sent,
+                increment_attempts=True,
+            )
             conn.execute(
-                "UPDATE checkpoints SET attempts = attempts + 1 WHERE source_id=? AND dest_id=? AND msg_id=?",
+                "INSERT OR IGNORE INTO processed (source_id, dest_id, msg_id, content_hash, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (source_id, dest_id, msg_id, content_hash, now),
+            )
+            conn.execute(
+                "DELETE FROM failures WHERE source_id=? AND dest_id=? AND msg_id=?",
                 (source_id, dest_id, msg_id),
+            )
+            if dedup_enabled and content_hash:
+                conn.execute(
+                    """
+                    INSERT INTO dedup
+                        (content_hash, dest_id, sent_msg_id, file_size, source_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (content_hash, dest_id) DO UPDATE SET
+                        sent_msg_id = excluded.sent_msg_id,
+                        file_size   = excluded.file_size
+                    """,
+                    (content_hash, dest_id, int(dest_msg_id), bytes_done, source_id, now),
+                )
+            conn.execute(
+                "UPDATE send_intents SET state='confirmed', dest_msg_id=?, updated_at=? "
+                "WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=0",
+                (int(dest_msg_id), now, source_id, dest_id, msg_id),
             )
 
     def is_done(self, source_id: int, dest_id: int, msg_id: int) -> bool:
@@ -384,6 +532,15 @@ class Repository:
                     (source_id, dest_id),
                 )
             }
+
+    def checkpoint_rows(self, source_id: int, dest_id: int) -> List[Dict[str, Any]]:
+        """Todos os checkpoints do par, para verificação origem→destino."""
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM checkpoints WHERE source_id=? AND dest_id=? ORDER BY msg_id",
+                (source_id, dest_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def checkpoint_route(self, source_id: int, dest_id: int, msg_id: int) -> Dict[str, Any]:
         """Vínculo persistido para replies/retries; vazio em bancos antigos."""
@@ -418,8 +575,9 @@ class Repository:
     def reset_pair(self, source_id: int, dest_id: int) -> int:
         """Zera checkpoints/falhas/marcas apenas deste par origem→destino."""
         removed = 0
-        with self._db() as conn:
-            for table in ("checkpoints", "failures", "processed", "placeholders"):
+        with self._transaction() as conn:
+            for table in ("checkpoints", "failures", "processed", "placeholders",
+                          "placeholder_parts", "send_intents"):
                 cur = conn.execute(
                     f"DELETE FROM {table} WHERE source_id=? AND dest_id=?",
                     (source_id, dest_id),
@@ -902,6 +1060,67 @@ class Repository:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── intenções de envio (janela efeito remoto → checkpoint) ────────────────
+
+    def begin_intent(self, source_id: int, dest_id: int, msg_id: int, part_index: int,
+                     *, fingerprint: str, random_id: Optional[int] = None,
+                     dest_topic: Optional[int] = None, kind: str = "content") -> None:
+        now = time.time()
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO send_intents
+                    (source_id, dest_id, msg_id, part_index, state, random_id,
+                     fingerprint, kind, dest_topic, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'sending', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, dest_id, msg_id, part_index) DO UPDATE SET
+                    state='sending', random_id=excluded.random_id,
+                    fingerprint=excluded.fingerprint, kind=excluded.kind,
+                    dest_topic=excluded.dest_topic,
+                    dest_msg_id=NULL, updated_at=excluded.updated_at
+                """,
+                (source_id, dest_id, msg_id, part_index, random_id,
+                 fingerprint, kind, dest_topic, now, now),
+            )
+
+    def confirm_intent(self, source_id: int, dest_id: int, msg_id: int, part_index: int,
+                       dest_msg_id: int) -> None:
+        with self._db() as conn:
+            conn.execute(
+                """
+                UPDATE send_intents SET state='confirmed', dest_msg_id=?, updated_at=?
+                 WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=?
+                """,
+                (int(dest_msg_id), time.time(), source_id, dest_id, msg_id, part_index),
+            )
+
+    def block_intent(self, source_id: int, dest_id: int, msg_id: int, part_index: int,
+                     reason: str) -> None:
+        with self._db() as conn:
+            conn.execute(
+                "UPDATE send_intents SET state='blocked', updated_at=? "
+                "WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=?",
+                (time.time(), source_id, dest_id, msg_id, part_index),
+            )
+
+    def intent_for(self, source_id: int, dest_id: int, msg_id: int,
+                   part_index: int = 0) -> Dict[str, Any]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM send_intents WHERE source_id=? AND dest_id=? AND msg_id=? AND part_index=?",
+                (source_id, dest_id, msg_id, part_index),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def pending_intents(self, source_id: int, dest_id: int) -> List[Dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM send_intents WHERE source_id=? AND dest_id=? "
+                "AND state IN ('sending','blocked') ORDER BY msg_id, part_index",
+                (source_id, dest_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # ── chave/valor ───────────────────────────────────────────────────────────
 
     def set_kv(self, key: str, value: str) -> None:
@@ -925,22 +1144,26 @@ class Repository:
     # ── manutenção ────────────────────────────────────────────────────────────
 
     def prune(self, days: int = 30) -> Dict[str, int]:
-        """Remove registros concluídos mais antigos que `days` dias."""
+        """Remove apenas estatísticas/sessões antigas; preserva retomada e dedup.
+
+        Apagar checkpoints/hashes antigos faria uma próxima execução reenviar
+        conteúdo já entregue. Manutenção não é autorização para perder essa
+        evidência; use reset_pair/reset_all explicitamente para recomeçar.
+        """
+        days = max(0, int(days))
+        removed = {"sessions": 0, "stats": 0}
+        if days == 0:
+            return removed
         cutoff = time.time() - days * 86400
-        removed = {"checkpoints": 0, "dedup": 0, "processed": 0, "failures": 0}
-        with self._db() as conn:
-            for table in removed:
-                column = "created_at" if table in ("dedup", "processed", "failures") else "timestamp"
-                extra = " AND status='done'" if table == "checkpoints" else ""
-                cur = conn.execute(
-                    f"DELETE FROM {table} WHERE {column} < ?{extra}",  # noqa: S608
-                    (cutoff,),
-                )
-                removed[table] = cur.rowcount or 0
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except sqlite3.Error:
-                pass
+        with self._transaction() as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE started_at < ? AND state != 'active'", (cutoff,)
+            )
+            removed["sessions"] = cur.rowcount or 0
+            cur = conn.execute(
+                "DELETE FROM stats WHERE COALESCE(ended_at, started_at, 0) < ?", (cutoff,)
+            )
+            removed["stats"] = cur.rowcount or 0
         return removed
 
     def vacuum(self) -> None:
@@ -956,13 +1179,14 @@ class Repository:
 
     def reset_all(self) -> None:
         """Apaga o histórico de cópias (mantém apenas as preferências)."""
-        with self._db() as conn:
+        with self._transaction() as conn:
             for table in ("checkpoints", "dedup", "processed", "failures", "placeholders",
-                          "placeholder_parts"):
+                          "placeholder_parts", "send_intents"):
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608
             # Mapas de tópicos são estado de cópia; sem isso, "recomeçar do
             # zero" ainda reutilizaria associações antigas.
             conn.execute("DELETE FROM kv WHERE key LIKE 'forum_topic_map:%'")
+        with self._db() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 

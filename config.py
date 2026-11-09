@@ -16,6 +16,7 @@ import textwrap
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 # ── Caminhos do programa e dos dados ─────────────────────────────────────────
 
@@ -134,6 +135,7 @@ LOCK_FILE = DATA_DIR / "telecopy.lock"
 SESSION_FILE = DATA_DIR / "session"
 DB_FILE = DATA_DIR / "telecopy.db"
 STATS_FILE = DATA_DIR / "stats.json"
+TRANSFER_LIMITS_FILE = DATA_DIR / "transfer_limits.json"
 DAILY_FILE = DATA_DIR / "daily.json"
 QUEUE_FILE = DATA_DIR / "queue.json"
 VAULT_FILE = VAULT_DIR / "credentials.enc"
@@ -255,31 +257,62 @@ def recommended_workers(ram_available_gb: float | None = None,
 
 
 def turbo_settings() -> dict:
-    """Perfil de velocidade máxima dentro do que o hardware aguenta.
+    """Perfil máximo explícito, ainda conservador para a API.
 
-    Não mexe em ordem, checkpoint, dedup nem na política de flood: só abre o
-    paralelismo que o PC comporta. O orçamento de partes continua limitado por
-    RAM (BUFFER_RAM_MAX) e o disco continua protegido por temp_budget_bytes.
+    Não mexe em ordem, checkpoint, dedup nem na política de flood. O hardware
+    só reduz o teto; não há promessa de vazão nem de ausência de FloodWait.
     """
-    p = SYSTEM
-    workers = max(2, min(
-        WORKERS_HARD_CAP,
-        int(p.ram_available_gb / 0.35),
-        p.cpu_logical * 3,
-        max(2, int(p.disk_free_gb / 2.0)),
+    p = detect_system()  # medição atual (a RAM livre muda entre execuções)
+    # Teto explícito de parts em voo, não "máximo que o PC aguenta".
+    # Hardware só pode reduzir este teto; nunca autoriza mais carga na API.
+    workers = max(1, min(
+        4,
+        int(p.ram_available_gb / 0.5),
+        p.cpu_logical,
+        max(1, int(p.disk_free_gb / 2.0)),
     ))
-    per_file = max(4, min(16, workers * 2))
+    per_file = max(1, min(4, workers))
     return {
         "fast_transfer": True,
         "workers": workers,
         "connections_per_file": per_file,
-        "max_total_connections": max(16, min(128, workers * per_file)),
+        "max_total_connections": max(1, min(16, workers * per_file)),
         "lookahead": 0,                       # auto = 2 x workers
         "max_tmp_gb": max(8.0, min(64.0, round(p.disk_free_gb * 0.5, 1))),
-        "delay": 0.2,
+        "delay": 0.5,
         "memory_profile": 0.75,
         "daily_limit": 0,                     # sem parede local no meio do canal
     }
+
+
+def recommended_settings() -> dict:
+    """Perfil RECOMENDADO: ponto de partida conservador, não medido na conta.
+
+    RAM/CPU/disco só reduzem o teto. A conta/DC ainda pode exigir menos via
+    FloodController; o histórico persistente limita a próxima execução.
+    """
+    p = detect_system()
+    ceiling = turbo_settings()["workers"]
+    workers = recommended_workers(p.ram_available_gb, 0.6)
+    workers = min(workers, max(1, int(p.disk_free_gb / 2.0)), ceiling, 2)
+    workers = max(1, workers)
+    per_file = min(2, workers)
+    return {
+        "fast_transfer": True,
+        "workers": workers,
+        "connections_per_file": per_file,
+        "max_total_connections": max(1, min(4, workers * per_file)),
+        "lookahead": 0,  # auto = 2 x workers
+        "max_tmp_gb": max(2.0, min(16.0, round(p.disk_free_gb * 0.3, 1))),
+        "delay": 1.0,
+        "memory_profile": 0.60,
+        "daily_limit": DAILY_LIMIT,
+    }
+
+
+def hardware_profiles() -> dict:
+    """Os dois perfis calculados para este computador: recomendado e máximo."""
+    return {"recommended": recommended_settings(), "max": turbo_settings()}
 
 
 # ── Diretórios ────────────────────────────────────────────────────────────────
@@ -739,8 +772,8 @@ ui = UI()
 class RunConfig:
     """Parâmetros que controlam o motor de cópia."""
 
-    delay: float = 0.35
-    workers: int = field(default_factory=lambda: recommended_workers())
+    delay: float = 1.0
+    workers: int = field(default_factory=lambda: min(2, recommended_workers()))
     memory_profile: float = 0.60
     resume: bool = True
     use_dedup: bool = True
@@ -756,11 +789,17 @@ class RunConfig:
     strict_order: bool = True
     max_retries: int = MAX_RETRIES
     fast_transfer: bool = True
-    connections_per_file: int = 8
+    connections_per_file: int = 2
     lookahead: int = 0          # 0 = auto (2 x workers)
     max_tmp_gb: float = 16.0
-    max_total_connections: int = 32
+    max_total_connections: int = 4
     daily_limit: int = DAILY_LIMIT   # guard local; 0 = sem teto local
+    interactive: bool = True         # CLI não interativa nunca abre prompt de falha
+    bandwidth_limit_bps: int = 0     # 0 = sem limitador local
+    schedule_start: Optional[str] = None
+    schedule_end: Optional[str] = None
+    rewrite_from: str = ""
+    rewrite_to: str = ""
 
     def __post_init__(self) -> None:
         self.delay = max(0.0, float(self.delay))
@@ -777,6 +816,13 @@ class RunConfig:
         if self.on_failure not in {"placeholder", "abort"}:
             self.on_failure = "abort"
         self.placeholder = bool(self.placeholder)
+        self.interactive = bool(self.interactive)
+        try:
+            self.bandwidth_limit_bps = max(0, int(self.bandwidth_limit_bps))
+        except (TypeError, ValueError):
+            self.bandwidth_limit_bps = 0
+        self.rewrite_from = str(self.rewrite_from or "")
+        self.rewrite_to = str(self.rewrite_to or "")
         self.server_copy = bool(self.server_copy)
         # Ordem estrita é um invariante, não uma opção que possa abrir lacunas.
         self.strict_order = True
@@ -786,7 +832,7 @@ class RunConfig:
             self.connections_per_file = max(
                 1, min(int(self.connections_per_file), MAX_CONNECTIONS_PER_FILE))
         except (TypeError, ValueError):
-            self.connections_per_file = 8
+            self.connections_per_file = 2
         try:
             self.lookahead = max(0, min(int(self.lookahead), 1000))
         except (TypeError, ValueError):
@@ -800,7 +846,7 @@ class RunConfig:
             self.max_total_connections = max(
                 1, min(int(self.max_total_connections), MAX_TOTAL_CONNECTIONS_CAP))
         except (TypeError, ValueError):
-            self.max_total_connections = 32
+            self.max_total_connections = 4
         try:
             self.daily_limit = max(0, min(int(self.daily_limit), 1_000_000))
         except (TypeError, ValueError):
@@ -829,6 +875,12 @@ class RunConfig:
             "max_tmp_gb": self.max_tmp_gb,
             "max_total_connections": self.max_total_connections,
             "daily_limit": self.daily_limit,
+            "interactive": self.interactive,
+            "bandwidth_limit_bps": self.bandwidth_limit_bps,
+            "schedule_start": self.schedule_start,
+            "schedule_end": self.schedule_end,
+            "rewrite_from": self.rewrite_from,
+            "rewrite_to": self.rewrite_to,
         }
 
     @classmethod

@@ -1,4 +1,12 @@
 # Ferramentas de desenvolvimento e testes
 -r requirements.txt
-pytest>=8.0.0
+pytest>=8.0.0,<10
 icmplib>=3.0.4
+# Somente desenvolvimento/CI; nenhum destes módulos é importado em execução.
+hypothesis>=6.100,<7       # propriedades de UTF-16 e ordem sob scheduling variável
+pytest-cov>=5,<8          # relatório de linhas não exercitadas
+pytest-timeout>=2.3,<3    # detectar deadlock sem esperar indefinidamente
+ruff>=0.11,<1             # imports mortiços e erros estáticos
+mypy>=1.15,<2             # contratos dos módulos críticos
+pip-audit>=2.7,<3         # advisories das dependências fixadas
+mutmut>=2.4,<3            # testes de mutação precisam realmente matar mutantes

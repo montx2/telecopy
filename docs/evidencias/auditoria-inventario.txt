@@ -1,0 +1,46 @@
+__init__.py            linhas=    9 classes=  0 funcs=   0 async=  0
+bench_transfer.py      linhas=  209 classes=  0 funcs=   8 async=  3
+channel_clone.py       linhas=  679 classes=  4 funcs=  30 async= 16
+config.py              linhas=  876 classes=  4 funcs=  50 async=  0
+copier.py              linhas= 3582 classes=  5 funcs= 134 async= 54
+core.py                linhas= 2969 classes=  4 funcs=  99 async= 43
+database.py            linhas= 1094 classes=  3 funcs=  63 async=  0
+dedup.py               linhas=  304 classes=  3 funcs=  26 async=  0
+demo.py                linhas=  106 classes=  0 funcs=   2 async=  1
+doctor.py              linhas=  169 classes=  0 funcs=   4 async=  0
+fasttransfer.py        linhas=  776 classes=  6 funcs=  49 async= 20
+filters.py             linhas=  171 classes=  0 funcs=  20 async=  0
+i18n.py                linhas=  807 classes=  0 funcs=   7 async=  0
+main.py                linhas=  251 classes=  0 funcs=   5 async=  0
+politica_erros.py      linhas=   69 classes=  1 funcs=   2 async=  0
+prefs.py               linhas=  151 classes=  1 funcs=  13 async=  0
+retry_queue.py         linhas=  119 classes=  2 funcs=  14 async=  0
+security.py            linhas=  236 classes=  2 funcs=  16 async=  0
+system_analyzer.py     linhas=   97 classes=  2 funcs=   8 async=  0
+utils.py               linhas=  378 classes=  5 funcs=  40 async=  0
+--- testes ---
+test_app_flow.py                 testes= 17
+test_auto_clone.py               testes= 29
+test_core.py                     testes= 49
+test_fasttransfer.py             testes=  9
+test_flood_control.py            testes= 10
+test_flood_ui.py                 testes=  4
+test_forum_copy.py               testes= 11
+test_forward_ordem.py            testes=  7
+test_intents.py                  testes=  5
+test_mirror_ordem.py             testes=  6
+test_motor_upload.py             testes=  4
+test_ordem.py                    testes= 20
+test_ordem_curso.py              testes=  5
+test_ordem_preflight.py          testes=  6
+test_perfis_conservadores.py     testes=  4
+test_pipeline.py                 testes=  9
+test_placeholder.py              testes= 34
+test_politica_erros.py           testes=  5
+test_prefs_migration.py          testes=  4
+test_profiles.py                 testes=  6
+test_progresso_bytes.py          testes=  5
+test_retry_parcial.py            testes=  6
+test_speed.py                    testes= 12
+test_transfer_config.py          testes=  6
+test_ui_order.py                 testes=  4
