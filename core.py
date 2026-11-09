@@ -93,6 +93,13 @@ class _ForumSetup:
             return None
         return {1: "General", **{topic.id: topic.title for topic in self.plan.topics}}
 
+    def order(self) -> Optional[List[int]]:
+        if self.plan is None or not getattr(self.plan, "topics", None):
+            return None
+        from channel_clone import ChannelCloner
+
+        return [topic.id for topic in ChannelCloner._creation_order(self.plan.topics)]
+
 
 def normalize_phone(raw: str) -> Optional[str]:
     """Normaliza telefone internacional sem adivinhar nem remover o DDI."""
@@ -1216,12 +1223,18 @@ class App:
         if getattr(source, "noforwards", False) and config.forward_mode:
             config.forward_mode = False
             ui.info(t("copy.source_protected"))
-        if setup.faithful or (setup.plan is not None and setup.plan.forum):
+        if (
+            setup.faithful
+            or (setup.plan is not None and setup.plan.forum)
+            or (getattr(source, "forum", False) and source_topic)
+        ):
             # Repetições entre tópicos e respostas são conteúdo legítimo.
             # Uma assinatura alteraria o texto original; hashes globais podem
             # descartar a segunda ocorrência de um aviso em outro tópico.
             config.use_dedup = False
             config.signature = ""
+            if int(getattr(config, "daily_limit", DAILY_LIMIT)) == DAILY_LIMIT:
+                config.daily_limit = 0
             ui.info(t("copy.clone.faithful_forum"))
 
         if setup.plan is not None and setup.plan.existing:
@@ -1282,6 +1295,8 @@ class App:
                 return
             config.use_dedup = False
             config.signature = ""
+            if int(getattr(config, "daily_limit", DAILY_LIMIT)) == DAILY_LIMIT:
+                config.daily_limit = 0
 
         from copier import Copier
 
@@ -1298,6 +1313,7 @@ class App:
                 dest_topic=setup.dest_topic,
                 topic_map=topic_map,
                 topic_titles=setup.titles(),
+                topic_order=setup.order(),
             )
         except KeyboardInterrupt:
             ui.warn(t("copy.interrupted"))
@@ -1524,10 +1540,12 @@ class App:
             ui.section(f"{t('multi.dest_label', i=index, total=len(ready))}: "
                        f"{getattr(dest, 'title', dest.id)}")
             config = self.config
-            if setup.faithful:
+            if setup.faithful or (getattr(source, "forum", False) and source_topic):
                 config = RunConfig(**self.config.to_dict())
                 config.use_dedup = False
                 config.signature = ""
+                if int(getattr(config, "daily_limit", DAILY_LIMIT)) == DAILY_LIMIT:
+                    config.daily_limit = 0
             copier = Copier(self.client, repo=db, config=config)
             try:
                 result = await copier.run(
@@ -1537,6 +1555,7 @@ class App:
                     dest_topic=setup.dest_topic,
                     topic_map=setup.topic_map,
                     topic_titles=setup.titles(),
+                    topic_order=setup.order(),
                 )
             except KeyboardInterrupt:
                 ui.warn(t("copy.interrupted"))
@@ -1984,6 +2003,8 @@ class App:
                     else t("copy.clone.kind.group"))
         config = RunConfig(**self.config.to_dict())
         config.use_dedup = False
+        if int(getattr(config, "daily_limit", DAILY_LIMIT)) == DAILY_LIMIT:
+            config.daily_limit = 0
         if getattr(source, "noforwards", False) and config.forward_mode:
             config.forward_mode = False
             ui.info(t("copy.source_protected"))
@@ -2072,6 +2093,7 @@ class App:
                 dest_topic=setup.dest_topic,
                 topic_map=topic_map or None,
                 topic_titles=setup.titles(),
+                topic_order=setup.order(),
             )
         except KeyboardInterrupt:
             ui.warn(t("copy.interrupted"))

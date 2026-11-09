@@ -9,9 +9,9 @@ resultado nunca é marcado como completo nesse modo.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
-from copier import Copier, is_service
+from copier import Copier, is_service, iter_peer_messages
 from filters import apply as filter_apply
 from database import Repository, Status
 from i18n import t
@@ -85,7 +85,9 @@ async def verificar_par(client: Any, repo: Repository, source: Any, dest: Any,
                         max_messages: Optional[int] = None,
                         filter_code: str = "all",
                         source_topic: Optional[int] = None,
-                        dest_topic: Optional[int] = None) -> ResultadoVerificacao:
+                        dest_topic: Optional[int] = None,
+                        topic_map: Optional[Dict[int, int]] = None,
+                        topic_order: Optional[Sequence[int]] = None) -> ResultadoVerificacao:
     """Compara a origem com checkpoints e com o destino real.
 
     ``reparar=True`` só confirma vínculos ausentes quando existe intenção
@@ -100,17 +102,26 @@ async def verificar_par(client: Any, repo: Repository, source: Any, dest: Any,
 
     rows = {int(row["msg_id"]): row for row in repo.checkpoint_rows(source_id, dest_id)}
     source_messages: List[Any] = []
-    kwargs: Dict[str, Any] = {"reverse": True}
-    if source_topic:
-        kwargs["reply_to"] = int(source_topic)
-    async for msg in client.iter_messages(source, **kwargs):
-        if is_service(msg) or not filter_apply(filter_code, msg):
-            continue
-        source_messages.append(msg)
-        if max_messages is not None and len(source_messages) >= int(max_messages):
-            break
-        if limite is not None and len(source_messages) >= int(limite):
-            break
+    if topic_map:
+        collector = Copier(client, repo=repo, rich_ok=False)
+        collected = await collector._collect(
+            source, filter_code, source_topic, topic_map, topic_order=topic_order
+        )
+        for msg in collected:
+            source_messages.append(msg)
+            if max_messages is not None and len(source_messages) >= int(max_messages):
+                break
+            if limite is not None and len(source_messages) >= int(limite):
+                break
+    else:
+        async for msg in iter_peer_messages(client, source, topic_id=source_topic):
+            if is_service(msg) or not filter_apply(filter_code, msg):
+                continue
+            source_messages.append(msg)
+            if max_messages is not None and len(source_messages) >= int(max_messages):
+                break
+            if limite is not None and len(source_messages) >= int(limite):
+                break
 
     known_ids = [int(row["dest_msg_id"]) for row in rows.values()
                  if row.get("status") == Status.DONE.value and row.get("dest_msg_id")]
@@ -123,6 +134,7 @@ async def verificar_par(client: Any, repo: Repository, source: Any, dest: Any,
         return history[topic]
 
     last_by_topic: Dict[Any, int] = {}
+    roots = set(topic_map or {})
 
     def note_order(msg_id: int, topic: Any, remote_id: int) -> None:
         if remote_id <= last_by_topic.get(topic, 0):
@@ -135,7 +147,11 @@ async def verificar_par(client: Any, repo: Repository, source: Any, dest: Any,
         msg_id = int(msg.id)
         row = rows.get(msg_id)
         status = row.get("status") if row else None
-        topic = (row.get("dest_topic") if row else None) or dest_topic
+        mapped_topic = None
+        if topic_map:
+            src_tid = Copier._source_topic_id(msg, roots) or 1
+            mapped_topic = topic_map.get(src_tid)
+        topic = (row.get("dest_topic") if row else None) or mapped_topic or dest_topic
         if status == Status.SKIPPED.value:
             resultado.ignorados.append(msg_id)
             resultado.detalhes.append({"msg_id": msg_id, "motivo": t("verify.skipped")})

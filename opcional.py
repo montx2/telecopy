@@ -98,18 +98,15 @@ def notificar_webhook(url: str, payload: Dict[str, Any], timeout: float = 5.0) -
 async def arquivar(client: Any, source: Any, destino: Path, *,
                    limite: Optional[int] = None, topico: Optional[int] = None) -> Dict[str, Any]:
     """Exportação offline somente leitura: manifesto JSONL + mídia baixada."""
-    from copier import is_service, media_info
+    from copier import is_service, iter_peer_messages, media_info
 
     destino = Path(destino)
     media_dir = destino / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     manifest = destino / "manifest.jsonl"
     total = midias = 0
-    kwargs: Dict[str, Any] = {"reverse": True}
-    if topico:
-        kwargs["reply_to"] = int(topico)
     with manifest.open("w", encoding="utf-8") as fh:
-        async for msg in client.iter_messages(source, **kwargs):
+        async for msg in iter_peer_messages(client, source, topic_id=int(topico) if topico else None):
             if limite is not None and total >= int(limite):
                 break
             total += 1

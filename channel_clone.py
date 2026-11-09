@@ -39,9 +39,10 @@ class ForumTopicSpec:
     closed: bool = False
     pinned: bool = False
     hidden: bool = False
-    # Data da última atividade informada pela API; usada só para ordenar a
-    # criação dos tópicos como no fórum de origem.
+    # Data da última atividade (top_message em response.messages, com fallback
+    # para topic.date); usada junto com top_message para ordenar tópicos como na origem.
     date: Optional[datetime] = None
+    top_message: int = 0
 
 
 @dataclass(frozen=True)
@@ -412,7 +413,8 @@ class ChannelCloner:
             return "", str(exc)
 
     @staticmethod
-    def _spec(topic) -> ForumTopicSpec:
+    def _spec(topic, activity_date: Optional[datetime] = None) -> ForumTopicSpec:
+        stamp = activity_date if activity_date is not None else getattr(topic, "date", None)
         return ForumTopicSpec(
             id=int(topic.id),
             title=str(getattr(topic, "title", "") or ""),
@@ -422,7 +424,8 @@ class ChannelCloner:
             closed=bool(getattr(topic, "closed", False)),
             pinned=bool(getattr(topic, "pinned", False)),
             hidden=bool(getattr(topic, "hidden", False)),
-            date=getattr(topic, "date", None),
+            date=stamp,
+            top_message=int(getattr(topic, "top_message", 0) or 0),
         )
 
     @staticmethod
@@ -445,6 +448,13 @@ class ChannelCloner:
                 offset_topic=offset_topic, limit=FORUM_PAGE_SIZE,
             ))
             page_topics = list(getattr(response, "topics", None) or [])
+            page_messages = list(getattr(response, "messages", None) or [])
+            msg_dates = {
+                int(getattr(m, "id", 0) or 0): getattr(m, "date", None)
+                for m in page_messages
+                if int(getattr(m, "id", 0) or 0) > 0
+            }
+            by_create = bool(getattr(response, "order_by_create_date", False))
             total = getattr(response, "count", None)
 
             for topic in page_topics:
@@ -452,7 +462,13 @@ class ChannelCloner:
                     continue
                 topic_id = int(getattr(topic, "id", 0) or 0)
                 if topic_id > 0:
-                    collected[topic_id] = self._spec(topic)
+                    top_msg_id = int(getattr(topic, "top_message", 0) or 0)
+                    activity = (
+                        getattr(topic, "date", None)
+                        if by_create
+                        else (msg_dates.get(top_msg_id) or getattr(topic, "date", None))
+                    )
+                    collected[topic_id] = self._spec(topic, activity_date=activity)
 
             if not page_topics:
                 break
@@ -460,9 +476,15 @@ class ChannelCloner:
                 break
 
             last = page_topics[-1]
+            last_top = int(getattr(last, "top_message", 0) or 0)
+            last_offset_date = (
+                getattr(last, "date", None)
+                if by_create
+                else (msg_dates.get(last_top) or getattr(last, "date", None))
+            )
             next_cursor = (
-                getattr(last, "date", None),
-                int(getattr(last, "top_message", 0) or 0),
+                last_offset_date,
+                last_top,
                 int(getattr(last, "id", 0) or 0),
             )
             if next_cursor == (offset_date, offset_id, offset_topic):
@@ -524,16 +546,21 @@ class ChannelCloner:
     def _creation_order(topics: Sequence[ForumTopicSpec]) -> List[ForumTopicSpec]:
         """Do tópico com menos atividade recente para o com mais atividade.
 
-        O Telegram ordena os tópicos pela última atividade e ``GetForumTopics``
-        devolve os mais recentes primeiro. Criar nessa ordem inverte a lista
-        final do destino; criando do mais antigo para o mais recente, o último
-        tópico criado é o que estava no topo da origem.
+        O Telegram ordena os tópicos pela última atividade (``top_message``) e
+        ``GetForumTopics`` devolve os mais recentes primeiro. Criar e popular
+        do menos recente ao mais recente faz o último tópico ficar no topo do
+        destino, espelhando exatamente a ordem visual da origem.
         """
         def key(item: Tuple[int, ForumTopicSpec]):
             index, topic = item
             stamp = topic.date
-            seconds = stamp.timestamp() if isinstance(stamp, datetime) else float("-inf")
-            return (0 if topic.id == 1 else 1, seconds, -index)
+            if isinstance(stamp, datetime):
+                seconds = stamp.timestamp()
+                top_msg = int(getattr(topic, "top_message", 0) or 0)
+            else:
+                seconds = float("-inf")
+                top_msg = 0
+            return (0 if topic.id == 1 else 1, seconds, top_msg, -index)
 
         return [topic for _index, topic in sorted(enumerate(topics), key=key)]
 

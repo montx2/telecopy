@@ -20,12 +20,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import itertools
 import json
 import os
 import re
 import shutil
 import time
-from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -676,6 +676,170 @@ def sweep_temp(max_age_seconds: float = 24 * 3600) -> int:
     return removed
 
 
+async def iter_peer_messages(
+    client: Any,
+    peer: Any,
+    *,
+    topic_id: Optional[int] = None,
+    stop_check: Optional[Any] = None,
+    on_flood: Optional[Any] = None,
+    on_progress: Optional[Any] = None,
+):
+    """Lê todas as mensagens de ``peer`` (ou de ``topic_id``) em ordem crescente de ID.
+
+    Evita ``iter_messages(..., reverse=True)`` do Telethon: quando restam menos
+    de 100 mensagens no último bloco de ``GetRepliesRequest``/``GetHistoryRequest``,
+    ``add_offset=-100`` faz o servidor devolver IDs já vistos (``<= last_id``) e
+    ``_MessagesIter._load_next_chunk`` encerra prematuramente descartando o final
+    do tópico. Paginar do mais novo ao mais antigo (``add_offset=0``,
+    ``offset_date=None``) usando apenas ``offset_id`` elimina o truncamento e
+    qualquer ambiguidade por relógio/data.
+    """
+    use_raw = isinstance(client, TelegramClient) or bool(
+        getattr(client, "_raw_mtproto_history", False)
+    )
+    if not use_raw:
+        kwargs: Dict[str, Any] = {"reverse": False}
+        if topic_id:
+            kwargs["reply_to"] = int(topic_id)
+        by_id_fake: Dict[int, Any] = {}
+        async for msg in client.iter_messages(peer, **kwargs):
+            if stop_check is not None and stop_check():
+                break
+            mid = int(getattr(msg, "id", 0) or 0)
+            if mid > 0 and mid not in by_id_fake:
+                by_id_fake[mid] = msg
+                if on_progress is not None:
+                    on_progress(len(by_id_fake))
+        for mid in sorted(by_id_fake):
+            yield by_id_fake[mid]
+        return
+
+    input_peer = await client.get_input_entity(peer)
+    is_general_forum = (
+        topic_id is not None
+        and int(topic_id) == 1
+        and bool(getattr(peer, "forum", False))
+    )
+    reply_root = None if is_general_forum else (int(topic_id) if topic_id else None)
+
+    by_id: Dict[int, Any] = {}
+    offset_id = 0
+    page_size = 100
+
+    while True:
+        if stop_check is not None and stop_check():
+            break
+        if reply_root is not None:
+            request = functions.messages.GetRepliesRequest(
+                peer=input_peer,
+                msg_id=reply_root,
+                offset_id=offset_id,
+                offset_date=None,
+                add_offset=0,
+                limit=page_size,
+                max_id=0,
+                min_id=0,
+                hash=0,
+            )
+        else:
+            request = functions.messages.GetHistoryRequest(
+                peer=input_peer,
+                offset_id=offset_id,
+                offset_date=None,
+                add_offset=0,
+                limit=page_size,
+                max_id=0,
+                min_id=0,
+                hash=0,
+            )
+
+        response = None
+        for attempt in range(5):
+            try:
+                response = await client(request)
+                break
+            except FloodError as exc:
+                if attempt == 4:
+                    raise
+                if on_flood is not None:
+                    await on_flood(exc)
+                else:
+                    await asyncio.sleep(max(1, int(getattr(exc, "seconds", 5) or 5)) + 1)
+
+        raw_messages = list(getattr(response, "messages", None) or [])
+        if not raw_messages:
+            break
+
+        entities = {
+            tl_utils.get_peer_id(x): x
+            for x in itertools.chain(
+                getattr(response, "users", None) or [],
+                getattr(response, "chats", None) or [],
+            )
+        }
+        batch_ids: List[int] = []
+        for msg in raw_messages:
+            mid = int(getattr(msg, "id", 0) or 0)
+            if mid <= 0:
+                continue
+            batch_ids.append(mid)
+            if isinstance(msg, types.MessageEmpty) or mid in by_id:
+                continue
+            finish = getattr(msg, "_finish_init", None)
+            if callable(finish) and hasattr(client, "_mb_entity_cache"):
+                finish(client, entities, input_peer)
+            by_id[mid] = msg
+            if on_progress is not None:
+                on_progress(len(by_id))
+
+        if not batch_ids:
+            break
+        min_id = min(batch_ids)
+        if min_id <= 1 or (offset_id > 0 and min_id >= offset_id):
+            break
+        offset_id = min_id
+
+    if is_general_forum:
+        known: Dict[int, int] = {}
+        for mid in sorted(by_id):
+            msg = by_id[mid]
+            action = getattr(msg, "action", None)
+            if type(action).__name__ == "MessageActionTopicCreate":
+                known[mid] = mid
+                continue
+            reply = getattr(msg, "reply_to", None)
+            top = getattr(reply, "reply_to_top_id", None) if reply else None
+            parent = getattr(reply, "reply_to_msg_id", None) if reply else None
+            if parent is None:
+                parent = getattr(msg, "reply_to_msg_id", None)
+            if top:
+                tid = int(top)
+            elif parent is not None and int(parent) in known:
+                tid = known[int(parent)]
+            elif parent is not None and bool(getattr(reply, "forum_topic", False)):
+                tid = int(parent)
+            else:
+                tid = 1
+            known[mid] = tid
+            if tid == 1:
+                try:
+                    msg._telecopy_topic_id = 1
+                except AttributeError:
+                    pass
+                yield msg
+        return
+
+    for mid in sorted(by_id):
+        msg = by_id[mid]
+        if reply_root is not None:
+            try:
+                msg._telecopy_topic_id = reply_root
+            except AttributeError:
+                pass
+        yield msg
+
+
 class Copier:
     """Copia o histórico (ou espelha em tempo real) de um canal para outro."""
 
@@ -707,6 +871,7 @@ class Copier:
         self._force_reference = False
         self.max_messages: Optional[int] = None
         self._marker_attempted: set = set()
+        self._msg_topics: Dict[int, int] = {}
 
     # -- controle -----------------------------------------------------------
 
@@ -772,9 +937,11 @@ class Copier:
         forward: Optional[bool] = None,
         session_id: Optional[str] = None,
         topic_titles: Optional[Dict[int, str]] = None,
+        topic_order: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         self._stop = False
         self._marker_attempted.clear()
+        self._msg_topics.clear()
         self._force_reference = False
         self._flood_penalty = 0.0
         self._flood_successes = 0
@@ -808,7 +975,9 @@ class Copier:
         self.dedup.warm_up(dest_id, limit=200_000)
 
         print(f"\n  {C.CYAN}·{C.RST}  {t('copy.indexing')}…", end="", flush=True)
-        messages = await self._collect(source, filter_code, source_topic, topic_map)
+        messages = await self._collect(
+            source, filter_code, source_topic, topic_map, topic_order=topic_order
+        )
         if self.max_messages is not None and self.max_messages > 0:
             messages = messages[:int(self.max_messages)]
         print(f"\r  {C.GREEN}✓{C.RST}  {Fmt.number(len(messages))} {t('copy.found')}            ")
@@ -838,11 +1007,17 @@ class Copier:
 
         if resume and completed_before:
             before = sum(len(i) if isinstance(i, list) else 1 for i in items)
-            items = [
-                item for item in items
-                if not all(m.id in completed_before
-                           for m in (item if isinstance(item, list) else [item]))
-            ]
+            remaining_items: List[QueueItem] = []
+            for item in items:
+                if isinstance(item, list):
+                    rem = [m for m in item if m.id not in completed_before]
+                    if len(rem) > 1:
+                        remaining_items.append(rem)
+                    elif len(rem) == 1:
+                        remaining_items.append(rem[0])
+                elif item.id not in completed_before:
+                    remaining_items.append(item)
+            items = remaining_items
             after = sum(len(i) if isinstance(i, list) else 1 for i in items)
             if before - after:
                 print(f"  {C.GRAY}·{C.RST}  {Fmt.number(before - after)} {t('copy.already')}")
@@ -899,11 +1074,18 @@ class Copier:
         # ValueError/OSError históricos do transporte padrão ainda são transitórios.
         return isinstance(exc, (ValueError, OSError, asyncio.TimeoutError))
 
-    @staticmethod
-    def _position_resolved(row: Optional[Dict[str, Any]]) -> bool:
+    def _position_resolved(self, row: Optional[Dict[str, Any]], *,
+                           in_collection: bool = True) -> bool:
         if not row:
             return False
-        return row.get("status") in {"done", "skipped"} or row.get("ph_dest_msg_id") is not None
+        if row.get("ph_dest_msg_id") is not None:
+            return True
+        status = row.get("status")
+        if status == Status.DONE.value:
+            return True
+        if status == Status.SKIPPED.value and (self.cfg.use_dedup or not in_collection):
+            return True
+        return False
 
     def _preflight_order(self, messages: List[Any], source_id: int, dest_id: int,
                          topic_map: Optional[Dict[int, int]],
@@ -934,7 +1116,7 @@ class Copier:
         # qualquer item posterior do mesmo tópico abriria um buraco.
         hidden: Dict[Any, int] = {}
         for mid, row in snapshot.items():
-            if mid in collected or self._position_resolved(row):
+            if mid in collected or self._position_resolved(row, in_collection=False):
                 continue
             key = row.get("dest_topic")
             if key not in hidden or mid < hidden[key]:
@@ -952,7 +1134,7 @@ class Copier:
                 violations.append({"topic": topic, "pending": unseen, "terminal": int(msg.id)})
                 continue
             row = snapshot.get(int(msg.id))
-            if self._position_resolved(row):
+            if self._position_resolved(row, in_collection=True):
                 if topic in pending:
                     violations.append({"topic": topic, "pending": pending[topic], "terminal": int(msg.id)})
             else:
@@ -1012,86 +1194,194 @@ class Copier:
 
     async def _collect(self, source, filter_code: str,
                        topic_id: Optional[int],
-                       topic_map: Optional[Dict[int, int]] = None) -> List[Any]:
-        """Lê cada tópico e também o histórico global, unindo por ID.
+                       topic_map: Optional[Dict[int, int]] = None,
+                       *,
+                       topic_order: Optional[Sequence[int]] = None) -> List[Any]:
+        """Lê cada tópico e o histórico global sem truncamento, preservando o tópico real.
 
-        ``messages.getHistory`` sozinho não é uma fonte confiável para todos os
-        tópicos de um fórum; ``messages.getReplies`` de cada raiz cobre as
-        mensagens que o histórico global pode omitir. FloodWait nunca é tratado
-        como fim-da-lista: a leitura é repetida ou a execução falha explicitamente.
+        1) ``GetReplies`` de cada tópico não-General carimba ``_telecopy_topic_id``
+           com o tópico exato confirmado pelo servidor (mesmo em replies aninhadas
+           sem ``reply_to_top_id``).
+        2) ``GetHistory`` cobre o General (``1``) e resolve cadeias de resposta,
+           sem sobrescrever mensagens já lidas nos tópicos e ignorando órfãs de
+           tópicos apagados na origem.
+        3) Quando ``topic_order`` é fornecido (clonagem estruturada de fórum),
+           ordena tópico por tópico na ordem exata de criação/atividade e em ID
+           crescente estrito dentro de cada tópico.
         """
-        if topic_id:
-            streams: List[Optional[int]] = [int(topic_id)]
-        elif topic_map:
-            streams = [int(tid) for tid in sorted(topic_map)] + [None]
-        else:
-            streams = [None]
-
         by_id: Dict[int, Any] = {}
-        for stream_topic in streams:
-            for attempt in range(5):
-                try:
-                    async for msg in self._collect_stream(source, filter_code, stream_topic):
-                        by_id[int(msg.id)] = msg
-                    break
-                except FloodError as exc:
-                    if attempt == 4:
-                        raise RuntimeError(self._explain(exc)) from exc
-                    await self._handle_flood(exc)
-                except RPCError as exc:
-                    # Algumas versões da API não aceitam getReplies(1) para o
-                    # General; o histórico global já cobre esse tópico.
-                    if stream_topic == 1:
-                        logger.warning(f"Leitura específica do General indisponível: {exc}")
-                        break
-                    logger.error(f"Falha ao ler a origem: {exc}")
-                    raise RuntimeError(self._explain(exc)) from exc
+
+        if topic_id:
+            tid = int(topic_id)
+            async for msg in self._read_stream_with_retry(source, tid):
+                mid = int(msg.id)
+                self._tag_topic(msg, tid)
+                if not is_service(msg) and filter_apply(filter_code, msg):
+                    by_id[mid] = msg
+            return [by_id[key] for key in sorted(by_id)]
+
+        if not topic_map:
+            async for msg in self._read_stream_with_retry(source, None):
+                if not is_service(msg) and filter_apply(filter_code, msg):
+                    by_id[int(msg.id)] = msg
+            return [by_id[key] for key in sorted(by_id)]
+
+        mapped_ids = {int(t) for t in topic_map}
+        non_general = [t for t in sorted(mapped_ids) if t != 1]
+        for stream_topic in non_general:
+            async for msg in self._read_stream_with_retry(source, stream_topic):
+                mid = int(msg.id)
+                self._tag_topic(msg, stream_topic)
+                if not is_service(msg) and filter_apply(filter_code, msg):
+                    by_id[mid] = msg
+
+        known_topics: Dict[int, int] = dict(self._msg_topics)
+        for root_id in mapped_ids:
+            known_topics.setdefault(root_id, root_id)
+
+        async for msg in self._read_stream_with_retry(source, None):
+            mid = int(msg.id)
+            action = getattr(msg, "action", None)
+            if type(action).__name__ == "MessageActionTopicCreate":
+                known_topics[mid] = mid
+                continue
+            if mid in self._msg_topics:
+                known_topics[mid] = self._msg_topics[mid]
+                if mid not in by_id and not is_service(msg) and filter_apply(filter_code, msg):
+                    self._tag_topic(msg, self._msg_topics[mid])
+                    by_id[mid] = msg
+                continue
+
+            reply = getattr(msg, "reply_to", None)
+            top = getattr(reply, "reply_to_top_id", None) if reply else None
+            parent = getattr(reply, "reply_to_msg_id", None) if reply else None
+            if parent is None:
+                parent = getattr(msg, "reply_to_msg_id", None)
+
+            if top:
+                resolved_tid = int(top)
+            elif parent is not None and int(parent) in known_topics:
+                resolved_tid = known_topics[int(parent)]
+            elif parent is not None and (
+                int(parent) in mapped_ids or bool(getattr(reply, "forum_topic", False))
+            ):
+                resolved_tid = int(parent)
+            else:
+                resolved_tid = 1
+
+            known_topics[mid] = resolved_tid
+            if resolved_tid not in mapped_ids:
+                logger.debug(f"Ignorando msg {mid} de tópico não mapeado/apagado {resolved_tid}")
+                continue
+            self._tag_topic(msg, resolved_tid)
+            if not is_service(msg) and filter_apply(filter_code, msg):
+                by_id[mid] = msg
+
+        if topic_order:
+            rank = {int(t): idx for idx, t in enumerate(topic_order)}
+            max_by_topic: Dict[int, int] = {}
+            for mid, msg in by_id.items():
+                tid = self._source_topic_id(msg, mapped_ids) or 1
+                if mid > max_by_topic.get(tid, 0):
+                    max_by_topic[tid] = mid
+            return sorted(
+                by_id.values(),
+                key=lambda m: (
+                    max_by_topic.get(self._source_topic_id(m, mapped_ids) or 1, 0),
+                    rank.get(self._source_topic_id(m, mapped_ids) or 1, len(rank)),
+                    self._source_topic_id(m, mapped_ids) or 1,
+                    int(m.id),
+                ),
+            )
         return [by_id[key] for key in sorted(by_id)]
 
+    def _tag_topic(self, msg: Any, topic_id: int) -> None:
+        tid = int(topic_id)
+        self._msg_topics[int(msg.id)] = tid
+        try:
+            msg._telecopy_topic_id = tid
+        except AttributeError:
+            pass
+
+    async def _read_stream_with_retry(self, source, topic_id: Optional[int]):
+        for attempt in range(5):
+            try:
+                count = 0
+
+                def _progress(seen: int) -> None:
+                    nonlocal count
+                    count = seen
+                    if count % 500 == 0:
+                        print(f"\r  {C.CYAN}·{C.RST}  {Fmt.number(count)} "
+                              f"{t('copy.indexed')}…", end="", flush=True)
+
+                async for msg in iter_peer_messages(
+                    self.client,
+                    source,
+                    topic_id=topic_id,
+                    stop_check=lambda: self._stop,
+                    on_flood=self._handle_flood,
+                    on_progress=_progress,
+                ):
+                    if self._stop:
+                        break
+                    yield msg
+                return
+            except FloodError as exc:
+                if attempt == 4:
+                    raise RuntimeError(self._explain(exc)) from exc
+                await self._handle_flood(exc)
+            except RPCError as exc:
+                if topic_id == 1:
+                    logger.warning(f"Leitura específica do General indisponível: {exc}")
+                    return
+                logger.error(f"Falha ao ler a origem: {exc}")
+                raise RuntimeError(self._explain(exc)) from exc
+
     async def _collect_stream(self, source, filter_code: str, topic_id: Optional[int]):
-        kwargs: Dict[str, Any] = {"reverse": True}
-        if topic_id:
-            kwargs["reply_to"] = int(topic_id)
-        count = 0
-        async for msg in self.client.iter_messages(source, **kwargs):
-            if self._stop:
-                break
+        async for msg in self._read_stream_with_retry(source, topic_id):
             if is_service(msg) or not filter_apply(filter_code, msg):
                 continue
-            count += 1
-            if count % 500 == 0:
-                print(f"\r  {C.CYAN}·{C.RST}  {Fmt.number(count)} "
-                      f"{t('copy.indexed')}…", end="", flush=True)
             yield msg
 
     @classmethod
     def _group(cls, messages: Sequence[Any], topic_roots: Optional[set] = None) -> List[QueueItem]:
+        """Agrupa somente itens contíguos do mesmo álbum e tópico, preservando sequência estrita."""
         roots = topic_roots or set()
-        albums: Dict[Tuple[Optional[int], int], List[Any]] = defaultdict(list)
-        for msg in messages:
-            gid = getattr(msg, "grouped_id", None)
-            if gid:
-                key = (cls._source_topic_id(msg, roots), int(gid))
-                albums[key].append(msg)
-
         items: List[QueueItem] = []
-        seen: set = set()
+        current_key: Optional[Tuple[Optional[int], int]] = None
+        current_group: List[Any] = []
+
+        def flush() -> None:
+            nonlocal current_key, current_group
+            if not current_group:
+                return
+            items.append(current_group if len(current_group) > 1 else current_group[0])
+            current_key = None
+            current_group = []
+
         for msg in messages:
             gid = getattr(msg, "grouped_id", None)
             if not gid:
+                flush()
                 items.append(msg)
                 continue
             key = (cls._source_topic_id(msg, roots), int(gid))
-            if key in seen:
-                continue
-            seen.add(key)
-            group = albums[key]
-            items.append(group if len(group) > 1 else group[0])
+            if current_key == key:
+                current_group.append(msg)
+            else:
+                flush()
+                current_key = key
+                current_group = [msg]
+        flush()
         return items
 
     @staticmethod
     def _source_topic_id(msg, topic_roots: Optional[set] = None) -> Optional[int]:
         """Tópico real, distinguindo a raiz do fórum de uma reply dentro dele."""
+        tagged = getattr(msg, "_telecopy_topic_id", None)
+        if tagged is not None:
+            return int(tagged)
         roots = {int(x) for x in (topic_roots or set())}
         action = getattr(msg, "action", None)
         if type(action).__name__ == "MessageActionTopicCreate":
@@ -1851,10 +2141,11 @@ class Copier:
             if checkpoint_pair is not None:
                 source_id, dest_id = checkpoint_pair
                 route = self.repo.checkpoint_route(source_id, dest_id, msg.id)
-                if (route.get("status") in {Status.PENDING.value, Status.ERROR.value}
+                if (route.get("status") in {Status.DONE.value, Status.PENDING.value, Status.ERROR.value}
                         and route.get("dest_msg_id")):
                     entry.update({
                         "already_sent": True,
+                        "already_done": route.get("status") == Status.DONE.value,
                         "dest_msg_id": int(route["dest_msg_id"]),
                         "text_parts_sent": int(route.get("continuation_parts_sent") or 0),
                         "_source_id": source_id,
@@ -2133,8 +2424,10 @@ class Copier:
             entry["_source_id"] = source_id
             entry["_dest_id"] = dest_id
             route = self.repo.checkpoint_route(source_id, dest_id, entry["msg"].id)
-            if route.get("status") in {Status.PENDING.value, Status.ERROR.value} and route.get("dest_msg_id"):
+            if (route.get("status") in {Status.DONE.value, Status.PENDING.value, Status.ERROR.value}
+                    and route.get("dest_msg_id")):
                 entry["already_sent"] = True
+                entry["already_done"] = route.get("status") == Status.DONE.value
                 entry["dest_msg_id"] = int(route["dest_msg_id"])
                 entry["text_parts_sent"] = int(route.get("continuation_parts_sent") or 0)
 
@@ -2214,6 +2507,10 @@ class Copier:
                     continue
                 confirmed_id = entry.get("dest_msg_id")
                 if confirmed_id:
+                    if entry.get("already_done"):
+                        sent_ids[msg.id] = int(confirmed_id)
+                        index += 1
+                        continue
                     # Já aceito pelo Telegram numa tentativa anterior: reenviar
                     # criaria duplicata e quebraria a ordem. Só faltam continuações.
                     has_media = bool(entry.get("has_media") or entry.get("path")
@@ -2270,7 +2567,7 @@ class Copier:
             raise
 
         for entry in plan:
-            if entry.get("failed"):
+            if entry.get("failed") or entry.get("already_done"):
                 continue
             msg = entry["msg"]
             created_id = sent_ids.get(msg.id) or entry.get("dest_msg_id")
