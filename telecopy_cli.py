@@ -147,7 +147,7 @@ async def executar(args: argparse.Namespace, client: Any, repo: Repository) -> i
             if args.json:
                 print(json.dumps(resultado, ensure_ascii=False))
             return 0 if resultado.get("ok") else 1
-        return run_doctor()
+        return run_doctor(json_mode=args.json)
 
     if args.comando == "archive":
         from opcional import arquivar
@@ -233,7 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     set_lang(args.lang)
     if args.comando == "doctor" and not args.auth:
         from doctor import run_doctor
-        return run_doctor()
+        return run_doctor(json_mode=args.json)
     if args.comando == "ui":
         from opcional import servir_ui
         return servir_ui(args.report_dir, args.token, args.host, args.port)

@@ -8,7 +8,7 @@ O trabalho cobre auditoria, correções de integridade, CLI não interativa,
 recursos opt-in, testes de regressão/caos/soak, CI, empacotamento e
 documentação. A suíte final está verde:
 
-- **344 testes passaram** em ~67s, sem rede real (`docs/evidencias/main-sinais-suite.txt`).
+- **348 testes passaram** em ~67s, sem rede real (`docs/evidencias/doctor-json-suite.txt`).
 - **Ruff limpo** nas regras configuradas (`docs/evidencias/ruff-final.txt`).
 - **Wheel/sdist construídos** e smoke test do wheel instalado (`docs/evidencias/build.txt`).
 - **Mutação**: `politica_erros.py` com **100/100 mutantes mortos**, 0 sobreviventes
@@ -36,7 +36,8 @@ Tudo que depende da rede real permanece não validado em produção.
 
 ### Operação não interativa
 - CLI `telecopy` com `clone`, `verify`, `archive`, `ui`, `doctor`; JSON, rehearsal,
-  relatório HTML+JSON, códigos de saída 0/1/2.
+  relatório HTML+JSON, códigos de saída 0/1/2. `doctor --json` emite JSON puro
+  (`{ok, checks, problems}`); o texto humano continua o padrão sem a flag.
 - Sinais portáveis (SIGINT/SIGTERM/SIGBREAK quando existir), restauração de
   handlers e cancelamento via `call_soon_threadsafe`; CLI não abre prompt em erro.
 - O entrypoint interativo (`main.py`) também converte SIGTERM/SIGBREAK em
@@ -71,7 +72,7 @@ Tudo que depende da rede real permanece não validado em produção.
 
 | Critério | Estado | Evidência |
 |---|---|---|
-| Suíte verde sem rede | **Atendido** | `main-sinais-suite.txt` (344 passed) |
+| Suíte verde sem rede | **Atendido** | `doctor-json-suite.txt` (348 passed) |
 | Lint limpo | **Atendido** | `ruff-final.txt` |
 | Regressões antes/depois | **Atendido** | `docs/evidencias/*-antes.txt` / `*-depois.txt` |
 | Empacotamento + smoke | **Atendido local** | `build.txt` |

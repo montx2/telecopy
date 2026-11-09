@@ -1,0 +1,56 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+____________________________ test_doctor_json_puro _____________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7faf673bb1d0>
+
+    def test_doctor_json_puro(monkeypatch) -> None:
+>       data = _run_json(monkeypatch)
+               ^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_doctor_json.py:38: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7faf673bb1d0>
+
+    def _run_json(monkeypatch) -> dict:
+        # Evita rede real no diagnóstico.
+        import socket
+    
+        class _Conn:
+            def __enter__(self):
+                return self
+    
+            def __exit__(self, *a):
+                return False
+    
+        monkeypatch.setattr(socket, "create_connection", lambda *a, **k: _Conn())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+>           code = doctor.run_doctor(json_mode=True)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: run_doctor() got an unexpected keyword argument 'json_mode'
+
+tests/test_doctor_json.py:25: TypeError
+________________________ test_doctor_json_reporta_falha ________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7faf673c9310>
+
+    def test_doctor_json_reporta_falha(monkeypatch) -> None:
+        import socket
+    
+        def sem_rede(*a, **k):
+            raise OSError("sem rede")
+    
+        monkeypatch.setattr(socket, "create_connection", sem_rede)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+>           code = doctor.run_doctor(json_mode=True)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: run_doctor() got an unexpected keyword argument 'json_mode'
+
+tests/test_doctor_json.py:53: TypeError
+=========================== short test summary info ============================
+FAILED tests/test_doctor_json.py::test_doctor_json_puro - TypeError: run_doct...
+FAILED tests/test_doctor_json.py::test_doctor_json_reporta_falha - TypeError:...
+2 failed, 1 passed in 0.48s

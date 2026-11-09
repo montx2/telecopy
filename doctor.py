@@ -12,12 +12,14 @@ O diagnóstico padrão não conecta ao Telegram e não altera nada.
 from __future__ import annotations
 
 import importlib
+import json
 import socket
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
 OK, WARN, FAIL = "✓", "!", "✗"
+_STATUS = {OK: "ok", WARN: "warn", FAIL: "fail"}
 TELETHON_PIN = "1.45.0"
 FAST_INTERNALS = ("_create_exported_sender", "_borrow_exported_sender",
                   "_return_exported_sender")
@@ -37,15 +39,27 @@ def _tail_problems(log_file: Path, limit: int = 8) -> List[str]:
     return found[-limit:]
 
 
-def run_doctor() -> int:
+def run_doctor(json_mode: bool = False) -> int:
     problems: List[Tuple[str, str]] = []
+    checks: List[dict] = []
 
     def record(mark: str, label: str, detail: str = "", fix: str = "") -> None:
-        _line(mark, label, detail)
+        checks.append({"check": label, "status": _STATUS.get(mark, "warn"),
+                       "detail": detail, "fix": fix or (detail if mark == FAIL else "")})
+        if not json_mode:
+            _line(mark, label, detail)
         if mark == FAIL:
             problems.append((label, fix or detail))
 
-    print("\n  TELECOPY — diagnóstico\n")
+    def finish(code: int) -> int:
+        if json_mode:
+            print(json.dumps({"ok": code == 0, "checks": checks,
+                              "problems": [{"check": label, "fix": fix} for label, fix in problems]},
+                             ensure_ascii=False))
+        return code
+
+    if not json_mode:
+        print("\n  TELECOPY — diagnóstico\n")
 
     # Python ---------------------------------------------------------------
     py = sys.version.split()[0]
@@ -102,9 +116,10 @@ def run_doctor() -> int:
     # Dados / login ---------------------------------------------------------
     try:
         from config import DATA_DIR, LOG_FILE, SESSION_FILE, VAULT_FILE, hardware_profiles
-    except Exception:  # noqa: BLE001
-        print("\n  Não foi possível carregar config.py — corrija o erro acima primeiro.\n")
-        return 1
+    except Exception as exc:  # noqa: BLE001
+        record(FAIL, "config", f"{type(exc).__name__}: {exc}",
+               "Não foi possível carregar config.py — corrija o erro acima primeiro.")
+        return finish(1)
 
     try:
         probe = DATA_DIR / ".telecopy-doctor"
@@ -152,10 +167,13 @@ def run_doctor() -> int:
 
     # Últimos erros do log ----------------------------------------------------
     recent = _tail_problems(LOG_FILE)
-    if recent:
+    if recent and not json_mode:
         print("\n  Últimos erros no log:")
         for row in recent:
             print(f"    · {row[:150]}")
+
+    if json_mode:
+        return finish(1 if problems else 0)
 
     print()
     if problems:
